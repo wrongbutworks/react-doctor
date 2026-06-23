@@ -100,3 +100,7 @@ Every redundancy finding carries a confidence tier (`high` / `medium` / `low`) v
 ### Skipped files
 
 Files identified as empty, binary, or minified bundles are skipped with an `info`-severity `analysisErrors` note. This isn't an error. It means the file looked machine-generated or non-source and was excluded from analysis to avoid producing irrelevant findings.
+
+## License
+
+Modified MIT License. See `LICENSE`; AI/ML training or evaluation use and paid hosted resale require prior written permission from founders@million.dev.

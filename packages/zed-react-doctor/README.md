@@ -42,3 +42,7 @@ Zed compiles the Rust extension to WebAssembly on install. Reload the extension 
 ## Roadmap
 
 - Publishing to the Zed extension registry is a planned follow-up.
+
+## License
+
+Modified MIT License. See `LICENSE`; AI/ML training or evaluation use and paid hosted resale require prior written permission from founders@million.dev.

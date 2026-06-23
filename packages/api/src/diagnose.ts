@@ -6,7 +6,6 @@ import {
   DEFAULT_PROJECT_SCAN_CONCURRENCY,
   DEFAULT_SHOW_WARNINGS,
   DeadCode,
-  detectAiTrainingEnvironment,
   Files,
   Git,
   layerOtlp,
@@ -22,6 +21,7 @@ import {
   runInspect,
   Score,
   SupplyChain,
+  warnAiTrainingLicenseOnce,
   type InspectOutput,
   type ResolvedScanTarget,
 } from "@react-doctor/core";
@@ -36,58 +36,58 @@ import type {
   ScoreResult,
 } from "@react-doctor/core";
 
-// The CLI carries the richer warning (logger + telemetry); the library only
-// has stdout, so it warns once per process via console.warn when a scan runs
-// inside an AI/ML training environment (license requires written permission).
-let didWarnAiTraining = false;
 const warnIfAiTrainingEnvironment = (): void => {
-  if (didWarnAiTraining || detectAiTrainingEnvironment() === null) return;
-  didWarnAiTraining = true;
-  console.warn(
-    "[react-doctor] Use in an AI or ML pipeline requires written permission under the react-doctor license. Contact founders@million.dev to request access.",
-  );
+  warnAiTrainingLicenseOnce({
+    write: (message) => {
+      process.stderr.write(`[react-doctor] ${message}\n`);
+    },
+  });
 };
 
-// The production layer stack for the programmatic API. The only axis that
-// varies across calls is `Config`: with no override we load from disk
-// (`Config.layerNode`); with a per-project override the caller's already
-// resolved config drives `Config.layerOf(...)`. The supply-chain gate reads
-// `supplyChain.enabled` from that same effective config (default on), so the
-// one config input decides both. Every other service is identical, so the
-// stack is built once here rather than duplicated per variant.
-const buildDiagnoseLayer = (
-  config: ReactDoctorConfig | null,
-  configOverrideTarget?: Pick<ResolvedScanTarget, "resolvedDirectory" | "configSourceDirectory">,
-) => {
-  const configLayer =
-    configOverrideTarget === undefined
-      ? Config.layerNode
-      : Config.layerOf({
-          config,
-          resolvedDirectory: configOverrideTarget.resolvedDirectory,
-          configSourceDirectory: configOverrideTarget.configSourceDirectory,
-        });
+interface BuildDiagnoseLayerInput {
+  readonly config: ReactDoctorConfig | null;
+  readonly configSourceDirectory: string | null;
+  readonly resolvedDirectory: string;
+  readonly shouldRunDeadCode: boolean;
+  readonly shouldRunLint: boolean;
+}
+
+const buildDiagnoseLayer = (input: BuildDiagnoseLayerInput) => {
+  const configLayer = Config.layerOf({
+    config: input.config,
+    resolvedDirectory: input.resolvedDirectory,
+    configSourceDirectory: input.configSourceDirectory,
+  });
   return Layer.mergeAll(
     Project.layerNode,
     configLayer,
-    DeadCode.layerNode,
+    input.shouldRunDeadCode ? DeadCode.layerNode : DeadCode.layerOf([]),
     Files.layerNode,
     Git.layerNode,
-    Linter.layerOxlint,
+    input.shouldRunLint ? Linter.layerOxlint : Linter.layerOf([]),
     LintPartialFailures.layerLive,
     Progress.layerNoop,
     Reporter.layerNoop,
     Score.layerHttp,
-    config?.supplyChain?.enabled !== false ? SupplyChain.layerNode : SupplyChain.layerOf([]),
+    input.config?.supplyChain?.enabled !== false ? SupplyChain.layerNode : SupplyChain.layerOf([]),
   );
 };
+
+const shouldRunDeadCode = (
+  options: DiagnoseOptions,
+  effectiveConfig: ReactDoctorConfig | null,
+): boolean => options.deadCode ?? effectiveConfig?.deadCode ?? true;
+
+const shouldRunLint = (
+  options: DiagnoseOptions,
+  effectiveConfig: ReactDoctorConfig | null,
+): boolean => options.lint ?? effectiveConfig?.lint ?? true;
 
 const buildInspectProgram = (
   scanTarget: ResolvedScanTarget,
   options: DiagnoseOptions,
-  configOverride?: ReactDoctorConfig,
+  effectiveConfig: ReactDoctorConfig | null,
 ) => {
-  const effectiveConfig = configOverride ?? scanTarget.userConfig;
   const includePaths = options.includePaths ?? [];
 
   return runInspect({
@@ -99,7 +99,7 @@ const buildInspectProgram = (
     warnings: options.warnings ?? effectiveConfig?.warnings ?? DEFAULT_SHOW_WARNINGS,
     adoptExistingLintConfig: effectiveConfig?.adoptExistingLintConfig ?? true,
     ignoredTags: new Set(effectiveConfig?.ignore?.tags ?? []),
-    runDeadCode: options.deadCode ?? effectiveConfig?.deadCode ?? true,
+    runDeadCode: shouldRunDeadCode(options, effectiveConfig),
     isCi: false,
     resolveLocalGithubViewerPermission: true,
   });
@@ -133,15 +133,24 @@ const diagnoseDirectory = async (
   directory: string,
   options: DiagnoseOptions,
 ): Promise<DiagnoseResult> => {
-  warnIfAiTrainingEnvironment();
   const startTime = globalThis.performance.now();
   const scanTarget = await resolveScanTarget(directory);
-  const program = buildInspectProgram(scanTarget, options);
+  warnIfAiTrainingEnvironment();
+  const effectiveConfig = scanTarget.userConfig;
+  const program = buildInspectProgram(scanTarget, options, effectiveConfig);
 
   const output: InspectOutput = await Effect.runPromise(
     restoreLegacyThrow(
       program.pipe(
-        Effect.provide(buildDiagnoseLayer(scanTarget.userConfig)),
+        Effect.provide(
+          buildDiagnoseLayer({
+            config: effectiveConfig,
+            configSourceDirectory: scanTarget.configSourceDirectory,
+            resolvedDirectory: scanTarget.resolvedDirectory,
+            shouldRunDeadCode: shouldRunDeadCode(options, effectiveConfig),
+            shouldRunLint: shouldRunLint(options, effectiveConfig),
+          }),
+        ),
         Effect.provide(layerOtlp),
       ),
     ),
@@ -173,35 +182,28 @@ const diagnoseProject = async (
   try {
     const scanTarget = await resolveScanTarget(projectDefinition.directory);
     const { directory: _, config: projectConfig, ...perProjectOptions } = projectDefinition;
+    const projectOptions = { ...baseOptions, ...perProjectOptions };
 
-    // Config layers, least to most specific: on-disk `doctor.config.*` ←
-    // batch `config` ← per-project `config`. With no overrides the merge is
-    // the identity and the orchestrator loads from disk (`Config.layerNode`).
     const didOverrideConfig = batchConfig !== undefined || projectConfig !== undefined;
     const effectiveConfig = mergeReactDoctorConfigs(
       mergeReactDoctorConfigs(scanTarget.userConfig, batchConfig),
       projectConfig,
     );
 
-    const program = buildInspectProgram(
-      scanTarget,
-      { ...baseOptions, ...perProjectOptions },
-      effectiveConfig ?? undefined,
-    );
+    const program = buildInspectProgram(scanTarget, projectOptions, effectiveConfig);
     // `plugins` is override-wins in the merge: when a caller layer supplies
     // it, relative entries resolve against the scan root (caller configs
     // have no file location); otherwise the on-disk config's directory.
     const didOverridePlugins =
       batchConfig?.plugins !== undefined || projectConfig?.plugins !== undefined;
-    const layer = buildDiagnoseLayer(
-      effectiveConfig,
-      didOverrideConfig
-        ? {
-            resolvedDirectory: scanTarget.resolvedDirectory,
-            configSourceDirectory: didOverridePlugins ? null : scanTarget.configSourceDirectory,
-          }
-        : undefined,
-    );
+    const layer = buildDiagnoseLayer({
+      config: effectiveConfig,
+      configSourceDirectory:
+        didOverrideConfig && didOverridePlugins ? null : scanTarget.configSourceDirectory,
+      resolvedDirectory: scanTarget.resolvedDirectory,
+      shouldRunDeadCode: shouldRunDeadCode(projectOptions, effectiveConfig),
+      shouldRunLint: shouldRunLint(projectOptions, effectiveConfig),
+    });
 
     const output: InspectOutput = await Effect.runPromise(
       restoreLegacyThrow(program.pipe(Effect.provide(layer), Effect.provide(layerOtlp))),
@@ -224,9 +226,9 @@ const diagnoseProject = async (
 const diagnoseProjectBatch = async (
   input: DiagnoseProjectsInput,
 ): Promise<DiagnoseProjectsResult> => {
-  warnIfAiTrainingEnvironment();
   const startTime = globalThis.performance.now();
   const { projects, concurrency, config: batchConfig, ...baseOptions } = input;
+  if (projects.length > 0) warnIfAiTrainingEnvironment();
 
   // `diagnoseProject` never rejects (failures come back as `ok: false`),
   // so the pool always drains every project.

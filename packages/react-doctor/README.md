@@ -67,4 +67,4 @@ To opt out, run: `npx react-doctor@latest --no-telemetry`
 
 [Issues welcome!](https://github.com/millionco/react-doctor/issues)
 
-MIT-licensed
+Modified MIT License. See `LICENSE`; AI/ML training or evaluation use and paid hosted resale require prior written permission from founders@million.dev.

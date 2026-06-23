@@ -305,4 +305,4 @@ pnpm format
 
 ## License
 
-MIT
+Modified MIT License. See `LICENSE`; AI/ML training or evaluation use and paid hosted resale require prior written permission from founders@million.dev.

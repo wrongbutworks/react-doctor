@@ -48,3 +48,7 @@ configuration the CLI uses. No editor-specific config is required.
 `pnpm run package` builds a self-contained `.vsix` (the client bundle is
 produced with esbuild). Publishing to the VS Code Marketplace / Open VSX
 is a follow-up.
+
+## License
+
+Modified MIT License. See `LICENSE`; AI/ML training or evaluation use and paid hosted resale require prior written permission from founders@million.dev.
