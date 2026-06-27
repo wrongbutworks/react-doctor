@@ -15,7 +15,7 @@ import { buildNoScoreMessage } from "../utils/build-no-score-message.js";
 import { computeProjectedScore } from "../utils/compute-score-projection.js";
 import { countUniqueScannedFiles } from "../utils/count-unique-scanned-files.js";
 import { discoverWorkspacePackages, selectProjects } from "../utils/select-projects.js";
-import { isCiOrCodingAgentEnvironment } from "../utils/is-ci-environment.js";
+import { isCiEnvironment } from "../utils/is-ci-environment.js";
 import { formatElapsedTime } from "../utils/render-diagnostics.js";
 import { printFooter } from "../utils/render-summary.js";
 import { ProjectSelect } from "./components/project-select.js";
@@ -51,9 +51,10 @@ const countBySeverity = (diagnostics: ReadonlyArray<Diagnostic>, severity: strin
   diagnostics.filter((diagnostic) => diagnostic.severity === severity).length;
 
 // The share URL is suppressed for --no-score, `share: false` in config, and in
-// CI / coding-agent runs, mirroring the CLI's `shouldShowShareLink` gate.
+// CI, mirroring the CLI's `shouldShowShareLink` gate exactly (CI only — it does
+// not additionally gate on coding-agent environments).
 const resolveIsOffline = (input: RunScanAppInput): boolean =>
-  input.options?.noScore === true || input.share === false || isCiOrCodingAgentEnvironment();
+  input.options?.noScore === true || input.share === false || isCiEnvironment();
 
 /** Resolves the directories to scan, prompting via Ink only when truly interactive. */
 const resolveSelectedDirectories = async (
