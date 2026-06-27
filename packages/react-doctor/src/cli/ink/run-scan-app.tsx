@@ -13,6 +13,7 @@ import { inspect } from "../../inspect.js";
 import type { ReactDoctorInspectOptions } from "../../inspect.js";
 import { buildNoScoreMessage } from "../utils/build-no-score-message.js";
 import { computeProjectedScore } from "../utils/compute-score-projection.js";
+import { countUniqueScannedFiles } from "../utils/count-unique-scanned-files.js";
 import { discoverWorkspacePackages, selectProjects } from "../utils/select-projects.js";
 import { isCiOrCodingAgentEnvironment } from "../utils/is-ci-environment.js";
 import { formatElapsedTime } from "../utils/render-diagnostics.js";
@@ -247,10 +248,9 @@ const runMultiProjectScan = async (
     const projectedScore = worst
       ? await computeProjectedScore(combinedDiagnostics, [...worst.diagnostics], worst.score)
       : null;
-    const scannedFileCount = results.reduce(
-      (total, { result }) => total + (result.scannedFileCount ?? 0),
-      0,
-    );
+    // Dedupe by absolute path so nested workspace packages don't double-count
+    // shared files — parity with the static monorepo summary.
+    const scannedFileCount = countUniqueScannedFiles(results.map(({ result }) => result));
     const elapsedMilliseconds = performance.now() - startTime;
 
     const summary: MultiProjectSummary = {
