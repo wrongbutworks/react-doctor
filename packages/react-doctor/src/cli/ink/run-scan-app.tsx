@@ -146,13 +146,29 @@ interface ExitFooterInput {
   readonly scannedFileCount: number;
   readonly elapsedMilliseconds: number;
   readonly isOffline: boolean;
+  /** The reason lint was skipped, if it failed — surfaced like the static CLI does. */
+  readonly lintFailureReason: string | null;
 }
+
+// The Ink report never shows the post-scan lint-failure hint (it's suppressed
+// when `uiStore` is active), so the exit footer surfaces it instead — otherwise
+// a TUI report could look clean while oxlint silently failed.
+const resolveLintFailureReason = (results: ReadonlyArray<InspectResult>): string | null => {
+  for (const result of results) {
+    const reason = result.skippedCheckReasons?.lint;
+    if (reason) return reason;
+  }
+  return null;
+};
 
 const printExitFooter = async (input: ExitFooterInput): Promise<void> => {
   const fileLabel = input.scannedFileCount === 1 ? "file" : "files";
   process.stdout.write(
     `${highlighter.success("✔")} Scanned ${input.scannedFileCount} ${fileLabel} in ${formatElapsedTime(input.elapsedMilliseconds)}\n`,
   );
+  if (input.lintFailureReason !== null) {
+    process.stdout.write(`${highlighter.warn("⚠")} Lint did not run: ${input.lintFailureReason}\n`);
+  }
   await Effect.runPromise(
     printFooter({
       diagnostics: [...input.diagnostics],
@@ -188,6 +204,7 @@ const runSingleProjectScan = async (
       scannedFileCount: result.scannedFileCount ?? 0,
       elapsedMilliseconds: result.elapsedMilliseconds,
       isOffline,
+      lintFailureReason: resolveLintFailureReason([result]),
     });
     return {
       errorCount: countBySeverity(result.diagnostics, "error"),
@@ -273,6 +290,7 @@ const runMultiProjectScan = async (
       scannedFileCount,
       elapsedMilliseconds,
       isOffline,
+      lintFailureReason: resolveLintFailureReason(results.map(({ result }) => result)),
     });
     return {
       errorCount: countBySeverity(combinedDiagnostics, "error"),

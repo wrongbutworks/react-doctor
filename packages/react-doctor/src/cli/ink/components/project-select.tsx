@@ -38,7 +38,7 @@ export const ProjectSelect = ({ packages, rootDirectory, onSubmit }: ProjectSele
     height: listHeight,
   });
 
-  useInput((input) => {
+  useInput((input, key) => {
     if (input === " ") {
       setChecked((current) => {
         const next = new Set(current);
@@ -59,7 +59,9 @@ export const ProjectSelect = ({ packages, rootDirectory, onSubmit }: ProjectSele
       onSubmit([]);
       return;
     }
-    if (input === "\r") {
+    // Ink reports Enter via `key.return` (not a literal carriage return), matching
+    // `useScrollViewport`. Checking the raw char misses Enter on most terminals.
+    if (key.return) {
       const indices = checked.size > 0 ? [...checked] : [selectedIndex];
       exit();
       onSubmit(indices.map((index) => packages[index].directory));
