@@ -401,6 +401,31 @@ program
   .allowUnknownOption()
   .action(() => {});
 
+// Gated behind `experimental-` while the interactive Ink report stabilizes
+// (keymap, layout, and the scan-store contract may change). Ink + React load
+// lazily here so the default static path never pays their startup cost.
+program
+  .command("experimental-tui [directory]")
+  .description("[experimental] interactive, scrollable scan report")
+  .option("--no-dead-code", "skip dead-code analysis")
+  .option("--no-score", "skip the score API, the share URL, and crash reporting")
+  .option("-p, --project <names>", "scan specific workspace projects (comma-separated, or *)")
+  .option("-y, --yes", "skip the project prompt and scan every discovered project")
+  .action(
+    async (
+      directory = ".",
+      options: { deadCode?: boolean; score?: boolean; project?: string; yes?: boolean },
+    ) => {
+      const { runScanApp } = await import("./ink/run-scan-app.js");
+      await runScanApp({
+        directory,
+        options: { deadCode: options.deadCode ?? true, noScore: options.score === false },
+        projectFlag: options.project,
+        skipPrompts: options.yes ?? false,
+      });
+    },
+  );
+
 // HACK: when stdout is piped into a process that closes early (e.g.
 // `react-doctor . | head`), Node throws an uncaught EPIPE on the next
 // write. Exit cleanly instead of dumping a stack trace.

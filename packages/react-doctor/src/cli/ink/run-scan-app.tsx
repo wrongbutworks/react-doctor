@@ -1,0 +1,295 @@
+import path from "node:path";
+import { performance } from "node:perf_hooks";
+import { render } from "ink";
+import * as Effect from "effect/Effect";
+import {
+  DEFAULT_PROJECT_SCAN_CONCURRENCY,
+  highlighter,
+  mapWithConcurrency,
+} from "@react-doctor/core";
+import type { Diagnostic, InspectResult, ScoreResult, WorkspacePackage } from "@react-doctor/core";
+import { inspect } from "../../inspect.js";
+import type { ReactDoctorInspectOptions } from "../../inspect.js";
+import { buildNoScoreMessage } from "../utils/build-no-score-message.js";
+import { computeProjectedScore } from "../utils/compute-score-projection.js";
+import { discoverWorkspacePackages, selectProjects } from "../utils/select-projects.js";
+import { isCiOrCodingAgentEnvironment } from "../utils/is-ci-environment.js";
+import { formatElapsedTime } from "../utils/render-diagnostics.js";
+import { printFooter } from "../utils/render-summary.js";
+import { ProjectSelect } from "./components/project-select.js";
+import { ScanApp } from "./scan-app.js";
+import { createScanStore } from "./scan-store.js";
+import type { MultiProjectSummary, ScanReport } from "./scan-store.js";
+
+export interface RunScanAppInput {
+  readonly directory: string;
+  readonly options?: ReactDoctorInspectOptions;
+  /** `--project` value (comma list or `*`); resolves without the interactive prompt. */
+  readonly projectFlag?: string;
+  /** `-y`/`--yes`: skip the prompt and scan every discovered project. */
+  readonly skipPrompts?: boolean;
+  /** Persistent `projects` from the user's config — the flag's declared form. */
+  readonly configProjects?: readonly string[];
+}
+
+export interface RunScanAppResult {
+  readonly errorCount: number;
+  readonly warningCount: number;
+}
+
+const countBySeverity = (diagnostics: ReadonlyArray<Diagnostic>, severity: string): number =>
+  diagnostics.filter((diagnostic) => diagnostic.severity === severity).length;
+
+// The share URL is suppressed for --no-score and in CI / coding-agent runs,
+// mirroring the CLI's `shouldShowShareLink` gate.
+const resolveIsOffline = (options: ReactDoctorInspectOptions | undefined): boolean =>
+  options?.noScore === true || isCiOrCodingAgentEnvironment();
+
+/** Resolves the directories to scan, prompting via Ink only when truly interactive. */
+const resolveSelectedDirectories = async (
+  rootDirectory: string,
+  input: RunScanAppInput,
+): Promise<string[]> => {
+  const packages = discoverWorkspacePackages(rootDirectory);
+  const needsPrompt =
+    packages.length > 1 &&
+    !input.projectFlag &&
+    !input.skipPrompts &&
+    (input.configProjects ?? []).length === 0 &&
+    process.stdin.isTTY === true;
+
+  if (!needsPrompt) {
+    return selectProjects(
+      rootDirectory,
+      input.projectFlag,
+      input.skipPrompts ?? false,
+      input.configProjects,
+    );
+  }
+
+  return promptProjectSelection(packages, rootDirectory);
+};
+
+const promptProjectSelection = (
+  packages: ReadonlyArray<WorkspacePackage>,
+  rootDirectory: string,
+): Promise<string[]> =>
+  new Promise((resolve) => {
+    const instance = render(
+      <ProjectSelect
+        packages={packages}
+        rootDirectory={rootDirectory}
+        onSubmit={(directories) => {
+          instance.unmount();
+          resolve(directories);
+        }}
+      />,
+      { exitOnCtrlC: false },
+    );
+  });
+
+interface ScanReportInput {
+  readonly result: InspectResult;
+  readonly rootDirectory: string;
+  readonly projectedScore: number | null;
+  readonly isOffline: boolean;
+  readonly noScoreMessage: string;
+}
+
+const toScanReport = ({
+  result,
+  rootDirectory,
+  projectedScore,
+  isOffline,
+  noScoreMessage,
+}: ScanReportInput): ScanReport => ({
+  diagnostics: result.diagnostics,
+  score: result.score,
+  projectedScore,
+  projectName: result.project.projectName,
+  rootDirectory,
+  scannedFileCount: result.scannedFileCount ?? 0,
+  elapsedMilliseconds: result.elapsedMilliseconds,
+  isOffline,
+  noScoreMessage,
+});
+
+// The aggregate score for a monorepo is its WORST project's (a chain is only as
+// strong as its weakest link), so the projection is computed against it too.
+const findLowestScored = (
+  reports: ReadonlyArray<{ score: ScoreResult | null; diagnostics: ReadonlyArray<Diagnostic> }>,
+): { score: ScoreResult; diagnostics: ReadonlyArray<Diagnostic> } | null => {
+  let worst: { score: ScoreResult; diagnostics: ReadonlyArray<Diagnostic> } | null = null;
+  for (const report of reports) {
+    if (report.score === null) continue;
+    if (worst === null || report.score.score < worst.score.score) {
+      worst = { score: report.score, diagnostics: report.diagnostics };
+    }
+  }
+  return worst;
+};
+
+interface ExitFooterInput {
+  readonly diagnostics: ReadonlyArray<Diagnostic>;
+  readonly scoreResult: ScoreResult | null;
+  readonly projectName: string;
+  readonly scannedFileCount: number;
+  readonly elapsedMilliseconds: number;
+  readonly isOffline: boolean;
+}
+
+const printExitFooter = async (input: ExitFooterInput): Promise<void> => {
+  const fileLabel = input.scannedFileCount === 1 ? "file" : "files";
+  process.stdout.write(
+    `${highlighter.success("✔")} Scanned ${input.scannedFileCount} ${fileLabel} in ${formatElapsedTime(input.elapsedMilliseconds)}\n`,
+  );
+  await Effect.runPromise(
+    printFooter({
+      diagnostics: [...input.diagnostics],
+      scoreResult: input.scoreResult,
+      projectName: input.projectName,
+      isOffline: input.isOffline,
+    }),
+  );
+};
+
+const runSingleProjectScan = async (
+  directory: string,
+  input: RunScanAppInput,
+): Promise<RunScanAppResult> => {
+  const store = createScanStore();
+  const instance = render(<ScanApp store={store} />, { exitOnCtrlC: false });
+  const isOffline = resolveIsOffline(input.options);
+  const noScoreMessage = buildNoScoreMessage(input.options?.noScore === true);
+
+  try {
+    const result = await inspect(directory, { ...input.options, uiStore: store });
+    const projectedScore = result.score
+      ? await computeProjectedScore([...result.diagnostics], [...result.diagnostics], result.score)
+      : null;
+    store.setReport(
+      toScanReport({ result, rootDirectory: directory, projectedScore, isOffline, noScoreMessage }),
+    );
+    await instance.waitUntilExit();
+    await printExitFooter({
+      diagnostics: result.diagnostics,
+      scoreResult: result.score,
+      projectName: result.project.projectName,
+      scannedFileCount: result.scannedFileCount ?? 0,
+      elapsedMilliseconds: result.elapsedMilliseconds,
+      isOffline,
+    });
+    return {
+      errorCount: countBySeverity(result.diagnostics, "error"),
+      warningCount: countBySeverity(result.diagnostics, "warning"),
+    };
+  } catch (error) {
+    instance.unmount();
+    throw error;
+  }
+};
+
+const runMultiProjectScan = async (
+  rootDirectory: string,
+  directories: ReadonlyArray<string>,
+  input: RunScanAppInput,
+): Promise<RunScanAppResult> => {
+  const store = createScanStore();
+  const instance = render(<ScanApp store={store} />, { exitOnCtrlC: false });
+  const isOffline = resolveIsOffline(input.options);
+  const noScoreMessage = buildNoScoreMessage(input.options?.noScore === true);
+
+  try {
+    const startTime = performance.now();
+    let finishedCount = 0;
+    store.setProgress({
+      text: `Scanning ${directories.length} projects…`,
+      status: "active",
+    });
+    const results = await mapWithConcurrency(
+      [...directories],
+      DEFAULT_PROJECT_SCAN_CONCURRENCY,
+      async (projectDirectory) => {
+        const result = await inspect(projectDirectory, {
+          ...input.options,
+          suppressRendering: true,
+          concurrentScan: true,
+        });
+        finishedCount += 1;
+        store.setProgress({
+          text: `Scanning ${directories.length} projects… (${finishedCount}/${directories.length})`,
+          status: "active",
+        });
+        return { directory: projectDirectory, result };
+      },
+    );
+
+    const projects = results.map(({ directory, result }) =>
+      toScanReport({
+        result,
+        rootDirectory: directory,
+        projectedScore: null,
+        isOffline,
+        noScoreMessage,
+      }),
+    );
+    const combinedDiagnostics = projects.flatMap((project) => [...project.diagnostics]);
+    const worst = findLowestScored(projects);
+    const projectedScore = worst
+      ? await computeProjectedScore(combinedDiagnostics, [...worst.diagnostics], worst.score)
+      : null;
+    const scannedFileCount = results.reduce(
+      (total, { result }) => total + (result.scannedFileCount ?? 0),
+      0,
+    );
+    const elapsedMilliseconds = performance.now() - startTime;
+
+    const summary: MultiProjectSummary = {
+      projects,
+      aggregateScore: worst?.score ?? null,
+      projectedScore,
+      combinedDiagnostics,
+      scannedFileCount,
+      elapsedMilliseconds,
+      projectName: path.basename(rootDirectory),
+      isOffline,
+      noScoreMessage,
+    };
+    store.setSummary(summary);
+    await instance.waitUntilExit();
+    await printExitFooter({
+      diagnostics: combinedDiagnostics,
+      scoreResult: summary.aggregateScore,
+      projectName: summary.projectName,
+      scannedFileCount,
+      elapsedMilliseconds,
+      isOffline,
+    });
+    return {
+      errorCount: countBySeverity(combinedDiagnostics, "error"),
+      warningCount: countBySeverity(combinedDiagnostics, "warning"),
+    };
+  } catch (error) {
+    instance.unmount();
+    throw error;
+  }
+};
+
+/**
+ * Entry point for the interactive Ink scan UI. Discovers and (when interactive)
+ * prompts for the workspace projects to scan, then mounts the live scan view and
+ * routes to the single-project report or the monorepo summary once settled. On
+ * exit it prints a concise static footer (scanned files + Share / Docs / GitHub).
+ */
+export const runScanApp = async (input: RunScanAppInput): Promise<RunScanAppResult> => {
+  const rootDirectory = path.resolve(input.directory);
+  const selectedDirectories = await resolveSelectedDirectories(rootDirectory, input);
+
+  if (selectedDirectories.length === 0) {
+    return { errorCount: 0, warningCount: 0 };
+  }
+  if (selectedDirectories.length === 1) {
+    return runSingleProjectScan(selectedDirectories[0], input);
+  }
+  return runMultiProjectScan(rootDirectory, selectedDirectories, input);
+};

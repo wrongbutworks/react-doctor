@@ -58,6 +58,19 @@ export interface BuildRuntimeLayersInput {
    * count) in place.
    */
   readonly oxlintConcurrency?: number;
+  /**
+   * Optional `Reporter` override. The interactive Ink UI supplies a
+   * store-backed reporter so every fully-filtered diagnostic streams into the
+   * live scan view; left `undefined`, the production path stays `layerNoop`
+   * (the final report rides `inspect()`'s return value).
+   */
+  readonly reporterLayer?: Layer.Layer<Reporter>;
+  /**
+   * Optional `Progress` override. The Ink UI supplies a store-backed progress
+   * layer in place of the ora spinner so the scan's lifecycle drives the
+   * in-app spinner instead of writing escape codes over the render tree.
+   */
+  readonly progressLayer?: Layer.Layer<Progress>;
 }
 
 /**
@@ -115,9 +128,12 @@ export const buildRuntimeLayers = (input: BuildRuntimeLayersInput) => {
     input.projectInfoOverride === undefined
       ? Project.layerNode
       : Project.layerOf(input.projectInfoOverride);
-  const progressLayer = input.shouldShowProgressSpinners
-    ? Progress.layerOra(buildSpinnerProgressHandle)
-    : Progress.layerNoop;
+  const progressLayer =
+    input.progressLayer ??
+    (input.shouldShowProgressSpinners
+      ? Progress.layerOra(buildSpinnerProgressHandle)
+      : Progress.layerNoop);
+  const reporterLayer = input.reporterLayer ?? Reporter.layerNoop;
   const configLayer = input.hasConfigOverride
     ? Config.layerOf({
         config: input.userConfig,
@@ -140,7 +156,7 @@ export const buildRuntimeLayers = (input: BuildRuntimeLayersInput) => {
     LintPartialFailures.layerLive,
     deadCodeLayer,
     progressLayer,
-    Reporter.layerNoop,
+    reporterLayer,
     scoreLayer,
     supplyChainLayer,
   );

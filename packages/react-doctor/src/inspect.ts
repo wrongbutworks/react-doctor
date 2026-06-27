@@ -17,6 +17,8 @@ import {
 } from "@react-doctor/core";
 import { applyObservability } from "./cli/utils/apply-observability.js";
 import { buildRuntimeLayers } from "./cli/utils/build-runtime-layers.js";
+import { progressLayerForStore, reporterLayerForStore } from "./cli/ink/scan-bridge-layers.js";
+import type { ScanStore } from "./cli/ink/scan-store.js";
 import {
   recordSentryProjectContext,
   resetSentryRunState,
@@ -137,6 +139,12 @@ const buildChangedLineMatcher = (
 
 export interface ReactDoctorInspectOptions extends InspectOptions {
   categoryFilters?: string[];
+  /**
+   * CLI-only: when present, the scan streams live diagnostics + progress into
+   * this store (for the interactive Ink UI) and suppresses all console
+   * rendering — the Ink app owns the screen and reads the returned result.
+   */
+  uiStore?: ScanStore;
 }
 
 export interface ResolvedInspectOptions {
@@ -175,6 +183,8 @@ export interface ResolvedInspectOptions {
   changedLineRanges: ReadonlyArray<ChangedFileLineRanges> | null;
   /** See `InspectOptions.supplyChainManifestChanged`. */
   supplyChainManifestChanged: boolean;
+  /** Interactive Ink UI store, or `null` for the static console path. */
+  uiStore: ScanStore | null;
 }
 
 const buildIgnoredTags = (userConfig: ReactDoctorConfig | null): ReadonlySet<string> => {
@@ -209,7 +219,10 @@ const mergeInspectOptions = (
   adoptExistingLintConfig: userConfig?.adoptExistingLintConfig ?? true,
   ignoredTags: buildIgnoredTags(userConfig),
   outputSurface: inputOptions.outputSurface ?? "cli",
-  suppressRendering: inputOptions.suppressRendering ?? false,
+  // The Ink UI owns the screen, so it suppresses console rendering exactly like
+  // a multi-project batch does — the difference is the live store feed.
+  suppressRendering: (inputOptions.suppressRendering ?? false) || inputOptions.uiStore != null,
+  uiStore: inputOptions.uiStore ?? null,
   concurrentScan: inputOptions.concurrentScan ?? false,
   concurrency: inputOptions.concurrency,
   baseline: inputOptions.baseline ?? null,
@@ -562,6 +575,8 @@ const runInspectWithRuntime = async (
     shouldComputeScore: !options.noScore,
     shouldShowProgressSpinners,
     oxlintConcurrency: options.concurrency,
+    reporterLayer: options.uiStore ? reporterLayerForStore(options.uiStore) : undefined,
+    progressLayer: options.uiStore ? progressLayerForStore(options.uiStore) : undefined,
   });
 
   const program = runInspectEffect(
@@ -637,6 +652,7 @@ const runInspectWithRuntime = async (
   // `message.includes(...)`).
   if (
     !options.scoreOnly &&
+    !options.uiStore &&
     !lintBindingMissing &&
     output.didLintFail &&
     lintFailureReason !== null

@@ -14,17 +14,28 @@ import { METRIC } from "./constants.js";
 import { prompts } from "./prompts.js";
 import { recordCount } from "./record-metric.js";
 
+/**
+ * The workspace packages a scan would offer to select from: explicit workspace
+ * members, or — for a bare/monorepo root with none declared — discovered React
+ * subprojects. Shared by `selectProjects` and the interactive Ink runner so both
+ * agree on what "the projects" are without duplicating the discovery rules.
+ */
+export const discoverWorkspacePackages = (rootDirectory: string): WorkspacePackage[] => {
+  const hasRootPackageJson = isFile(path.join(rootDirectory, "package.json"));
+  const packages = listWorkspacePackages(rootDirectory);
+  if (packages.length === 0 && (!hasRootPackageJson || isMonorepoRoot(rootDirectory))) {
+    return discoverReactSubprojects(rootDirectory);
+  }
+  return packages;
+};
+
 export const selectProjects = async (
   rootDirectory: string,
   projectFlag: string | undefined,
   skipPrompts: boolean,
   configProjects?: readonly string[],
 ): Promise<string[]> => {
-  const hasRootPackageJson = isFile(path.join(rootDirectory, "package.json"));
-  let packages = listWorkspacePackages(rootDirectory);
-  if (packages.length === 0 && (!hasRootPackageJson || isMonorepoRoot(rootDirectory))) {
-    packages = discoverReactSubprojects(rootDirectory);
-  }
+  const packages = discoverWorkspacePackages(rootDirectory);
 
   // The flag wins over workspace discovery: entries can name packages OR
   // point at arbitrary directories, so it must resolve even when discovery

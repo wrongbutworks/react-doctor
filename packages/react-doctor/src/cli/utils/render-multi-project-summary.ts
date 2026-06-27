@@ -1,8 +1,9 @@
 import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
-import { highlighter, SCORE_GOOD_THRESHOLD, SCORE_OK_THRESHOLD } from "@react-doctor/core";
+import { highlighter } from "@react-doctor/core";
 import type { Diagnostic, InspectResult, ScoreResult } from "@react-doctor/core";
 import { colorizeByScore } from "./colorize-by-score.js";
+import { scoreBandLabel } from "./score-band-label.js";
 import { filterScansForSurface } from "./filter-scans-for-surface.js";
 import type { SurfaceFilterableScan } from "./filter-scans-for-surface.js";
 import { computeProjectedScore } from "./compute-score-projection.js";
@@ -21,12 +22,6 @@ interface ProjectScanEntry {
   readonly errorCount: number;
 }
 
-const getScoreLabel = (score: number): string => {
-  if (score >= SCORE_GOOD_THRESHOLD) return "Great";
-  if (score >= SCORE_OK_THRESHOLD) return "OK";
-  return "Needs work";
-};
-
 const buildSummaryLine = (entry: ProjectScanEntry, longestProjectNameLength: number): string => {
   const paddedName = entry.projectName.padEnd(longestProjectNameLength);
   const nameRendering =
@@ -38,7 +33,7 @@ const buildSummaryLine = (entry: ProjectScanEntry, longestProjectNameLength: num
   }
 
   const scoreRendering = colorizeByScore(String(entry.score).padStart(3), entry.score);
-  const label = colorizeByScore(getScoreLabel(entry.score), entry.score);
+  const label = colorizeByScore(scoreBandLabel(entry.score), entry.score);
 
   const issuesParts: string[] = [];
   if (entry.errorCount > 0) {
