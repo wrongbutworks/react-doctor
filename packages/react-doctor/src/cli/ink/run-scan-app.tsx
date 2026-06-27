@@ -6,6 +6,7 @@ import {
   DEFAULT_PROJECT_SCAN_CONCURRENCY,
   highlighter,
   mapWithConcurrency,
+  resolveScanTarget,
 } from "@react-doctor/core";
 import type { Diagnostic, InspectResult, ScoreResult, WorkspacePackage } from "@react-doctor/core";
 import { inspect } from "../../inspect.js";
@@ -28,8 +29,16 @@ export interface RunScanAppInput {
   readonly projectFlag?: string;
   /** `-y`/`--yes`: skip the prompt and scan every discovered project. */
   readonly skipPrompts?: boolean;
-  /** Persistent `projects` from the user's config — the flag's declared form. */
+  /**
+   * Persistent `projects` from the user's config. When omitted, `runScanApp`
+   * loads it from the resolved scan target (parity with the static CLI).
+   */
   readonly configProjects?: readonly string[];
+  /**
+   * Whether the Share URL may be printed (the config's `share`, default true).
+   * When omitted, `runScanApp` loads it from the resolved scan target.
+   */
+  readonly share?: boolean;
 }
 
 export interface RunScanAppResult {
@@ -40,10 +49,10 @@ export interface RunScanAppResult {
 const countBySeverity = (diagnostics: ReadonlyArray<Diagnostic>, severity: string): number =>
   diagnostics.filter((diagnostic) => diagnostic.severity === severity).length;
 
-// The share URL is suppressed for --no-score and in CI / coding-agent runs,
-// mirroring the CLI's `shouldShowShareLink` gate.
-const resolveIsOffline = (options: ReactDoctorInspectOptions | undefined): boolean =>
-  options?.noScore === true || isCiOrCodingAgentEnvironment();
+// The share URL is suppressed for --no-score, `share: false` in config, and in
+// CI / coding-agent runs, mirroring the CLI's `shouldShowShareLink` gate.
+const resolveIsOffline = (input: RunScanAppInput): boolean =>
+  input.options?.noScore === true || input.share === false || isCiOrCodingAgentEnvironment();
 
 /** Resolves the directories to scan, prompting via Ink only when truly interactive. */
 const resolveSelectedDirectories = async (
@@ -159,7 +168,7 @@ const runSingleProjectScan = async (
 ): Promise<RunScanAppResult> => {
   const store = createScanStore();
   const instance = render(<ScanApp store={store} />, { exitOnCtrlC: false });
-  const isOffline = resolveIsOffline(input.options);
+  const isOffline = resolveIsOffline(input);
   const noScoreMessage = buildNoScoreMessage(input.options?.noScore === true);
 
   try {
@@ -196,7 +205,7 @@ const runMultiProjectScan = async (
 ): Promise<RunScanAppResult> => {
   const store = createScanStore();
   const instance = render(<ScanApp store={store} />, { exitOnCtrlC: false });
-  const isOffline = resolveIsOffline(input.options);
+  const isOffline = resolveIsOffline(input);
   const noScoreMessage = buildNoScoreMessage(input.options?.noScore === true);
 
   try {
@@ -282,14 +291,23 @@ const runMultiProjectScan = async (
  * exit it prints a concise static footer (scanned files + Share / Docs / GitHub).
  */
 export const runScanApp = async (input: RunScanAppInput): Promise<RunScanAppResult> => {
-  const rootDirectory = path.resolve(input.directory);
-  const selectedDirectories = await resolveSelectedDirectories(rootDirectory, input);
+  // Resolve the scan target once so the TUI honors the same on-disk config the
+  // static CLI does: the `rootDir` redirect, the persistent `projects` list, and
+  // the `share` gate (each only filled in when the caller didn't pass it).
+  const scanTarget = await resolveScanTarget(input.directory);
+  const rootDirectory = scanTarget.resolvedDirectory;
+  const resolvedInput: RunScanAppInput = {
+    ...input,
+    configProjects: input.configProjects ?? scanTarget.userConfig?.projects,
+    share: input.share ?? scanTarget.userConfig?.share ?? true,
+  };
+  const selectedDirectories = await resolveSelectedDirectories(rootDirectory, resolvedInput);
 
   if (selectedDirectories.length === 0) {
     return { errorCount: 0, warningCount: 0 };
   }
   if (selectedDirectories.length === 1) {
-    return runSingleProjectScan(selectedDirectories[0], input);
+    return runSingleProjectScan(selectedDirectories[0], resolvedInput);
   }
-  return runMultiProjectScan(rootDirectory, selectedDirectories, input);
+  return runMultiProjectScan(rootDirectory, selectedDirectories, resolvedInput);
 };
