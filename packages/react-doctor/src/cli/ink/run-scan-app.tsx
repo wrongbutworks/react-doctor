@@ -50,6 +50,25 @@ export interface RunScanAppResult {
 const countBySeverity = (diagnostics: ReadonlyArray<Diagnostic>, severity: string): number =>
   diagnostics.filter((diagnostic) => diagnostic.severity === severity).length;
 
+// Rewrites a project's diagnostics so their `filePath` is relative to the
+// monorepo root rather than the project root. This lets the flat summary render
+// every project's findings in one list — the path itself shows the folder, and
+// the shared monorepo root resolves every code frame. A no-op for the root
+// project (empty prefix) and for already-absolute paths.
+const qualifyDiagnosticPaths = (
+  diagnostics: ReadonlyArray<Diagnostic>,
+  rootDirectory: string,
+  projectDirectory: string,
+): Diagnostic[] => {
+  const prefix = path.relative(rootDirectory, projectDirectory);
+  if (prefix === "" || prefix.startsWith("..")) return [...diagnostics];
+  return diagnostics.map((diagnostic) =>
+    path.isAbsolute(diagnostic.filePath)
+      ? diagnostic
+      : { ...diagnostic, filePath: path.join(prefix, diagnostic.filePath) },
+  );
+};
+
 // The share URL is suppressed for --no-score, `share: false` in config, and in
 // CI, mirroring the CLI's `shouldShowShareLink` gate exactly (CI only — it does
 // not additionally gate on coding-agent environments).
@@ -91,6 +110,9 @@ const promptProjectSelection = (
         packages={packages}
         rootDirectory={rootDirectory}
         onSubmit={(directories) => {
+          // Wipe the picker's last frame so its footer/list doesn't linger in
+          // scrollback above the scan view once a selection is made.
+          instance.clear();
           instance.unmount();
           resolve(directories);
         }}
@@ -240,7 +262,10 @@ const runMultiProjectScan = async (
       async (projectDirectory) => {
         const result = await inspect(projectDirectory, {
           ...input.options,
-          suppressRendering: true,
+          // Stream each project's diagnostics into the shared store so the live
+          // scan view shows the error feed (uiStore implies suppressRendering);
+          // `concurrentScan` keeps per-project progress off the shared counter.
+          uiStore: store,
           concurrentScan: true,
         });
         finishedCount += 1;
@@ -261,7 +286,9 @@ const runMultiProjectScan = async (
         noScoreMessage,
       }),
     );
-    const combinedDiagnostics = projects.flatMap((project) => [...project.diagnostics]);
+    const combinedDiagnostics = projects.flatMap((project) =>
+      qualifyDiagnosticPaths(project.diagnostics, rootDirectory, project.rootDirectory),
+    );
     const worst = findLowestScored(projects);
     const projectedScore = worst
       ? await computeProjectedScore(combinedDiagnostics, [...worst.diagnostics], worst.score)
@@ -279,6 +306,7 @@ const runMultiProjectScan = async (
       scannedFileCount,
       elapsedMilliseconds,
       projectName: path.basename(rootDirectory),
+      rootDirectory,
       isOffline,
       noScoreMessage,
     };

@@ -9,7 +9,7 @@ export interface ScanAppProps {
   readonly store: ScanStore;
 }
 
-const RECENT_LIVE_COUNT = 8;
+const RECENT_LIVE_COUNT = 5;
 
 /** Root of the interactive scan UI: routes the store phase to a view. */
 export const ScanApp = ({ store }: ScanAppProps) => {

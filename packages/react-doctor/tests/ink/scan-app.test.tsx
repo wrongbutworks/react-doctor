@@ -22,6 +22,15 @@ const SCORE: ScoreResult = { score: 72, label: "Fair" };
 // ink-testing-library needs a tick for effects (useInput wiring) to flush.
 const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 20));
 
+// ink-testing-library hardcodes 100 columns (< the split threshold), so the
+// report renders stacked by default. Widen the fake stdout and fire a resize so
+// the report switches to the side-by-side layout for that test.
+const widenTerminal = (stdout: { emit: (event: string) => void }): void => {
+  Object.defineProperty(stdout, "columns", { get: () => 140, configurable: true });
+  Object.defineProperty(stdout, "rows", { get: () => 40, configurable: true });
+  stdout.emit("resize");
+};
+
 describe("ScanApp", () => {
   it("renders the live scan view before a report settles", () => {
     const store = createScanStore();
@@ -37,10 +46,22 @@ describe("ScanApp", () => {
 
   it("renders the score header and the full sorted rule list once settled", () => {
     const store = createScanStore();
+    // All in one category so the grouped list shows a single "Correctness"
+    // header with both rules under it (fits the small test viewport).
     const diagnostics = [
       makeDiagnostic({ rule: "rules-of-hooks", severity: "error", category: "Correctness" }),
-      makeDiagnostic({ rule: "no-array-index-key", filePath: "src/Cart.tsx", line: 9 }),
-      makeDiagnostic({ rule: "no-array-index-key", filePath: "src/List.tsx", line: 4 }),
+      makeDiagnostic({
+        rule: "no-array-index-key",
+        category: "Correctness",
+        filePath: "src/Cart.tsx",
+        line: 9,
+      }),
+      makeDiagnostic({
+        rule: "no-array-index-key",
+        category: "Correctness",
+        filePath: "src/List.tsx",
+        line: 4,
+      }),
     ];
     store.setReport({
       diagnostics,
@@ -59,7 +80,9 @@ describe("ScanApp", () => {
     expect(frame).toContain("72");
     expect(frame).toContain("demo-app");
     // No `title` on the test diagnostics → the row falls back to `plugin/rule`.
-    expect(frame).toContain("Correctness: react-doctor/rules-of-hooks");
+    // The detail headline is the title alone; category + severity ride a dim tag.
+    expect(frame).toContain("react-doctor/rules-of-hooks");
+    expect(frame).toContain("Correctness · error");
     // The second rule groups its two sites into one row with a count badge.
     expect(frame).toContain("×2");
     unmount();
@@ -110,10 +133,19 @@ describe("ScanApp", () => {
     unmount();
   });
 
-  it("renders the monorepo summary with aggregate score and project rows", () => {
+  it("renders a flat monorepo summary: aggregate score, combined list, folder-qualified paths", () => {
     const store = createScanStore();
+    // Combined diagnostics carry folder-qualified paths (rewritten relative to
+    // the monorepo root in `runScanApp`) so the flat list shows each finding's
+    // project without a per-folder drill-in.
     const webReport = {
-      diagnostics: [makeDiagnostic({ rule: "rules-of-hooks", severity: "error" })],
+      diagnostics: [
+        makeDiagnostic({
+          rule: "rules-of-hooks",
+          severity: "error",
+          filePath: "apps/web/src/Profile.tsx",
+        }),
+      ],
       score: { score: 58, label: "Needs work" } as ScoreResult,
       projectedScore: null,
       projectName: "web",
@@ -124,7 +156,13 @@ describe("ScanApp", () => {
       noScoreMessage: "Score unavailable.",
     };
     const apiReport = {
-      diagnostics: [makeDiagnostic({ rule: "no-array-index-key", severity: "warning" })],
+      diagnostics: [
+        makeDiagnostic({
+          rule: "no-array-index-key",
+          severity: "warning",
+          filePath: "apps/api/src/Cart.tsx",
+        }),
+      ],
       score: { score: 91, label: "Great" } as ScoreResult,
       projectedScore: null,
       projectName: "api",
@@ -142,6 +180,7 @@ describe("ScanApp", () => {
       scannedFileCount: 10,
       elapsedMilliseconds: 12,
       projectName: "repo",
+      rootDirectory: "/tmp/repo",
       isOffline: true,
       noScoreMessage: "Score unavailable.",
     });
@@ -150,8 +189,12 @@ describe("ScanApp", () => {
     const frame = lastFrame() ?? "";
     // Aggregate score is the worst project's (58, not 91).
     expect(frame).toContain("58");
-    expect(frame).toContain("web");
-    expect(frame).toContain("api");
+    // Both projects' findings appear in one flat list (by rule title).
+    expect(frame).toContain("react-doctor/rules-of-hooks");
+    expect(frame).toContain("react-doctor/no-array-index-key");
+    // The selected row's full, folder-qualified path shows in the detail pane.
+    expect(frame).toContain("apps/web/src/Profile.tsx");
+    // The project count rides the status bar instead of a navigable list.
     expect(frame).toContain("2 projects");
     unmount();
   });
@@ -176,8 +219,10 @@ describe("ScanApp", () => {
     const { lastFrame, stdin, unmount } = render(<ScanApp store={store} />);
     await flush();
 
-    // First row selected by default → detail pane shows the first rule's message.
-    expect(lastFrame() ?? "").toContain("Correctness: react-doctor/rules-of-hooks");
+    // First row selected by default → detail pane shows the first rule's title
+    // with a dim `category · severity` tag beneath it.
+    expect(lastFrame() ?? "").toContain("react-doctor/rules-of-hooks");
+    expect(lastFrame() ?? "").toContain("Correctness · error");
 
     stdin.write("j");
     await flush();
@@ -187,6 +232,35 @@ describe("ScanApp", () => {
     // `q` is handled without throwing (exit is wired through useApp()).
     stdin.write("q");
     await flush();
+    unmount();
+  });
+
+  it("uses the side-by-side layout on a wide terminal", async () => {
+    const store = createScanStore();
+    store.setReport({
+      diagnostics: [
+        makeDiagnostic({ rule: "rules-of-hooks", severity: "error", category: "Correctness" }),
+        makeDiagnostic({ rule: "no-array-index-key", severity: "warning", category: "Bugs" }),
+      ],
+      score: SCORE,
+      projectedScore: null,
+      projectName: "demo-app",
+      rootDirectory: "/tmp/demo-app",
+      scannedFileCount: 2,
+      elapsedMilliseconds: 10,
+      isOffline: true,
+      noScoreMessage: "Score unavailable.",
+    });
+
+    const { lastFrame, stdout, unmount } = render(<ScanApp store={store} />);
+    widenTerminal(stdout);
+    await flush();
+
+    const frame = lastFrame() ?? "";
+    // The split layout draws a vertical divider between the list and the detail,
+    // so a row's title and its detail headline share a line.
+    expect(frame).toContain("│");
+    expect(frame).toMatch(/react-doctor\/rules-of-hooks.*│/);
     unmount();
   });
 });

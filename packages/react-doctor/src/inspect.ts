@@ -576,7 +576,13 @@ const runInspectWithRuntime = async (
     shouldShowProgressSpinners,
     oxlintConcurrency: options.concurrency,
     reporterLayer: options.uiStore ? reporterLayerForStore(options.uiStore) : undefined,
-    progressLayer: options.uiStore ? progressLayerForStore(options.uiStore) : undefined,
+    // In a concurrent batch the parent loop owns the shared progress line (the
+    // "x/N projects" counter), so per-project progress stays a no-op while the
+    // live diagnostic stream is still forwarded. A lone scan drives both.
+    progressLayer:
+      options.uiStore && !options.concurrentScan
+        ? progressLayerForStore(options.uiStore)
+        : undefined,
   });
 
   const program = runInspectEffect(

@@ -8,9 +8,10 @@ export interface DiagnosticItemProps {
 }
 
 /**
- * One collapsed rule-group line. Mirrors the CLI's rule headline
- * (`✖ Category: Title ×N`) — icon + headline colored by severity, a dim
- * `×N` site badge, and a gray location — with a `›` pointer on the selected row.
+ * One collapsed rule-group line, rendered indented under its category header:
+ * `› ✖ Title ×N` — icon + title colored by severity and a dim `×N` site badge,
+ * with a `›` pointer on the selected row. The category lives in the header and
+ * the file location lives in the detail pane, so the row stays uncluttered.
  */
 export const DiagnosticItem = ({ row, isSelected }: DiagnosticItemProps) => {
   const variant = severityVariant(row.severity);
@@ -20,13 +21,9 @@ export const DiagnosticItem = ({ row, isSelected }: DiagnosticItemProps) => {
       <Text color={isSelected ? variant.color : undefined}>{isSelected ? "› " : "  "}</Text>
       <Text color={variant.color}>{variant.icon} </Text>
       <Text color={variant.color} bold={isSelected}>
-        {row.category}: {row.title}
+        {row.title}
       </Text>
       {row.siteCount > 1 ? <Text dimColor> ×{row.siteCount}</Text> : null}
-      <Text dimColor>
-        {"  "}
-        {row.location}
-      </Text>
     </Text>
   );
 };

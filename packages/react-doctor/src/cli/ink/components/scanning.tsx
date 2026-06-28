@@ -15,27 +15,29 @@ export const Scanning = ({ progressText, liveCount, recent }: ScanningProps) => 
     <Box flexDirection="column">
       <Text wrap="truncate-end">
         <Text color="cyan">
-          <Spinner type="dots" />{" "}
+          <Spinner type="dots" />
         </Text>
-        <Text>{progressText ?? "Scanning…"}</Text>
-        <Text dimColor>
-          {"  "}
-          {liveCount} found
-        </Text>
+        <Text> {progressText ?? "Scanning…"}</Text>
+        {liveCount > 0 ? (
+          <Text dimColor>
+            {"  ·  "}
+            {liveCount} found
+          </Text>
+        ) : null}
       </Text>
       {recent.map((diagnostic, index) => {
         const variant = severityVariant(diagnostic.severity === "error" ? "error" : "warning");
         const location =
           diagnostic.line > 0 ? `${diagnostic.filePath}:${diagnostic.line}` : diagnostic.filePath;
         return (
-          <Text
-            key={`${diagnostic.filePath}:${diagnostic.line}:${index}`}
-            dimColor
-            wrap="truncate-end"
-          >
+          <Text key={`${diagnostic.filePath}:${diagnostic.line}:${index}`} wrap="truncate-end">
             {"  "}
-            {variant.icon} {diagnostic.title ?? `${diagnostic.plugin}/${diagnostic.rule}`}{" "}
-            {location}
+            <Text color={variant.color}>{variant.icon}</Text>
+            <Text> {diagnostic.title ?? `${diagnostic.plugin}/${diagnostic.rule}`}</Text>
+            <Text dimColor>
+              {"  "}
+              {location}
+            </Text>
           </Text>
         );
       })}

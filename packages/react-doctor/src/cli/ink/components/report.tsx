@@ -3,42 +3,59 @@ import { useMemo } from "react";
 import type { ScanReport } from "../scan-store.js";
 import { useExitOnCtrlC } from "../hooks/use-exit-on-ctrl-c.js";
 import { useStdoutDimensions } from "../hooks/use-stdout-dimensions.js";
-import { buildCategoryTallies } from "../lib/category-tallies.js";
 import { buildDiagnosticRows } from "../lib/diagnostic-rows.js";
-import { CategoryBreakdown } from "./category-breakdown.js";
 import { DiagnosticList } from "./diagnostic-list.js";
 import { ScoreHeader } from "./score-header.js";
 
 export interface ReportProps {
   readonly report: ScanReport;
-  /** q / Esc handler. In a drill-in (monorepo) this pops back to the summary. */
+  /** q / Esc handler that exits the app. */
   readonly onExit: () => void;
+  /** When set (monorepo flat view), shows a "· N projects" span in the status bar. */
+  readonly projectCount?: number;
   /** Hint shown in the empty-state footer (e.g. "Esc back · q quit"). */
   readonly exitHint?: string;
 }
 
-// Score header (face box, 4 lines + trailing blank + the "you could improve"
-// line), the detail preview (headline + message + fix + location + a ~7-line
-// code frame), the divider, and the status bar — reserved off the terminal
-// height so the list gets the rest. Generous so the code frame never clips.
+// Rows the score header eats (face box, 4 lines + trailing blank + the "you
+// could improve" line), the stacked detail preview (headline + message + fix +
+// location + a bordered ~7-line code frame), the divider, and the status bar —
+// reserved off the terminal height so the list gets the rest.
 const HEADER_ROWS = 6;
-const DETAIL_ROWS = 13;
+const DETAIL_ROWS = 15;
 const STATUS_ROWS = 2;
 const DIVIDER_ROWS = 1;
-const CHROME_ROWS = HEADER_ROWS + DETAIL_ROWS + STATUS_ROWS + DIVIDER_ROWS + 1;
+const LIST_MARGIN_ROWS = 1;
+// Stacked (narrow): header, list, divider, detail, and status all stack.
+const STACKED_CHROME_ROWS =
+  HEADER_ROWS + LIST_MARGIN_ROWS + DETAIL_ROWS + DIVIDER_ROWS + STATUS_ROWS;
+// Split (wide): the header sits atop the list in the left column and the detail
+// fills the right column beside both, so only the header, the list margin, and
+// the status bar are reserved off the column height.
+const SPLIT_CHROME_ROWS = HEADER_ROWS + LIST_MARGIN_ROWS + STATUS_ROWS;
 const MIN_LIST_ROWS = 3;
 const MIN_WIDTH = 24;
+// Below either of these the side-by-side layout is too cramped (the list and
+// the detail's code frame fight for width / height), so fall back to stacked.
+const WIDE_LAYOUT_MIN_COLUMNS = 120;
+const WIDE_LAYOUT_MIN_ROWS = 22;
+// Share of the width the detail column gets in the split layout (the code frame
+// reads better with the larger share); the list takes the rest minus a gutter.
+const DETAIL_WIDTH_FRACTION = 0.6;
+const COLUMN_GUTTER_WIDTH = 3;
+const MIN_COLUMN_WIDTH = 20;
 
-/** Full interactive report: score header above the scrollable diagnostics list. */
-export const Report = ({ report, onExit, exitHint = "q quit" }: ReportProps) => {
+/**
+ * Full interactive report: the score header above the scrollable, category-
+ * grouped diagnostics list. On a wide terminal the header sits atop the list in
+ * the left column and the detail preview fills the right column beside them; on
+ * a narrow one everything stacks.
+ */
+export const Report = ({ report, onExit, projectCount, exitHint = "q quit" }: ReportProps) => {
   const { rows: terminalRows, columns } = useStdoutDimensions();
   const diagnosticRows = useMemo(
     () => buildDiagnosticRows(report.diagnostics, report.score),
     [report.diagnostics, report.score],
-  );
-  const categoryRowCount = useMemo(
-    () => buildCategoryTallies(report.diagnostics).length,
-    [report.diagnostics],
   );
 
   useExitOnCtrlC();
@@ -47,21 +64,32 @@ export const Report = ({ report, onExit, exitHint = "q quit" }: ReportProps) => 
   });
 
   const width = Math.max(MIN_WIDTH, columns - 2);
-  // The category breakdown sits between the header and the list; reserve its
-  // rows (plus a one-line margin) so the list viewport doesn't overflow.
-  const breakdownRows = categoryRowCount > 0 ? categoryRowCount + 1 : 0;
-  const listHeight = Math.max(MIN_LIST_ROWS, terminalRows - CHROME_ROWS - breakdownRows);
+  const isWide = columns >= WIDE_LAYOUT_MIN_COLUMNS && terminalRows >= WIDE_LAYOUT_MIN_ROWS;
+  const listHeight = Math.max(
+    MIN_LIST_ROWS,
+    terminalRows - (isWide ? SPLIT_CHROME_ROWS : STACKED_CHROME_ROWS),
+  );
+  const detailColumnWidth = Math.max(MIN_COLUMN_WIDTH, Math.floor(width * DETAIL_WIDTH_FRACTION));
+  const listColumnWidth = Math.max(
+    MIN_COLUMN_WIDTH,
+    width - detailColumnWidth - COLUMN_GUTTER_WIDTH,
+  );
+
+  const scoreHeader = (
+    <ScoreHeader
+      score={report.score}
+      projectedScore={report.projectedScore}
+      projectName={report.projectName}
+      issueCount={report.diagnostics.length}
+      noScoreMessage={report.noScoreMessage}
+      width={isWide ? listColumnWidth : width}
+    />
+  );
 
   if (diagnosticRows.length === 0) {
     return (
       <Box flexDirection="column">
-        <ScoreHeader
-          score={report.score}
-          projectedScore={report.projectedScore}
-          projectName={report.projectName}
-          issueCount={0}
-          noScoreMessage={report.noScoreMessage}
-        />
+        {scoreHeader}
         <Box marginTop={1}>
           <Text color="green">✔ No issues found. Nice work.</Text>
         </Box>
@@ -71,27 +99,18 @@ export const Report = ({ report, onExit, exitHint = "q quit" }: ReportProps) => 
   }
 
   return (
-    <Box flexDirection="column">
-      <ScoreHeader
-        score={report.score}
-        projectedScore={report.projectedScore}
-        projectName={report.projectName}
-        issueCount={report.diagnostics.length}
-        noScoreMessage={report.noScoreMessage}
-      />
-      <Box marginTop={1}>
-        <CategoryBreakdown diagnostics={report.diagnostics} />
-      </Box>
-      <Box marginTop={1}>
-        <DiagnosticList
-          rows={diagnosticRows}
-          width={width}
-          listHeight={listHeight}
-          rootDirectory={report.rootDirectory}
-          onExit={onExit}
-          exitHint={exitHint}
-        />
-      </Box>
-    </Box>
+    <DiagnosticList
+      header={scoreHeader}
+      rows={diagnosticRows}
+      width={width}
+      listColumnWidth={listColumnWidth}
+      detailColumnWidth={detailColumnWidth}
+      listHeight={listHeight}
+      layout={isWide ? "split" : "stacked"}
+      rootDirectory={report.rootDirectory}
+      projectCount={projectCount}
+      onExit={onExit}
+      exitHint={exitHint}
+    />
   );
 };

@@ -1,3 +1,4 @@
+import { getCategoryImpact } from "@react-doctor/core";
 import { Box, Text } from "ink";
 import { useMemo } from "react";
 import { buildCodeFrame } from "../../utils/build-code-frame.js";
@@ -9,7 +10,10 @@ export interface DiagnosticDetailProps {
   readonly rootDirectory: string;
 }
 
-const INDENT = "    ";
+// Body lines hang-indent via container padding (not a leading string) so a
+// wrapped continuation line lines up under the first line instead of falling
+// back to column 0.
+const DETAIL_INDENT_COLUMNS = 4;
 
 /**
  * Detail for the selected rule group, styled after the CLI's rule block
@@ -31,6 +35,7 @@ export const DiagnosticDetail = ({ row, rootDirectory }: DiagnosticDetailProps) 
   if (!row) return null;
   const variant = severityVariant(row.severity);
   const { representative } = row;
+  const impact = getCategoryImpact(row.category);
 
   return (
     <Box flexDirection="column">
@@ -40,32 +45,46 @@ export const DiagnosticDetail = ({ row, rootDirectory }: DiagnosticDetailProps) 
           {variant.icon}{" "}
         </Text>
         <Text color={variant.color} bold>
-          {row.category}: {row.title}
+          {row.title}
         </Text>
         {row.siteCount > 1 ? <Text dimColor> ×{row.siteCount}</Text> : null}
       </Text>
-      <Text wrap="wrap">
-        {INDENT}
-        {representative.message}
-      </Text>
-      {representative.help ? (
-        <Text dimColor wrap="wrap">
-          {INDENT}→ {representative.help}
+      <Box flexDirection="column" paddingLeft={DETAIL_INDENT_COLUMNS}>
+        <Text dimColor wrap="truncate-end">
+          {row.category} · {variant.label}
         </Text>
-      ) : null}
-      <Text dimColor wrap="truncate-end">
-        {INDENT}
-        {row.location}
-      </Text>
+        {impact ? (
+          <Text dimColor wrap="wrap">
+            {impact}
+          </Text>
+        ) : null}
+        <Text wrap="wrap">{representative.message}</Text>
+        <Text dimColor wrap="truncate-end">
+          {row.location}
+        </Text>
+      </Box>
       {codeFrame ? (
-        <Box marginTop={1}>
+        <Box
+          marginTop={1}
+          marginLeft={DETAIL_INDENT_COLUMNS}
+          borderStyle="round"
+          borderColor="gray"
+          paddingX={1}
+          alignSelf="flex-start"
+        >
           <Text>{codeFrame}</Text>
         </Box>
       ) : null}
+      {representative.help ? (
+        <Box marginTop={1} paddingLeft={DETAIL_INDENT_COLUMNS}>
+          <Text dimColor wrap="wrap">
+            → {representative.help}
+          </Text>
+        </Box>
+      ) : null}
       {row.learnMore ? (
-        <Box marginTop={1}>
+        <Box marginTop={1} paddingLeft={DETAIL_INDENT_COLUMNS}>
           <Text color="cyan" wrap="truncate-end">
-            {INDENT}
             {row.learnMore}
           </Text>
         </Box>

@@ -41,6 +41,8 @@ export interface MultiProjectSummary {
   readonly scannedFileCount: number;
   readonly elapsedMilliseconds: number;
   readonly projectName: string;
+  /** Monorepo root the combined diagnostics' paths are resolved against. */
+  readonly rootDirectory: string;
   readonly isOffline: boolean;
   readonly noScoreMessage: string;
 }

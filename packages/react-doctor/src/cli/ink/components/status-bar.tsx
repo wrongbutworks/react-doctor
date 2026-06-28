@@ -6,6 +6,8 @@ export interface StatusBarProps {
   readonly warningCount: number;
   readonly position: number;
   readonly groupCount: number;
+  /** When set (monorepo flat view), shows a "· N projects" span. */
+  readonly projectCount?: number;
   readonly exitHint?: string;
 }
 
@@ -16,6 +18,7 @@ export const StatusBar = ({
   warningCount,
   position,
   groupCount,
+  projectCount,
   exitHint = "q quit",
 }: StatusBarProps) => (
   <Text wrap="truncate-end">
@@ -28,6 +31,12 @@ export const StatusBar = ({
     <Text color="yellow" dimColor>
       {warningCount} warnings
     </Text>
+    {projectCount !== undefined ? (
+      <Text dimColor>
+        {" · "}
+        {projectCount} {projectCount === 1 ? "project" : "projects"}
+      </Text>
+    ) : null}
     <Text dimColor>
       {"   "}
       {position}/{groupCount} · ↑↓ move · {exitHint}

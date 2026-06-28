@@ -451,6 +451,27 @@ export const DIAGNOSTIC_CATEGORY_BUCKETS = [
   "Maintainability",
 ] as const;
 
+// One concrete line per category naming what the user pays if these issues
+// ship — the "why going through these is worth it" the diagnostic list can't
+// convey from a bare error/warning glyph. Category-level (not per-rule) on
+// purpose: KISS, no new rule/diagnostic field, no schema change. `satisfies`
+// keeps it exhaustive over the buckets above.
+export const CATEGORY_IMPACT = {
+  Security: "An attacker can read user data, act as your users, or run code you never shipped.",
+  Bugs: "Real users hit crashes, wrong output, or state that silently corrupts.",
+  Performance: "Users feel extra latency and wasted renders on every interaction.",
+  Accessibility: "Users on screen readers, keyboards, or assistive tech get locked out.",
+  Maintainability: "Every future change gets slower and riskier to make.",
+} satisfies Record<(typeof DIAGNOSTIC_CATEGORY_BUCKETS)[number], string>;
+
+// Safe lookup for an arbitrary category string (legacy / adopted rules may
+// report categories outside the closed bucket set, so this returns undefined
+// rather than indexing blindly).
+export const getCategoryImpact = (category: string): string | undefined =>
+  Object.hasOwn(CATEGORY_IMPACT, category)
+    ? CATEGORY_IMPACT[category as keyof typeof CATEGORY_IMPACT]
+    : undefined;
+
 // Rules whose heuristic only makes sense in application code. A published
 // library deliberately exposes flexible primitives (components built in
 // render to capture closures, many `render*` slots for composition), so these
