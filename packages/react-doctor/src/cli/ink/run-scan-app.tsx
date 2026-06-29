@@ -18,10 +18,12 @@ import { discoverWorkspacePackages, selectProjects } from "../utils/select-proje
 import { isCiEnvironment } from "../utils/is-ci-environment.js";
 import { formatElapsedTime } from "../utils/render-diagnostics.js";
 import { printFooter } from "../utils/render-summary.js";
+import { detectLaunchableAgents } from "../utils/detect-launchable-agents.js";
+import { CLI_AGENT_BINARIES, launchCliAgent } from "../utils/launch-agent.js";
 import { ProjectSelect } from "./components/project-select.js";
 import { ScanApp } from "./scan-app.js";
 import { createScanStore } from "./scan-store.js";
-import type { MultiProjectSummary, ScanReport } from "./scan-store.js";
+import type { MultiProjectSummary, ScanReport, TuiHandoffRequest } from "./scan-store.js";
 
 export interface RunScanAppInput {
   readonly directory: string;
@@ -202,12 +204,42 @@ const printExitFooter = async (input: ExitFooterInput): Promise<void> => {
   );
 };
 
+// Fulfills a triage handoff once the Ink app has unmounted (so the agent CLI
+// can take over this TTY). On launch failure the prompt is printed instead, so
+// the user can paste it into any agent — mirroring the post-scan handoff.
+const performTuiHandoff = async (
+  request: TuiHandoffRequest,
+  rootDirectory: string,
+): Promise<void> => {
+  try {
+    await launchCliAgent(request.agentId, request.prompt, rootDirectory);
+  } catch {
+    process.stdout.write(
+      `${highlighter.warn("⚠")} Couldn't launch ${CLI_AGENT_BINARIES[request.agentId]}. Here's the prompt instead:\n`,
+    );
+    process.stdout.write(`${highlighter.dim("──── Agent prompt ────")}\n`);
+    process.stdout.write(`${request.prompt}\n`);
+    process.stdout.write(`${highlighter.dim("──────────────────────")}\n`);
+  }
+};
+
 const runSingleProjectScan = async (
   directory: string,
   input: RunScanAppInput,
 ): Promise<RunScanAppResult> => {
   const store = createScanStore();
-  const instance = render(<ScanApp store={store} />, { exitOnCtrlC: false });
+  const launchableAgents = await detectLaunchableAgents();
+  let pendingHandoff: TuiHandoffRequest | null = null;
+  const instance = render(
+    <ScanApp
+      store={store}
+      launchableAgents={launchableAgents}
+      onHandoff={(request) => {
+        pendingHandoff = request;
+      }}
+    />,
+    { exitOnCtrlC: false },
+  );
   const isOffline = resolveIsOffline(input);
   const noScoreMessage = buildNoScoreMessage(input.options?.noScore === true);
 
@@ -220,6 +252,7 @@ const runSingleProjectScan = async (
       toScanReport({ result, rootDirectory: directory, projectedScore, isOffline, noScoreMessage }),
     );
     await instance.waitUntilExit();
+    if (pendingHandoff) await performTuiHandoff(pendingHandoff, directory);
     await printExitFooter({
       diagnostics: result.diagnostics,
       scoreResult: result.score,
@@ -245,7 +278,18 @@ const runMultiProjectScan = async (
   input: RunScanAppInput,
 ): Promise<RunScanAppResult> => {
   const store = createScanStore();
-  const instance = render(<ScanApp store={store} />, { exitOnCtrlC: false });
+  const launchableAgents = await detectLaunchableAgents();
+  let pendingHandoff: TuiHandoffRequest | null = null;
+  const instance = render(
+    <ScanApp
+      store={store}
+      launchableAgents={launchableAgents}
+      onHandoff={(request) => {
+        pendingHandoff = request;
+      }}
+    />,
+    { exitOnCtrlC: false },
+  );
   const isOffline = resolveIsOffline(input);
   const noScoreMessage = buildNoScoreMessage(input.options?.noScore === true);
 
@@ -312,6 +356,7 @@ const runMultiProjectScan = async (
     };
     store.setSummary(summary);
     await instance.waitUntilExit();
+    if (pendingHandoff) await performTuiHandoff(pendingHandoff, rootDirectory);
     await printExitFooter({
       diagnostics: combinedDiagnostics,
       scoreResult: summary.aggregateScore,

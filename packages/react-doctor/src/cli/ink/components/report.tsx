@@ -1,6 +1,7 @@
 import { Box, Text, useInput } from "ink";
 import { useMemo } from "react";
-import type { ScanReport } from "../scan-store.js";
+import type { CliAgentId } from "../../utils/launch-agent.js";
+import type { ScanReport, TuiHandoffRequest } from "../scan-store.js";
 import { useExitOnCtrlC } from "../hooks/use-exit-on-ctrl-c.js";
 import { useStdoutDimensions } from "../hooks/use-stdout-dimensions.js";
 import { buildDiagnosticRows } from "../lib/diagnostic-rows.js";
@@ -11,6 +12,10 @@ export interface ReportProps {
   readonly report: ScanReport;
   /** q / Esc handler that exits the app. */
   readonly onExit: () => void;
+  /** Launchable CLI agents, in hotkey order, for the right-panel triage actions. */
+  readonly launchableAgents?: ReadonlyArray<CliAgentId>;
+  /** Hands the selected issue's prompt to an agent; the caller exits + launches. */
+  readonly onHandoff?: (request: TuiHandoffRequest) => void;
   /** When set (monorepo flat view), shows a "· N projects" span in the status bar. */
   readonly projectCount?: number;
   /** Hint shown in the empty-state footer (e.g. "Esc to go back · q to quit"). */
@@ -26,9 +31,12 @@ const DETAIL_ROWS = 15;
 const STATUS_ROWS = 2;
 const DIVIDER_ROWS = 1;
 const LIST_MARGIN_ROWS = 1;
-// Stacked (narrow): header, list, divider, detail, and status all stack.
+// Triage actions block (header + copy + up to 3 agents + read toggle + margin),
+// stacked below the detail on a narrow terminal.
+const ACTIONS_ROWS = 7;
+// Stacked (narrow): header, list, divider, detail, actions, and status all stack.
 const STACKED_CHROME_ROWS =
-  HEADER_ROWS + LIST_MARGIN_ROWS + DETAIL_ROWS + DIVIDER_ROWS + STATUS_ROWS;
+  HEADER_ROWS + LIST_MARGIN_ROWS + DETAIL_ROWS + DIVIDER_ROWS + ACTIONS_ROWS + STATUS_ROWS;
 // Split (wide): the header sits atop the list in the left column and the detail
 // fills the right column beside both, so only the header, the list margin, and
 // the status bar are reserved off the column height.
@@ -51,7 +59,14 @@ const MIN_COLUMN_WIDTH = 20;
  * the left column and the detail preview fills the right column beside them; on
  * a narrow one everything stacks.
  */
-export const Report = ({ report, onExit, projectCount, exitHint = "q to quit" }: ReportProps) => {
+export const Report = ({
+  report,
+  onExit,
+  launchableAgents = [],
+  onHandoff,
+  projectCount,
+  exitHint = "q to quit",
+}: ReportProps) => {
   const { rows: terminalRows, columns } = useStdoutDimensions();
   const diagnosticRows = useMemo(
     () => buildDiagnosticRows(report.diagnostics, report.score),
@@ -59,9 +74,14 @@ export const Report = ({ report, onExit, projectCount, exitHint = "q to quit" }:
   );
 
   useExitOnCtrlC();
-  useInput((input, key) => {
-    if (input === "q" || key.escape) onExit();
-  });
+  // Only the empty-state view below owns q/Esc; once there are rows the
+  // DiagnosticList handles input (Esc there means "leave the actions pane").
+  useInput(
+    (input, key) => {
+      if (input === "q" || key.escape) onExit();
+    },
+    { isActive: diagnosticRows.length === 0 },
+  );
 
   const width = Math.max(MIN_WIDTH, columns - 2);
   const isWide = columns >= WIDE_LAYOUT_MIN_COLUMNS && terminalRows >= WIDE_LAYOUT_MIN_ROWS;
@@ -108,6 +128,9 @@ export const Report = ({ report, onExit, projectCount, exitHint = "q to quit" }:
       listHeight={listHeight}
       layout={isWide ? "split" : "stacked"}
       rootDirectory={report.rootDirectory}
+      projectName={report.projectName}
+      launchableAgents={launchableAgents}
+      onHandoff={onHandoff}
       projectCount={projectCount}
       onExit={onExit}
       exitHint={exitHint}

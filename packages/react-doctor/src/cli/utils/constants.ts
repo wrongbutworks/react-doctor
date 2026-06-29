@@ -49,6 +49,10 @@ export const GH_PR_LIST_MAX = 100;
 // compact, passable CLI argument.
 export const HANDOFF_MAX_FILES_PER_RULE = 3;
 
+// Cap on sites listed inline in the interactive report's per-issue triage
+// prompt, so a single rule with hundreds of sites still copies a tight prompt.
+export const TUI_ISSUE_PROMPT_MAX_SITES = 8;
+
 // Social proof for the "Add to CI" pitch (shown in the post-scan handoff
 // prompt and embedded in the agent-handoff prompt).
 export const CI_TRUST_COMPANIES = "PayPal, Rippling, and Alibaba";

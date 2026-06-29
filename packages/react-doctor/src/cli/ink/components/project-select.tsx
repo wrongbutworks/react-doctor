@@ -2,7 +2,6 @@ import path from "node:path";
 import figures from "figures";
 import { Box, Text, useInput } from "ink";
 import { useMemo, useState } from "react";
-import type { ReactNode } from "react";
 import type { WorkspacePackage } from "@react-doctor/core";
 import { useExitOnCtrlC } from "../hooks/use-exit-on-ctrl-c.js";
 import { useStdoutDimensions } from "../hooks/use-stdout-dimensions.js";
@@ -36,13 +35,15 @@ const clamp = (value: number, min: number, max: number): number =>
 const isPrintable = (input: string): boolean =>
   input.length > 0 && [...input].every((char) => char.charCodeAt(0) >= 32);
 
-// Render the project name with its fuzzy-matched chars lit up, so it's clear why
-// a result survived the filter.
-const renderName = (
-  name: string,
-  matchedIndices: ReadonlyArray<number>,
-  isSelected: boolean,
-): ReactNode => {
+interface MatchedNameProps {
+  readonly name: string;
+  readonly matchedIndices: ReadonlyArray<number>;
+  readonly isSelected: boolean;
+}
+
+// The project name with its fuzzy-matched chars lit up, so it's clear why a
+// result survived the filter.
+const MatchedName = ({ name, matchedIndices, isSelected }: MatchedNameProps) => {
   if (matchedIndices.length === 0) {
     return (
       <Text bold={isSelected} wrap="truncate-end">
@@ -202,17 +203,6 @@ export const ProjectSelect = ({ packages, rootDirectory, onSubmit }: ProjectSele
     ...packages.map((workspacePackage) => workspacePackage.name.length),
   );
 
-  // The footer's Enter clause states exactly what will run, so the empty-set
-  // fallback (scan the highlighted row) is never a surprise.
-  const enterAction =
-    checked.size === 0
-      ? current
-        ? `scan ${current.name}`
-        : "scan"
-      : checked.size === packages.length
-        ? `scan all · ${checked.size}`
-        : `scan ${checked.size} selected`;
-
   return (
     <Box flexDirection="column">
       <Text wrap="truncate-end">
@@ -249,7 +239,11 @@ export const ProjectSelect = ({ packages, rootDirectory, onSubmit }: ProjectSele
                 <Text color={isChecked ? "green" : undefined}>
                   {isChecked ? `${figures.radioOn} ` : `${figures.radioOff} `}
                 </Text>
-                {renderName(match.workspacePackage.name, match.matchedIndices, isSelected)}
+                <MatchedName
+                  name={match.workspacePackage.name}
+                  matchedIndices={match.matchedIndices}
+                  isSelected={isSelected}
+                />
                 <Text dimColor>
                   {" ".repeat(longestNameLength - match.workspacePackage.name.length + 2)}
                   {path.relative(rootDirectory, match.workspacePackage.directory) || "."}
@@ -259,13 +253,15 @@ export const ProjectSelect = ({ packages, rootDirectory, onSubmit }: ProjectSele
           })
         )}
       </Box>
-      <Text dimColor wrap="truncate-end">
-        {isSearching
-          ? "type to filter · enter confirm · esc clear"
-          : "space select · a all · / search · "}
-        {isSearching ? null : <Text color="cyan">enter</Text>}
-        {isSearching ? null : ` ${enterAction} · q cancel`}
-      </Text>
+      <Box marginTop={1}>
+        <Text dimColor wrap="truncate-end">
+          {isSearching
+            ? "type to filter · enter confirm · esc clear"
+            : "space select · a all · / search · "}
+          {isSearching ? null : <Text color="cyan">enter</Text>}
+          {isSearching ? null : " to submit · q cancel"}
+        </Text>
+      </Box>
     </Box>
   );
 };

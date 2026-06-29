@@ -1,9 +1,14 @@
-import type { MultiProjectSummary, ScanReport } from "../scan-store.js";
+import type { CliAgentId } from "../../utils/launch-agent.js";
+import type { MultiProjectSummary, ScanReport, TuiHandoffRequest } from "../scan-store.js";
 import { Report } from "./report.js";
 
 export interface SummaryProps {
   readonly summary: MultiProjectSummary;
   readonly onExit: () => void;
+  /** Launchable CLI agents for the report's right-panel triage actions. */
+  readonly launchableAgents?: ReadonlyArray<CliAgentId>;
+  /** Hands the selected issue's prompt to an agent; the caller exits + launches. */
+  readonly onHandoff?: (request: TuiHandoffRequest) => void;
 }
 
 /**
@@ -13,7 +18,7 @@ export interface SummaryProps {
  * the shared root resolves every code frame, so this is just the single-project
  * `Report` fed the combined diagnostics plus the aggregate (worst) score.
  */
-export const Summary = ({ summary, onExit }: SummaryProps) => {
+export const Summary = ({ summary, onExit, launchableAgents, onHandoff }: SummaryProps) => {
   const report: ScanReport = {
     diagnostics: summary.combinedDiagnostics,
     score: summary.aggregateScore,
@@ -25,5 +30,13 @@ export const Summary = ({ summary, onExit }: SummaryProps) => {
     isOffline: summary.isOffline,
     noScoreMessage: summary.noScoreMessage,
   };
-  return <Report report={report} onExit={onExit} projectCount={summary.projects.length} />;
+  return (
+    <Report
+      report={report}
+      onExit={onExit}
+      launchableAgents={launchableAgents}
+      onHandoff={onHandoff}
+      projectCount={summary.projects.length}
+    />
+  );
 };

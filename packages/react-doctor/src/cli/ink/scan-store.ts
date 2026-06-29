@@ -4,7 +4,19 @@ import type { Diagnostic, ScoreResult } from "@react-doctor/core";
 // nested-array readonly-ness. The settled `report` keeps the index type.
 import type { Diagnostic as LiveDiagnostic } from "@react-doctor/core/schemas";
 
+import type { CliAgentId } from "../utils/launch-agent.js";
+
 export type ScanPhase = "scanning" | "report" | "summary" | "done";
+
+/**
+ * A request to hand the selected issue's fix prompt to a CLI agent. Produced by
+ * the report's triage actions and fulfilled by the runner AFTER the Ink app
+ * unmounts — the agent inherits this TTY, so the TUI must yield it first.
+ */
+export interface TuiHandoffRequest {
+  readonly agentId: CliAgentId;
+  readonly prompt: string;
+}
 
 export type ProgressStatus = "active" | "succeeded" | "failed";
 

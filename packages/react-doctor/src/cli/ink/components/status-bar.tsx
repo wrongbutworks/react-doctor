@@ -6,8 +6,12 @@ export interface StatusBarProps {
   readonly warningCount: number;
   readonly position: number;
   readonly groupCount: number;
+  /** Issues not yet triaged ("read") — shown as a "· N unread" span. */
+  readonly unreadCount?: number;
   /** When set (monorepo flat view), shows a "· N projects" span. */
   readonly projectCount?: number;
+  /** Context-sensitive navigation hint (e.g. "↑/↓ move · tab actions"). */
+  readonly keyHints?: string;
   readonly exitHint?: string;
 }
 
@@ -18,7 +22,9 @@ export const StatusBar = ({
   warningCount,
   position,
   groupCount,
+  unreadCount,
   projectCount,
+  keyHints = "↑/↓ to move",
   exitHint = "q to quit",
 }: StatusBarProps) => (
   <Text wrap="truncate-end">
@@ -31,6 +37,12 @@ export const StatusBar = ({
     <Text color="yellow" dimColor>
       {warningCount} warnings
     </Text>
+    {unreadCount !== undefined ? (
+      <Text color={unreadCount > 0 ? "cyan" : undefined} dimColor={unreadCount === 0}>
+        {" · "}
+        {unreadCount} unread
+      </Text>
+    ) : null}
     {projectCount !== undefined ? (
       <Text dimColor>
         {" · "}
@@ -39,7 +51,7 @@ export const StatusBar = ({
     ) : null}
     <Text dimColor>
       {"   "}
-      {position}/{groupCount} · ↑/↓ to move · {exitHint}
+      {position}/{groupCount} · {keyHints} · {exitHint}
     </Text>
   </Text>
 );
