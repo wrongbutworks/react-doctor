@@ -13,7 +13,7 @@ export interface ReportProps {
   readonly onExit: () => void;
   /** When set (monorepo flat view), shows a "· N projects" span in the status bar. */
   readonly projectCount?: number;
-  /** Hint shown in the empty-state footer (e.g. "Esc back · q quit"). */
+  /** Hint shown in the empty-state footer (e.g. "Esc to go back · q to quit"). */
   readonly exitHint?: string;
 }
 
@@ -51,7 +51,7 @@ const MIN_COLUMN_WIDTH = 20;
  * the left column and the detail preview fills the right column beside them; on
  * a narrow one everything stacks.
  */
-export const Report = ({ report, onExit, projectCount, exitHint = "q quit" }: ReportProps) => {
+export const Report = ({ report, onExit, projectCount, exitHint = "q to quit" }: ReportProps) => {
   const { rows: terminalRows, columns } = useStdoutDimensions();
   const diagnosticRows = useMemo(
     () => buildDiagnosticRows(report.diagnostics, report.score),

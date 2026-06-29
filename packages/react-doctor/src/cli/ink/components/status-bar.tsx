@@ -19,7 +19,7 @@ export const StatusBar = ({
   position,
   groupCount,
   projectCount,
-  exitHint = "q quit",
+  exitHint = "q to quit",
 }: StatusBarProps) => (
   <Text wrap="truncate-end">
     <Text bold>
@@ -39,7 +39,7 @@ export const StatusBar = ({
     ) : null}
     <Text dimColor>
       {"   "}
-      {position}/{groupCount} · ↑↓ move · {exitHint}
+      {position}/{groupCount} · ↑/↓ to move · {exitHint}
     </Text>
   </Text>
 );
