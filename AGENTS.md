@@ -358,9 +358,10 @@ pnpm smoke:json-report   # validates the built CLI's JSON output against the sch
 ## GitHub Action versioning
 
 The composite GitHub Action is **versioned independently from the npm packages**. "The action"
-is `action.yml` (repo root) plus the scripts it shells out to (`scripts/ensure-json-report.mjs`,
-`scripts/render-github-action-comment.mjs`). Treat a change to any of those files as an action
-release.
+is `action.yml` (repo root) plus the scripts it shells out to
+(`scripts/ensure-json-report.mjs`, `scripts/normalize-changed-files.mjs`,
+`scripts/render-github-action-comment.mjs`, `scripts/resolve-package-spec.mjs`). Treat a
+change to any of those files as an action release.
 
 - Two tag namespaces coexist — never conflate them:
   - npm packages — `react-doctor@X.Y.Z`, `eslint-plugin-react-doctor@X.Y.Z`,
@@ -368,7 +369,7 @@ release.
     `.github/workflows/publish.yml`).
   - GitHub Action — `v`-prefixed semver `vX.Y.Z` plus a floating major `vN` (the GitHub Actions
     convention; the `v` prefix keeps these distinct from the unprefixed package tags above).
-    Current: latest is `v1.1.1`; `v1` → the same commit. The `v0.x` line is the pre-rebuild
+    Current: latest is `v2.2.2`; `v2` → the same commit. The `v0.x` line is the pre-rebuild
     action; the `f4035fce` PR-reporting rebuild is `v1.0.0`.
 - MUST: cut a tag on every commit that touches the action files. `feat(action)` → minor bump;
   everything else (`fix` / `refactor` / `chore` / `revert` / docs-only edits to `action.yml`) →
@@ -380,17 +381,17 @@ release.
 
 ```bash
 # new release at the commit that changed the action
-git tag -a v1.1.2 <commit> -m "react-doctor action v1.1.2"
+git tag -a v2.2.3 <commit> -m "react-doctor action v2.2.3"
 # move the floating major (force-update only the vN pointer)
-git tag -fa v1 <commit> -m "react-doctor action v1 (floating major -> v1.1.2)"
-git push origin v1.1.2
-git push --force origin v1   # the force applies to the moving major tag only
+git tag -fa v2 <commit> -m "react-doctor action v2 (floating major -> v2.2.3)"
+git push origin v2.2.3
+git push --force origin v2   # the force applies to the moving major tag only
 ```
 
 - MUST: never tell consumers to reference `@main` in docs/examples. `@main` runs whatever HEAD
   points to with `pull-requests: write` granted — a supply-chain risk (issue #299). Recommend a
   full commit-SHA pin with a trailing version comment for hardened CI
-  (`uses: millionco/react-doctor@<sha> # v1.1.1`), or `@vN` for convenience.
+  (`uses: millionco/react-doctor@<sha> # v2.2.2`), or `@vN` for convenience.
 
 ## Reference reading
 

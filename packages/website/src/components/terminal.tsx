@@ -60,7 +60,7 @@ const DIAGNOSTICS: RuleDiagnostic[] = [
     location: "src/app/actions/users.ts:18",
   },
   {
-    ruleKey: "react/no-array-index-key",
+    ruleKey: "react-doctor/no-array-index-key",
     severity: "error",
     message: "Array index is used as a key, so reordered items can keep the wrong state",
     help: "Use a unique, stable identifier from each item as the key prop.",

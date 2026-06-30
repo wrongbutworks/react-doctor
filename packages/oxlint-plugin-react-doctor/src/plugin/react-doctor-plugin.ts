@@ -25,12 +25,10 @@ const applyFrameworkRuleWrappers = (registry: Record<string, Rule>): Record<stri
   return wrapped;
 };
 
-// The plugin object loaded by oxlint (via `dist/react-doctor-plugin.js`)
-// and by `eslint-plugin.ts`. Rules are sourced from the codegen-built
-// `rule-registry.ts`, which scans every `defineRule({ id: "...", ... })`
-// declaration under `src/plugin/rules/<bucket>/<rule>.ts`. Adding a new
-// rule is a single-file operation: create the rule, set its `id`, run
-// `pnpm gen`.
+// The plugin object loaded by oxlint and the ESLint adapter. Rules are
+// sourced from the codegen-built `rule-registry.ts`, which scans every
+// `defineRule({ id: "...", ... })` declaration under
+// `src/plugin/rules/<bucket>/<rule>.ts`.
 const plugin: RulePlugin = {
   meta: { name: "react-doctor" },
   rules: applyFrameworkRuleWrappers(ruleRegistry),

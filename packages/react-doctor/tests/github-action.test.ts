@@ -4,8 +4,15 @@ import { describe, expect, it } from "vite-plus/test";
 
 const REPOSITORY_ROOT = path.resolve(import.meta.dirname, "..", "..", "..");
 const ACTION_YAML_PATH = path.join(REPOSITORY_ROOT, "action.yml");
+const ACTION_VERSION_BUMP_SCRIPT_PATH = path.join(
+  REPOSITORY_ROOT,
+  "scripts",
+  "recommend-action-version-bump.mjs",
+);
 
 const readActionYaml = (): string => fs.readFileSync(ACTION_YAML_PATH, "utf8");
+const readActionVersionBumpScript = (): string =>
+  fs.readFileSync(ACTION_VERSION_BUMP_SCRIPT_PATH, "utf8");
 const normalizeWhitespace = (value: string): string => value.replace(/\s+/g, " ");
 
 const extractBlock = (actionYaml: string, startMarker: string, endMarker: string): string => {
@@ -36,6 +43,7 @@ describe("GitHub Action contract", () => {
     for (const inputName of [
       "directory",
       "project",
+      "scope",
       "blocking",
       "comment",
       "review-comments",
@@ -64,7 +72,21 @@ describe("GitHub Action contract", () => {
     expect(outputsBlock).toContain("${{ steps.render.outputs.affected-files }}");
   });
 
-  it("collects PR changed files through the GitHub API instead of git ref checkout", () => {
+  it("tracks every shelled-out action script in the release recommendation list", () => {
+    const actionYaml = readActionYaml();
+    const actionVersionBumpScript = readActionVersionBumpScript();
+    for (const scriptName of [
+      "ensure-json-report.mjs",
+      "normalize-changed-files.mjs",
+      "render-github-action-comment.mjs",
+      "resolve-package-spec.mjs",
+    ]) {
+      expect(actionYaml).toContain(`scripts/${scriptName}`);
+      expect(actionVersionBumpScript).toContain(`scripts/${scriptName}`);
+    }
+  });
+
+  it("keeps the PR files API fallback free of ref checkout side effects", () => {
     const actionYaml = readActionYaml();
     const prFilesStep = normalizeWhitespace(extractStep(actionYaml, "- id: pr-files"));
 

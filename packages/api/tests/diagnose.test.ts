@@ -41,6 +41,9 @@ describe("diagnose", () => {
     expect(result).toHaveProperty("elapsedMilliseconds");
     expect(result.project.reactMajorVersion).toBe(19);
     expect(Array.isArray(result.diagnostics)).toBe(true);
+    expect(result.diagnostics.every((diagnostic) => diagnostic.filePath === "package.json")).toBe(
+      true,
+    );
   });
 
   it("throws NoReactDependencyError when the directory has package.json without react", async () => {

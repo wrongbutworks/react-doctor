@@ -23,4 +23,5 @@ export {
   NotADirectoryError,
   AmbiguousProjectError,
   isReactDoctorError,
+  isProjectDiscoveryError,
 } from "@react-doctor/core";

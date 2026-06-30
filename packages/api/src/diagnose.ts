@@ -48,15 +48,14 @@ const warnIfAiTrainingEnvironment = (): void => {
   );
 };
 
-// The production layer stack for the programmatic API. The only axis that
-// varies across calls is `Config`: with no override we load from disk
-// (`Config.layerNode`); with a per-project override the caller's already
-// resolved config drives `Config.layerOf(...)`. The supply-chain gate reads
-// `supplyChain.enabled` from that same effective config (default on), so the
-// one config input decides both. Every other service is identical, so the
-// stack is built once here rather than duplicated per variant.
+// The production layer stack for the programmatic API. Config varies by call:
+// with no override we load from disk (`Config.layerNode`); with a per-project
+// override the caller's already resolved config drives `Config.layerOf(...)`.
+// Lint also follows the effective options/config. Every other service is
+// identical, so the stack is built once here rather than duplicated per variant.
 const buildDiagnoseLayer = (
   config: ReactDoctorConfig | null,
+  shouldRunLint: boolean,
   configOverrideTarget?: Pick<ResolvedScanTarget, "resolvedDirectory" | "configSourceDirectory">,
 ) => {
   const configLayer =
@@ -73,7 +72,7 @@ const buildDiagnoseLayer = (
     DeadCode.layerNode,
     Files.layerNode,
     Git.layerNode,
-    Linter.layerOxlint,
+    shouldRunLint ? Linter.layerOxlint : Linter.layerOf([]),
     LintPartialFailures.layerLive,
     Progress.layerNoop,
     Reporter.layerNoop,
@@ -81,6 +80,11 @@ const buildDiagnoseLayer = (
     config?.supplyChain?.enabled !== false ? SupplyChain.layerNode : SupplyChain.layerOf([]),
   );
 };
+
+const resolveShouldRunLint = (
+  options: DiagnoseOptions,
+  effectiveConfig: ReactDoctorConfig | null,
+): boolean => options.lint ?? effectiveConfig?.lint ?? true;
 
 const buildInspectProgram = (
   scanTarget: ResolvedScanTarget,
@@ -141,7 +145,12 @@ const diagnoseDirectory = async (
   const output: InspectOutput = await Effect.runPromise(
     restoreLegacyThrow(
       program.pipe(
-        Effect.provide(buildDiagnoseLayer(scanTarget.userConfig)),
+        Effect.provide(
+          buildDiagnoseLayer(
+            scanTarget.userConfig,
+            resolveShouldRunLint(options, scanTarget.userConfig),
+          ),
+        ),
         Effect.provide(layerOtlp),
       ),
     ),
@@ -195,6 +204,7 @@ const diagnoseProject = async (
       batchConfig?.plugins !== undefined || projectConfig?.plugins !== undefined;
     const layer = buildDiagnoseLayer(
       effectiveConfig,
+      resolveShouldRunLint({ ...baseOptions, ...perProjectOptions }, effectiveConfig),
       didOverrideConfig
         ? {
             resolvedDirectory: scanTarget.resolvedDirectory,
