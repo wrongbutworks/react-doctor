@@ -1,3 +1,4 @@
+import { getSkillAgentConfig } from "agent-install";
 import { Box, Text, useInput } from "ink";
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
@@ -8,7 +9,7 @@ import type { DiagnosticListEntry } from "../lib/diagnostic-list-entries.js";
 import { buildIssuePrompt } from "../lib/build-issue-prompt.js";
 import type { DiagnosticRow } from "../lib/diagnostic-rows.js";
 import type { TuiHandoffRequest } from "../scan-store.js";
-import { DiagnosticActions, actionCount } from "./diagnostic-actions.js";
+import { DiagnosticActionMenu } from "./diagnostic-action-menu.js";
 import { DiagnosticDetail } from "./diagnostic-detail.js";
 import { DiagnosticItem } from "./diagnostic-item.js";
 import { StatusBar } from "./status-bar.js";
@@ -30,7 +31,7 @@ export interface DiagnosticListProps {
   readonly rootDirectory: string;
   /** Project name, woven into the copied / handed-off fix prompt. */
   readonly projectName: string;
-  /** Launchable CLI agents, in hotkey order; empty disables the run-in actions. */
+  /** Launchable CLI agents, in order; surfaced in the triage menu. */
   readonly launchableAgents: ReadonlyArray<CliAgentId>;
   /** Hands the selected issue's prompt to an agent; the caller exits + launches. */
   readonly onHandoff?: (request: TuiHandoffRequest) => void;
@@ -72,12 +73,13 @@ const renderEntry = (
  * by its rules, so a row reads as "⚠ Title" instead of repeating the category.
  * Scroll/selection (headers skipped) comes from the headless `useScrollViewport`;
  * this component is the chrome on top. On a wide terminal the score header + list
- * sit in the left column and the detail + triage actions fill the right column
- * beside them; on a narrow one everything stacks.
+ * sit in the left column and the detail fills the right column beside them; on a
+ * narrow one everything stacks.
  *
- * Triage: the selected issue is auto-marked read (an inbox queue), `x` flips it,
- * `c` copies a focused fix prompt, and `1`..`N` hand that prompt to a launchable
- * agent (which takes over the terminal once the app exits).
+ * Triage: visiting an issue auto-marks it read (the status bar tracks how many
+ * remain), and Enter raises a small menu over the issue to copy a focused fix
+ * prompt or hand it to a launchable agent (which takes over the terminal once
+ * the app exits).
  */
 export const DiagnosticList = ({
   header,
@@ -96,43 +98,42 @@ export const DiagnosticList = ({
   exitHint,
 }: DiagnosticListProps) => {
   const entries = useMemo(() => buildDiagnosticListEntries(rows), [rows]);
-  const [focusedPane, setFocusedPane] = useState<"list" | "actions">("list");
-  const [focusedActionIndex, setFocusedActionIndex] = useState(0);
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const [menuIndex, setMenuIndex] = useState(0);
 
   const { selectedIndex, visibleStart, visibleEnd } = useScrollViewport({
     itemCount: entries.length,
     height: listHeight,
     isSelectable: (index) => entries[index]?.kind === "item",
-    isActive: focusedPane === "list",
+    isActive: !isMenuOpen,
   });
 
   const visibleEntries = entries.slice(visibleStart, visibleEnd);
   const selectedEntry = entries[selectedIndex];
   const selected = selectedEntry?.kind === "item" ? selectedEntry.row : null;
   const selectedRuleKey = selected?.ruleKey ?? null;
-  const totalActions = actionCount(launchableAgents.length);
 
   const [readRuleKeys, setReadRuleKeys] = useState<ReadonlySet<string>>(() => new Set());
   const [copiedRuleKey, setCopiedRuleKey] = useState<string | null>(null);
 
-  // Inbox semantics: landing on an issue marks it read. Keyed on the rule, so
-  // toggling it back to unread sticks until the selection moves elsewhere.
+  // The menu's rows: Copy first, then one per launchable agent. Labels stay
+  // short (bare agent names) so the whole bar fits the panel without truncating.
+  const menuLabels = useMemo(
+    () => [
+      "Copy prompt",
+      ...launchableAgents.map((agentId) => getSkillAgentConfig(agentId).displayName),
+    ],
+    [launchableAgents],
+  );
+
+  // Inbox semantics: landing on an issue marks it read, so the status bar's
+  // "N unread" counter tracks how far through the queue you are.
   useEffect(() => {
     if (!selectedRuleKey) return;
     setReadRuleKeys((previous) =>
       previous.has(selectedRuleKey) ? previous : new Set(previous).add(selectedRuleKey),
     );
   }, [selectedRuleKey]);
-
-  const toggleSelectedRead = (): void => {
-    if (!selectedRuleKey) return;
-    setReadRuleKeys((previous) => {
-      const next = new Set(previous);
-      if (next.has(selectedRuleKey)) next.delete(selectedRuleKey);
-      else next.add(selectedRuleKey);
-      return next;
-    });
-  };
 
   const copySelectedPrompt = (): void => {
     if (!selected) return;
@@ -149,49 +150,42 @@ export const DiagnosticList = ({
     onExit();
   };
 
-  // Focused index maps to: 0 = Copy, 1..N = launchable agents, last = read toggle
-  // (the same order `DiagnosticActions` renders).
-  const runFocusedAction = (): void => {
-    if (focusedActionIndex === 0) return copySelectedPrompt();
-    if (focusedActionIndex <= launchableAgents.length) {
-      const agentId = launchableAgents[focusedActionIndex - 1];
-      if (agentId) launchSelectedInAgent(agentId);
+  // Menu index maps to: 0 = Copy, then one launchable agent per row.
+  const runMenuItem = (): void => {
+    if (menuIndex === 0) {
+      copySelectedPrompt();
+      setIsMenuOpen(false);
       return;
     }
-    toggleSelectedRead();
+    const agentId = launchableAgents[menuIndex - 1];
+    if (agentId) launchSelectedInAgent(agentId);
   };
 
-  const focusActions = (): void => {
-    if (!selected) return;
-    setFocusedActionIndex(0);
-    setFocusedPane("actions");
-  };
-
-  // List pane: the viewport owns ↑/↓; here we only handle quit and the move
-  // into the actions pane.
+  // Closed: the viewport owns ↑/↓; Enter raises the triage menu over the issue.
   useInput(
     (input, key) => {
       if (input === "q" || key.escape) return onExit();
-      if (key.tab || key.rightArrow) return focusActions();
+      if (key.return && selected) {
+        setMenuIndex(0);
+        setIsMenuOpen(true);
+      }
     },
-    { isActive: focusedPane === "list" },
+    { isActive: !isMenuOpen },
   );
 
-  // Actions pane: ↑/↓ walks the rows, Enter runs the focused one, and
-  // Tab/Esc/← hand focus back to the list.
+  // Open: ←/→ walk the bottom bar, Enter runs the choice, Esc dismisses.
   useInput(
     (input, key) => {
-      if (input === "q") return onExit();
-      if (key.escape || key.leftArrow || key.tab) return setFocusedPane("list");
-      if (key.upArrow || input === "k") {
-        return setFocusedActionIndex((index) => Math.max(0, index - 1));
+      if (key.escape) return setIsMenuOpen(false);
+      if (key.leftArrow || input === "h") {
+        return setMenuIndex((index) => Math.max(0, index - 1));
       }
-      if (key.downArrow || input === "j") {
-        return setFocusedActionIndex((index) => Math.min(totalActions - 1, index + 1));
+      if (key.rightArrow || input === "l") {
+        return setMenuIndex((index) => Math.min(menuLabels.length - 1, index + 1));
       }
-      if (key.return) return runFocusedAction();
+      if (key.return) return runMenuItem();
     },
-    { isActive: focusedPane === "actions" },
+    { isActive: isMenuOpen },
   );
 
   const errorRows = rows.filter((row) => row.severity === "error");
@@ -212,15 +206,31 @@ export const DiagnosticList = ({
     </Box>
   );
 
-  const actions = selected ? (
-    <DiagnosticActions
-      launchableAgents={launchableAgents}
-      isRead={selectedRuleKey !== null && readRuleKeys.has(selectedRuleKey)}
-      justCopied={copiedRuleKey === selectedRuleKey}
-      isFocused={focusedPane === "actions"}
-      focusedIndex={focusedActionIndex}
-    />
-  ) : null;
+  // The right region swaps the detail for the triage menu while it's open, so
+  // the report never carries always-on action chrome.
+  // The detail stays put; the triage menu is a fixed bar pinned to the bottom
+  // (above the status bar) so the issue's code frame remains visible while you
+  // choose. The copied confirmation rides under the detail.
+  const rightContent = (
+    <>
+      <DiagnosticDetail row={selected} rootDirectory={rootDirectory} />
+      {copiedRuleKey === selectedRuleKey ? (
+        <Box marginTop={1}>
+          <Text color="green">✓ Copied fix prompt</Text>
+        </Box>
+      ) : null}
+    </>
+  );
+
+  const renderBottomMenu = (menuWidth: number): ReactNode =>
+    isMenuOpen && selected ? (
+      <DiagnosticActionMenu
+        title={selected.title}
+        itemLabels={menuLabels}
+        focusedIndex={menuIndex}
+        width={menuWidth}
+      />
+    ) : null;
 
   const statusBar = (
     <Box marginTop={1}>
@@ -232,9 +242,7 @@ export const DiagnosticList = ({
         groupCount={rows.length}
         unreadCount={unreadCount}
         projectCount={projectCount}
-        keyHints={
-          focusedPane === "actions" ? "↑/↓ action · enter run · esc back" : "↑/↓ move · tab actions"
-        }
+        keyHints={isMenuOpen ? "←/→ select · enter run · esc close" : "↑/↓ move · enter actions"}
         exitHint={exitHint}
       />
     </Box>
@@ -258,8 +266,9 @@ export const DiagnosticList = ({
             borderBottom={false}
             paddingLeft={1}
           >
-            <DiagnosticDetail row={selected} rootDirectory={rootDirectory} />
-            {actions}
+            {rightContent}
+            <Box flexGrow={1} />
+            {renderBottomMenu(detailColumnWidth - 1)}
           </Box>
         </Box>
         {statusBar}
@@ -272,8 +281,8 @@ export const DiagnosticList = ({
       {header}
       <Box marginTop={1}>{listColumn}</Box>
       <Text dimColor>{"─".repeat(width)}</Text>
-      <DiagnosticDetail row={selected} rootDirectory={rootDirectory} />
-      {actions}
+      {rightContent}
+      {renderBottomMenu(width)}
       {statusBar}
     </Box>
   );

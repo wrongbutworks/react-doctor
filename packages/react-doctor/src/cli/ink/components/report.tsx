@@ -31,12 +31,10 @@ const DETAIL_ROWS = 15;
 const STATUS_ROWS = 2;
 const DIVIDER_ROWS = 1;
 const LIST_MARGIN_ROWS = 1;
-// Triage actions block (header + copy + up to 3 agents + read toggle + margin),
-// stacked below the detail on a narrow terminal.
-const ACTIONS_ROWS = 7;
-// Stacked (narrow): header, list, divider, detail, actions, and status all stack.
+// Stacked (narrow): header, list, divider, detail, and status all stack. The
+// triage menu reuses the detail region when open, so it needs no extra rows.
 const STACKED_CHROME_ROWS =
-  HEADER_ROWS + LIST_MARGIN_ROWS + DETAIL_ROWS + DIVIDER_ROWS + ACTIONS_ROWS + STATUS_ROWS;
+  HEADER_ROWS + LIST_MARGIN_ROWS + DETAIL_ROWS + DIVIDER_ROWS + STATUS_ROWS;
 // Split (wide): the header sits atop the list in the left column and the detail
 // fills the right column beside both, so only the header, the list margin, and
 // the status bar are reserved off the column height.
