@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { copyToClipboard, type CliAgentId } from "../../utils/launch-agent.js";
 import { useScrollViewport } from "../hooks/use-scroll-viewport.js";
+import { useStdoutDimensions } from "../hooks/use-stdout-dimensions.js";
 import { buildDiagnosticListEntries } from "../lib/diagnostic-list-entries.js";
 import type { DiagnosticListEntry } from "../lib/diagnostic-list-entries.js";
 import { buildIssuePrompt } from "../lib/build-issue-prompt.js";
@@ -35,11 +36,20 @@ export interface DiagnosticListProps {
   readonly launchableAgents: ReadonlyArray<CliAgentId>;
   /** Hands the selected issue's prompt to an agent; the caller exits + launches. */
   readonly onHandoff?: (request: TuiHandoffRequest) => void;
+  /** True when this repo has no React Doctor CI workflow yet (shows the callout). */
+  readonly canAddToCi?: boolean;
+  /** Requests CI setup; the caller exits + scaffolds the workflow. */
+  readonly onAddToCi?: () => void;
   /** When set (monorepo flat view), surfaced in the status bar. */
   readonly projectCount?: number;
   readonly onExit: () => void;
   readonly exitHint?: string;
 }
+
+const ADD_TO_CI_KEY = "a";
+// Rows the status bar eats; the action modal centers in the space above it.
+const MODAL_FOOTER_ROWS = 2;
+const MIN_MODAL_BODY_ROWS = 6;
 
 const sumSites = (rows: ReadonlyArray<DiagnosticRow>): number =>
   rows.reduce((total, row) => total + row.siteCount, 0);
@@ -93,6 +103,8 @@ export const DiagnosticList = ({
   projectName,
   launchableAgents,
   onHandoff,
+  canAddToCi,
+  onAddToCi,
   projectCount,
   onExit,
   exitHint,
@@ -100,6 +112,9 @@ export const DiagnosticList = ({
   const entries = useMemo(() => buildDiagnosticListEntries(rows), [rows]);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [menuIndex, setMenuIndex] = useState(0);
+
+  const isSplit = layout === "split";
+  const { rows: terminalRows } = useStdoutDimensions();
 
   const { selectedIndex, visibleStart, visibleEnd } = useScrollViewport({
     itemCount: entries.length,
@@ -161,10 +176,17 @@ export const DiagnosticList = ({
     if (agentId) launchSelectedInAgent(agentId);
   };
 
-  // Closed: the viewport owns ↑/↓; Enter raises the triage menu over the issue.
+  const showCiCallout = Boolean(canAddToCi && onAddToCi);
+
+  // Closed: the viewport owns ↑/↓; Enter raises the triage menu over the issue,
+  // and (when offered) `a` scaffolds CI then exits.
   useInput(
     (input, key) => {
       if (input === "q" || key.escape) return onExit();
+      if (showCiCallout && input === ADD_TO_CI_KEY) {
+        onAddToCi?.();
+        return onExit();
+      }
       if (key.return && selected) {
         setMenuIndex(0);
         setIsMenuOpen(true);
@@ -173,14 +195,14 @@ export const DiagnosticList = ({
     { isActive: !isMenuOpen },
   );
 
-  // Open: ←/→ walk the bottom bar, Enter runs the choice, Esc dismisses.
+  // Open: ↑/↓ walk the modal's actions, Enter runs the choice, Esc dismisses.
   useInput(
     (input, key) => {
       if (key.escape) return setIsMenuOpen(false);
-      if (key.leftArrow || input === "h") {
+      if (key.upArrow || input === "k") {
         return setMenuIndex((index) => Math.max(0, index - 1));
       }
-      if (key.rightArrow || input === "l") {
+      if (key.downArrow || input === "j") {
         return setMenuIndex((index) => Math.min(menuLabels.length - 1, index + 1));
       }
       if (key.return) return runMenuItem();
@@ -196,8 +218,6 @@ export const DiagnosticList = ({
     .filter((entry) => entry.kind === "item").length;
   const unreadCount = rows.length - rows.filter((row) => readRuleKeys.has(row.ruleKey)).length;
 
-  const isSplit = layout === "split";
-
   const listColumn = (
     <Box flexDirection="column" height={listHeight} width={isSplit ? listColumnWidth : width}>
       {visibleEntries.map((entry, index) =>
@@ -206,12 +226,10 @@ export const DiagnosticList = ({
     </Box>
   );
 
-  // The right region swaps the detail for the triage menu while it's open, so
-  // the report never carries always-on action chrome.
-  // The detail stays put; the triage menu is a fixed bar pinned to the bottom
-  // (above the status bar) so the issue's code frame remains visible while you
-  // choose. The copied confirmation rides under the detail.
-  const rightContent = (
+  // The detail stays put; the triage menu is a bar pinned to the bottom of the
+  // detail column (above the status bar) so the issue's code frame stays visible
+  // while you choose. The copied confirmation rides under the detail.
+  const detailContent = (
     <>
       <DiagnosticDetail row={selected} rootDirectory={rootDirectory} />
       {copiedRuleKey === selectedRuleKey ? (
@@ -222,15 +240,26 @@ export const DiagnosticList = ({
     </>
   );
 
-  const renderBottomMenu = (menuWidth: number): ReactNode =>
-    isMenuOpen && selected ? (
-      <DiagnosticActionMenu
-        title={selected.title}
-        itemLabels={menuLabels}
-        focusedIndex={menuIndex}
-        width={menuWidth}
-      />
-    ) : null;
+  const keyHints = isMenuOpen ? (
+    <>
+      <Text dimColor>↑/↓ select · </Text>
+      <Text color="cyan">enter</Text>
+      <Text dimColor> run · esc close</Text>
+    </>
+  ) : (
+    <>
+      <Text dimColor>↑/↓ move · </Text>
+      <Text color="cyan">enter</Text>
+      <Text dimColor> fix this</Text>
+      {showCiCallout ? (
+        <>
+          <Text dimColor> · </Text>
+          <Text color="green">{ADD_TO_CI_KEY}</Text>
+          <Text dimColor> add CI</Text>
+        </>
+      ) : null}
+    </>
+  );
 
   const statusBar = (
     <Box marginTop={1}>
@@ -242,15 +271,38 @@ export const DiagnosticList = ({
         groupCount={rows.length}
         unreadCount={unreadCount}
         projectCount={projectCount}
-        keyHints={isMenuOpen ? "←/→ select · enter run · esc close" : "↑/↓ move · enter actions"}
+        keyHints={keyHints}
         exitHint={exitHint}
       />
     </Box>
   );
 
+  // Enter floats this as a true overlay (Ink absolute positioning): the report
+  // stays drawn behind it, the centered modal card is composited on top, so the
+  // background isn't hidden — just dialogued over.
+  const overlay =
+    isMenuOpen && selected ? (
+      <Box
+        position="absolute"
+        top={0}
+        left={0}
+        width={width}
+        height={Math.max(MIN_MODAL_BODY_ROWS, terminalRows - MODAL_FOOTER_ROWS)}
+        justifyContent="center"
+        alignItems="center"
+      >
+        <DiagnosticActionMenu
+          title={selected.title}
+          itemLabels={menuLabels}
+          focusedIndex={menuIndex}
+          maxWidth={width}
+        />
+      </Box>
+    ) : null;
+
   if (isSplit) {
     return (
-      <Box flexDirection="column" width={width}>
+      <Box flexDirection="column" width={width} position="relative">
         <Box flexDirection="row">
           <Box flexDirection="column" width={listColumnWidth} marginRight={1}>
             {header}
@@ -266,24 +318,23 @@ export const DiagnosticList = ({
             borderBottom={false}
             paddingLeft={1}
           >
-            {rightContent}
-            <Box flexGrow={1} />
-            {renderBottomMenu(detailColumnWidth - 1)}
+            {detailContent}
           </Box>
         </Box>
         {statusBar}
+        {overlay}
       </Box>
     );
   }
 
   return (
-    <Box flexDirection="column" width={width}>
+    <Box flexDirection="column" width={width} position="relative">
       {header}
       <Box marginTop={1}>{listColumn}</Box>
       <Text dimColor>{"─".repeat(width)}</Text>
-      {rightContent}
-      {renderBottomMenu(width)}
+      {detailContent}
       {statusBar}
+      {overlay}
     </Box>
   );
 };

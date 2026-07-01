@@ -9,6 +9,10 @@ export interface SummaryProps {
   readonly launchableAgents?: ReadonlyArray<CliAgentId>;
   /** Hands the selected issue's prompt to an agent; the caller exits + launches. */
   readonly onHandoff?: (request: TuiHandoffRequest) => void;
+  /** True when this repo has no React Doctor CI workflow yet (shows the callout). */
+  readonly canAddToCi?: boolean;
+  /** Requests CI setup; the caller exits + scaffolds the workflow. */
+  readonly onAddToCi?: () => void;
 }
 
 /**
@@ -18,7 +22,14 @@ export interface SummaryProps {
  * the shared root resolves every code frame, so this is just the single-project
  * `Report` fed the combined diagnostics plus the aggregate (worst) score.
  */
-export const Summary = ({ summary, onExit, launchableAgents, onHandoff }: SummaryProps) => {
+export const Summary = ({
+  summary,
+  onExit,
+  launchableAgents,
+  onHandoff,
+  canAddToCi,
+  onAddToCi,
+}: SummaryProps) => {
   const report: ScanReport = {
     diagnostics: summary.combinedDiagnostics,
     score: summary.aggregateScore,
@@ -36,6 +47,8 @@ export const Summary = ({ summary, onExit, launchableAgents, onHandoff }: Summar
       onExit={onExit}
       launchableAgents={launchableAgents}
       onHandoff={onHandoff}
+      canAddToCi={canAddToCi}
+      onAddToCi={onAddToCi}
       projectCount={summary.projects.length}
     />
   );

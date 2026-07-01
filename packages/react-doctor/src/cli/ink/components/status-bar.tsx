@@ -1,4 +1,5 @@
 import { Text } from "ink";
+import type { ReactNode } from "react";
 
 export interface StatusBarProps {
   readonly total: number;
@@ -10,8 +11,8 @@ export interface StatusBarProps {
   readonly unreadCount?: number;
   /** When set (monorepo flat view), shows a "· N projects" span. */
   readonly projectCount?: number;
-  /** Context-sensitive navigation hint (e.g. "↑/↓ move · tab actions"). */
-  readonly keyHints?: string;
+  /** Context-sensitive navigation hint with its keys highlighted. */
+  readonly keyHints?: ReactNode;
   readonly exitHint?: string;
 }
 
@@ -24,7 +25,7 @@ export const StatusBar = ({
   groupCount,
   unreadCount,
   projectCount,
-  keyHints = "↑/↓ to move",
+  keyHints = <Text dimColor>↑/↓ to move</Text>,
   exitHint = "q to quit",
 }: StatusBarProps) => (
   <Text wrap="truncate-end">

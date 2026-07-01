@@ -20,6 +20,11 @@ import { formatElapsedTime } from "../utils/render-diagnostics.js";
 import { printFooter } from "../utils/render-summary.js";
 import { detectLaunchableAgents } from "../utils/detect-launchable-agents.js";
 import { CLI_AGENT_BINARIES, launchCliAgent } from "../utils/launch-agent.js";
+import { isReactDoctorWorkflowInstalled } from "../utils/install-github-workflow.js";
+import { findNearestPackageDirectory } from "../utils/install-doctor-script.js";
+import { setUpGitHubActions } from "../utils/set-up-github-actions.js";
+import { recordCount } from "../utils/record-metric.js";
+import { METRIC } from "../utils/constants.js";
 import { ProjectSelect } from "./components/project-select.js";
 import { ScanApp } from "./scan-app.js";
 import { createScanStore } from "./scan-store.js";
@@ -223,23 +228,62 @@ const performTuiHandoff = async (
   }
 };
 
-const runSingleProjectScan = async (
-  directory: string,
-  input: RunScanAppInput,
-): Promise<RunScanAppResult> => {
+// Whether this directory's nearest package lacks a React Doctor CI workflow —
+// gates the report's "add to CI" callout to repos that aren't wired up yet.
+const isCiUnconfigured = (directory: string): boolean =>
+  !isReactDoctorWorkflowInstalled(findNearestPackageDirectory(directory) ?? directory);
+
+// Scaffolds the GitHub Actions workflow once the Ink app has unmounted (it logs
+// + opens a PR via spinners, which can't run while Ink owns the terminal).
+// `agent.handoff` is the shared post-scan funnel metric — `handoff-to-agent`
+// tags its CI branch `outcome: "ci-yes"`, so the TUI mirrors that and adds
+// `source: "tui"` plus whether a workflow was actually written.
+const performCiSetup = async (rootDirectory: string): Promise<void> => {
+  const didCreateWorkflow = await setUpGitHubActions({ rootDirectory });
+  recordCount(METRIC.agentHandoff, 1, {
+    outcome: "ci-yes",
+    source: "tui",
+    created: didCreateWorkflow,
+  });
+};
+
+// Renders the interactive scan app wired to capture the two deferred actions
+// (agent handoff + CI setup) that can't run while Ink owns the terminal, and
+// returns a `settle()` that performs them — CI first, then handoff — once the
+// app has unmounted. `rootDirectory` is the folder both actions target.
+const mountScanApp = async (rootDirectory: string) => {
   const store = createScanStore();
   const launchableAgents = await detectLaunchableAgents();
-  let pendingHandoff: TuiHandoffRequest | null = null;
+  const pending: { handoff: TuiHandoffRequest | null; ciSetup: boolean } = {
+    handoff: null,
+    ciSetup: false,
+  };
   const instance = render(
     <ScanApp
       store={store}
       launchableAgents={launchableAgents}
       onHandoff={(request) => {
-        pendingHandoff = request;
+        pending.handoff = request;
+      }}
+      canAddToCi={isCiUnconfigured(rootDirectory)}
+      onAddToCi={() => {
+        pending.ciSetup = true;
       }}
     />,
     { exitOnCtrlC: false },
   );
+  const settle = async (): Promise<void> => {
+    if (pending.ciSetup) await performCiSetup(rootDirectory);
+    if (pending.handoff) await performTuiHandoff(pending.handoff, rootDirectory);
+  };
+  return { store, instance, settle };
+};
+
+const runSingleProjectScan = async (
+  directory: string,
+  input: RunScanAppInput,
+): Promise<RunScanAppResult> => {
+  const { store, instance, settle } = await mountScanApp(directory);
   const isOffline = resolveIsOffline(input);
   const noScoreMessage = buildNoScoreMessage(input.options?.noScore === true);
 
@@ -252,7 +296,7 @@ const runSingleProjectScan = async (
       toScanReport({ result, rootDirectory: directory, projectedScore, isOffline, noScoreMessage }),
     );
     await instance.waitUntilExit();
-    if (pendingHandoff) await performTuiHandoff(pendingHandoff, directory);
+    await settle();
     await printExitFooter({
       diagnostics: result.diagnostics,
       scoreResult: result.score,
@@ -277,19 +321,7 @@ const runMultiProjectScan = async (
   directories: ReadonlyArray<string>,
   input: RunScanAppInput,
 ): Promise<RunScanAppResult> => {
-  const store = createScanStore();
-  const launchableAgents = await detectLaunchableAgents();
-  let pendingHandoff: TuiHandoffRequest | null = null;
-  const instance = render(
-    <ScanApp
-      store={store}
-      launchableAgents={launchableAgents}
-      onHandoff={(request) => {
-        pendingHandoff = request;
-      }}
-    />,
-    { exitOnCtrlC: false },
-  );
+  const { store, instance, settle } = await mountScanApp(rootDirectory);
   const isOffline = resolveIsOffline(input);
   const noScoreMessage = buildNoScoreMessage(input.options?.noScore === true);
 
@@ -356,7 +388,7 @@ const runMultiProjectScan = async (
     };
     store.setSummary(summary);
     await instance.waitUntilExit();
-    if (pendingHandoff) await performTuiHandoff(pendingHandoff, rootDirectory);
+    await settle();
     await printExitFooter({
       diagnostics: combinedDiagnostics,
       scoreResult: summary.aggregateScore,

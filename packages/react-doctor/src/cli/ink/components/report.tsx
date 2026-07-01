@@ -16,6 +16,10 @@ export interface ReportProps {
   readonly launchableAgents?: ReadonlyArray<CliAgentId>;
   /** Hands the selected issue's prompt to an agent; the caller exits + launches. */
   readonly onHandoff?: (request: TuiHandoffRequest) => void;
+  /** True when this repo has no React Doctor CI workflow yet (shows the callout). */
+  readonly canAddToCi?: boolean;
+  /** Requests CI setup; the caller exits + scaffolds the workflow. */
+  readonly onAddToCi?: () => void;
   /** When set (monorepo flat view), shows a "· N projects" span in the status bar. */
   readonly projectCount?: number;
   /** Hint shown in the empty-state footer (e.g. "Esc to go back · q to quit"). */
@@ -62,6 +66,8 @@ export const Report = ({
   onExit,
   launchableAgents = [],
   onHandoff,
+  canAddToCi,
+  onAddToCi,
   projectCount,
   exitHint = "q to quit",
 }: ReportProps) => {
@@ -129,6 +135,8 @@ export const Report = ({
       projectName={report.projectName}
       launchableAgents={launchableAgents}
       onHandoff={onHandoff}
+      canAddToCi={canAddToCi}
+      onAddToCi={onAddToCi}
       projectCount={projectCount}
       onExit={onExit}
       exitHint={exitHint}

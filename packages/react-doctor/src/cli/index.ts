@@ -24,6 +24,7 @@ import { handleError, handleUserError } from "./utils/handle-error.js";
 import { isDebugFlagEnabled } from "./utils/is-debug-flag.js";
 import { isExpectedUserError } from "./utils/is-expected-user-error.js";
 import { isJsonModeActive, writeJsonErrorReport } from "./utils/json-mode.js";
+import { isNonInteractiveEnvironment } from "./utils/is-non-interactive-environment.js";
 import { normalizeHelpInvocation } from "./utils/normalize-help-command.js";
 import { printDebugTrace } from "./utils/print-debug-trace.js";
 import { assertNoRemovedFlags } from "./utils/removed-cli-flags.js";
@@ -416,6 +417,20 @@ program
       directory = ".",
       options: { deadCode?: boolean; score?: boolean; project?: string; yes?: boolean },
     ) => {
+      // Piped / redirected / CI: the interactive Ink report can't own the
+      // terminal (raw-mode stdin, cursor control, a live viewport), so degrade
+      // to the static non-interactive scan — and skip paying Ink's startup cost
+      // entirely. `--score false` maps to `--no-score`; the score-only mode
+      // (`flags.score === true`) isn't reachable from the TUI command's flags.
+      if (process.stdout.isTTY !== true || isNonInteractiveEnvironment()) {
+        await inspectAction(directory, {
+          deadCode: options.deadCode,
+          score: options.score === false ? false : undefined,
+          project: options.project,
+          yes: options.yes,
+        });
+        return;
+      }
       const { runScanApp } = await import("./ink/run-scan-app.js");
       await runScanApp({
         directory,

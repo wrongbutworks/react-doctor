@@ -12,12 +12,22 @@ export interface ScanAppProps {
   readonly launchableAgents?: ReadonlyArray<CliAgentId>;
   /** Records an agent handoff request the runner fulfills after the app exits. */
   readonly onHandoff?: (request: TuiHandoffRequest) => void;
+  /** True when this repo has no React Doctor CI workflow yet (shows the callout). */
+  readonly canAddToCi?: boolean;
+  /** Records a CI-setup request the runner fulfills after the app exits. */
+  readonly onAddToCi?: () => void;
 }
 
 const RECENT_LIVE_COUNT = 5;
 
 /** Root of the interactive scan UI: routes the store phase to a view. */
-export const ScanApp = ({ store, launchableAgents, onHandoff }: ScanAppProps) => {
+export const ScanApp = ({
+  store,
+  launchableAgents,
+  onHandoff,
+  canAddToCi,
+  onAddToCi,
+}: ScanAppProps) => {
   const snapshot = useScanStore(store);
   const { exit } = useApp();
 
@@ -27,6 +37,8 @@ export const ScanApp = ({ store, launchableAgents, onHandoff }: ScanAppProps) =>
         summary={snapshot.summary}
         launchableAgents={launchableAgents}
         onHandoff={onHandoff}
+        canAddToCi={canAddToCi}
+        onAddToCi={onAddToCi}
         onExit={() => exit()}
       />
     );
@@ -38,6 +50,8 @@ export const ScanApp = ({ store, launchableAgents, onHandoff }: ScanAppProps) =>
         report={snapshot.report}
         launchableAgents={launchableAgents}
         onHandoff={onHandoff}
+        canAddToCi={canAddToCi}
+        onAddToCi={onAddToCi}
         onExit={() => exit()}
       />
     );
