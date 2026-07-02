@@ -177,4 +177,135 @@ describe("no-non-null-assertion-on-maybe-undefined-result", () => {
     );
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("does not flag find! guarded by .some with the identical predicate (validate-then-extract)", () => {
+    const result = runRule(
+      noNonNullAssertionOnMaybeUndefinedResult,
+      `function selectUser(users: User[], id: string) {
+        if (!users.some((user) => user.id === id)) return null;
+        return users.find((user) => user.id === id)!.name;
+      }`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag find! in a ternary guarded by .some with the identical predicate", () => {
+    const result = runRule(
+      noNonNullAssertionOnMaybeUndefinedResult,
+      `const label = options.some((option) => option.value === value)
+        ? options.find((option) => option.value === value)!.label
+        : placeholder;`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag ensure-then-find (conditional push before find!)", () => {
+    const result = runRule(
+      noNonNullAssertionOnMaybeUndefinedResult,
+      `function addToGroup(groups: Group[], name: string, item: string) {
+        if (!groups.some((group) => group.name === name)) {
+          groups.push({ name, items: [] });
+        }
+        groups.find((group) => group.name === name)!.items.push(item);
+      }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags find! when the .some guard uses a different predicate", () => {
+    const result = runRule(
+      noNonNullAssertionOnMaybeUndefinedResult,
+      `function selectUser(users: User[], id: string) {
+        if (!users.some((user) => user.isActive)) return null;
+        return users.find((user) => user.id === id)!.name;
+      }`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("does not flag find! guarded by .includes on a projection of the same array", () => {
+    const result = runRule(
+      noNonNullAssertionOnMaybeUndefinedResult,
+      `function rowFor(rows: Row[], id: string) {
+        const ids = rows.map((row) => row.id);
+        if (!ids.includes(id)) return null;
+        return rows.find((row) => row.id === id)!.data;
+      }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag match! guarded by a truthiness check on the identical match call", () => {
+    const result = runRule(
+      noNonNullAssertionOnMaybeUndefinedResult,
+      `function parseVersion(line: string) {
+        if (!line.match(/^v(\\d+)/)) return null;
+        return line.match(/^v(\\d+)/)![1];
+      }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag match! with an infallible anchored star regex", () => {
+    const result = runRule(
+      noNonNullAssertionOnMaybeUndefinedResult,
+      `const indents = lines.map((line) => line.match(/^\\s*/)![0].length);
+      const firstLine = (text: string) => text.match(/^.*/)![0].trim();`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag match! with a g-flagged twin of the tested regex", () => {
+    const result = runRule(
+      noNonNullAssertionOnMaybeUndefinedResult,
+      `function extractTags(text: string) {
+        if (!/#\\w+/.test(text)) return [];
+        return text.match(/#\\w+/g)!.map((tag) => tag.slice(1));
+      }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag match! validated via a class-field regex (this.pattern)", () => {
+    const result = runRule(
+      noNonNullAssertionOnMaybeUndefinedResult,
+      `class RouteMatcher {
+        private pattern = /^\\/users\\/(\\d+)$/;
+        parse(path: string) {
+          if (!this.pattern.test(path)) return null;
+          return path.match(this.pattern)![1];
+        }
+      }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag get! on a map passed to a populating helper", () => {
+    const result = runRule(
+      noNonNullAssertionOnMaybeUndefinedResult,
+      `const collectRows = (node: TreeNode, rows: Map<string, number>, depth: number) => {
+        rows.set(node.id, depth);
+        for (const child of node.children) collectRows(child, rows, depth + 1);
+      };
+      const TreeSummary = ({ root }: { root: TreeNode }) => {
+        const rows = new Map<string, number>();
+        collectRows(root, rows, 0);
+        return rows.get(root.id)!;
+      };`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag get! keyed by the local map's own keys() iteration", () => {
+    const result = runRule(
+      noNonNullAssertionOnMaybeUndefinedResult,
+      `const sectionSizes = (rows: Row[]) => {
+        const groups = new Map<string, Row[]>();
+        for (const row of rows) groups.set(row.section, [row]);
+        return Array.from(groups.keys()).sort().map((section) => groups.get(section)!.length);
+      };`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
 });

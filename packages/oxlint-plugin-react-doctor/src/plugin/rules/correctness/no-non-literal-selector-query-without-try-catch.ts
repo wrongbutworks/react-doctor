@@ -60,11 +60,18 @@ const HREF_HASH_FUNCTION_PATTERN = /href|hash/i;
 const SHAPE_VALIDATION_METHOD_NAMES = new Set([
   "match",
   "test",
+  "exec",
   "startsWith",
   "endsWith",
   "indexOf",
   "includes",
+  "has",
+  "some",
+  "every",
 ]);
+const REGEX_VALIDATION_METHOD_NAMES = new Set(["match", "test", "exec"]);
+const PREDICATE_CALLEE_NAME_PATTERN = /^(?:is|has|can|check|validate?)|valid/i;
+const NON_DOM_RECEIVER_NAME_PATTERN = /rout(?:e|er)|pattern|history|matcher/i;
 const DEFERRED_CALLBACK_REGISTRAR_NAMES = new Set([
   "addEventListener",
   "setTimeout",
@@ -124,21 +131,45 @@ const isHrefHashNamedCall = (node: EsTreeNode): boolean => {
   return Boolean(propertyName && HREF_HASH_FUNCTION_PATTERN.test(propertyName));
 };
 
-const isCssEscapeCall = (node: EsTreeNode): boolean =>
-  isNodeOfType(node, "CallExpression") &&
-  isNodeOfType(node.callee, "MemberExpression") &&
-  isNodeOfType(node.callee.object, "Identifier") &&
-  node.callee.object.name === "CSS" &&
-  getStaticMemberPropertyName(node.callee) === "escape";
+// `CSS.escape(...)` or the `css.escape` npm polyfill imported as an
+// identifier (`cssEscape(...)`).
+const isCssEscapeCall = (node: EsTreeNode): boolean => {
+  if (!isNodeOfType(node, "CallExpression")) return false;
+  const callee = stripParenExpression(node.callee);
+  if (isNodeOfType(callee, "Identifier")) {
+    return callee.name.replaceAll(/[^a-z]/gi, "").toLowerCase() === "cssescape";
+  }
+  return (
+    isNodeOfType(callee, "MemberExpression") &&
+    isNodeOfType(callee.object, "Identifier") &&
+    callee.object.name === "CSS" &&
+    getStaticMemberPropertyName(callee) === "escape"
+  );
+};
+
+const isRegexValidationCall = (node: EsTreeNode): boolean => {
+  if (!isNodeOfType(node, "CallExpression")) return false;
+  if (!isNodeOfType(node.callee, "MemberExpression")) return false;
+  const methodName = getStaticMemberPropertyName(node.callee);
+  return Boolean(methodName && REGEX_VALIDATION_METHOD_NAMES.has(methodName));
+};
 
 // An href/hash-named helper whose in-file definition sanitizes with
-// `CSS.escape` — its output is exactly the fix the rule recommends.
+// `CSS.escape` (the fix the rule recommends) or regex-validates its value
+// (`/^#[A-Za-z][\w-]*$/.test(...)` returning null on mismatch) — its output
+// shape is self-controlled.
 const isSanitizedSelectorHelperCall = (node: EsTreeNode): boolean => {
   if (!isNodeOfType(node, "CallExpression")) return false;
   const callee = stripParenExpression(node.callee);
   if (!isNodeOfType(callee, "Identifier")) return false;
   const binding = findVariableInitializer(callee, callee.name);
-  return Boolean(binding?.initializer && someNodeInSubtree(binding.initializer, isCssEscapeCall));
+  return Boolean(
+    binding?.initializer &&
+    someNodeInSubtree(
+      binding.initializer,
+      (candidate) => isCssEscapeCall(candidate) || isRegexValidationCall(candidate),
+    ),
+  );
 };
 
 const isHrefHashDerivedExpression = (node: EsTreeNode): boolean => {
@@ -171,48 +202,130 @@ const hasDomElementNameSegment = (name: string): boolean =>
 
 // `matches`/`closest` also exist on route matchers, URLPattern-style objects,
 // and hash routers, none of which throw on an invalid CSS selector — only
-// fire when the receiver's name reads as a DOM element.
+// fire when the receiver's name reads as a DOM element, and a router-ish
+// word anywhere in the name (`parentRoute`, `urlPattern`) vetoes the match.
 const isLikelyDomElementReceiver = (node: EsTreeNode): boolean => {
   const stripped = stripParenExpression(node);
-  if (isNodeOfType(stripped, "Identifier")) return hasDomElementNameSegment(stripped.name);
-  const propertyName = getStaticMemberPropertyName(stripped);
-  return Boolean(propertyName && hasDomElementNameSegment(propertyName));
+  const receiverName = isNodeOfType(stripped, "Identifier")
+    ? stripped.name
+    : getStaticMemberPropertyName(stripped);
+  if (!receiverName) return false;
+  if (NON_DOM_RECEIVER_NAME_PATTERN.test(receiverName)) return false;
+  return hasDomElementNameSegment(receiverName);
 };
 
+// Matches the tainted value itself (by name or href/hash derivation) and,
+// one hop out, bindings derived FROM it (`const anchorId = hash.slice(1)`)
+// — a shape check on the derivation pins the source just as soundly.
 const makeTaintedReferenceMatcher = (
   selectorArgument: EsTreeNode,
 ): ((candidate: EsTreeNode) => boolean) => {
   const stripped = stripParenExpression(selectorArgument);
   const taintedName = isNodeOfType(stripped, "Identifier") ? stripped.name : null;
-  return (candidate: EsTreeNode): boolean => {
+  const referencesTaintDirectly = (candidate: EsTreeNode): boolean => {
     if (taintedName && isNodeOfType(candidate, "Identifier") && candidate.name === taintedName) {
       return true;
     }
     return isHrefHashDerivedExpression(candidate);
   };
+  return (candidate: EsTreeNode): boolean => {
+    if (referencesTaintDirectly(candidate)) return true;
+    if (!isNodeOfType(candidate, "Identifier") || candidate.name === taintedName) return false;
+    const binding = findVariableInitializer(candidate, candidate.name);
+    return Boolean(
+      binding?.initializer && someNodeInSubtree(binding.initializer, referencesTaintDirectly),
+    );
+  };
 };
 
 // `hash.startsWith('#')`, `HASH_PATTERN.test(hash)`,
-// `knownIds.indexOf(location.hash) !== -1` — the tainted value appears as the
-// receiver or an argument of a string/regex shape check, not a bare
-// truthiness read.
+// `knownIds.indexOf(location.hash) !== -1`, `SECTION_ANCHORS.has(hash)` —
+// the tainted value appears as the receiver or an argument of a
+// string/regex/membership check, not a bare truthiness read.
 const isShapeValidatingCall = (
   node: EsTreeNode,
   referencesTaintedValue: (candidate: EsTreeNode) => boolean,
 ): boolean => {
   if (!isNodeOfType(node, "CallExpression")) return false;
+  const taintedInArguments = (node.arguments ?? []).some((argument) =>
+    someNodeInSubtree(argument, referencesTaintedValue),
+  );
+  // A bare predicate call in guard position (`if (!isValidAnchor(hash))
+  // return;`) — the name promises validation and the branch enforces it.
+  if (isNodeOfType(node.callee, "Identifier")) {
+    return taintedInArguments && PREDICATE_CALLEE_NAME_PATTERN.test(node.callee.name);
+  }
   if (!isNodeOfType(node.callee, "MemberExpression")) return false;
   const methodName = getStaticMemberPropertyName(node.callee);
   if (!methodName || !SHAPE_VALIDATION_METHOD_NAMES.has(methodName)) return false;
   if (someNodeInSubtree(node.callee.object, referencesTaintedValue)) return true;
-  return (node.arguments ?? []).some((argument) =>
+  return taintedInArguments;
+};
+
+// The root `expect(...)` call of an assertion chain (`expect(hash).toBe(…)`),
+// or null when the chain roots elsewhere or carries no chained assertion.
+const getExpectChainRootCall = (node: EsTreeNode): EsTreeNode | null => {
+  if (!isNodeOfType(node, "CallExpression")) return null;
+  let root: EsTreeNode = node;
+  while (true) {
+    const callee: EsTreeNode = stripParenExpression(root.callee as EsTreeNode);
+    if (isNodeOfType(callee, "MemberExpression")) {
+      const nextCall = stripParenExpression(callee.object as EsTreeNode);
+      if (!isNodeOfType(nextCall, "CallExpression")) return null;
+      root = nextCall;
+      continue;
+    }
+    if (!isNodeOfType(callee, "Identifier") || callee.name !== "expect" || root === node) {
+      return null;
+    }
+    return root;
+  }
+};
+
+// `expect(hash).toBe('#faq')`, `expect(href).toMatch(/^#[a-z-]+$/)` — a
+// failed assertion throws, so a preceding assertion mentioning the tainted
+// value dominates the query the same way an early-exit guard does.
+const isTaintPinningAssertion = (
+  node: EsTreeNode,
+  referencesTaintedValue: (candidate: EsTreeNode) => boolean,
+): boolean => {
+  const rootCall = getExpectChainRootCall(node);
+  if (!rootCall) return false;
+  return (rootCall.arguments ?? []).some((argument) =>
     someNodeInSubtree(argument, referencesTaintedValue),
   );
 };
 
+// `hash === '#pricing'`, `hash in sectionOffsets` — the guard pins the
+// tainted value to specific literal keys/values, the strongest validation.
+const isTaintPinningComparison = (
+  node: EsTreeNode,
+  referencesTaintedValue: (candidate: EsTreeNode) => boolean,
+): boolean => {
+  if (!isNodeOfType(node, "BinaryExpression")) return false;
+  const left = node.left as EsTreeNode;
+  const right = node.right as EsTreeNode;
+  if (node.operator === "in") return someNodeInSubtree(left, referencesTaintedValue);
+  if (node.operator !== "===" && node.operator !== "==") return false;
+  const pins = (valueSide: EsTreeNode, literalSide: EsTreeNode): boolean =>
+    someNodeInSubtree(valueSide, referencesTaintedValue) &&
+    isNodeOfType(stripParenExpression(literalSide), "Literal");
+  return pins(left, right) || pins(right, left);
+};
+
+const isShapeValidatingExpression = (
+  node: EsTreeNode,
+  referencesTaintedValue: (candidate: EsTreeNode) => boolean,
+): boolean =>
+  isShapeValidatingCall(node, referencesTaintedValue) ||
+  isTaintPinningComparison(node, referencesTaintedValue) ||
+  isTaintPinningAssertion(node, referencesTaintedValue);
+
 // Every conditional test that dominates the query call: enclosing
-// if/ternary/logical-&& tests plus preceding early-exit guards
-// (`if (…) return;`) in the statement lists between the call and the root.
+// if/ternary/logical-&& tests, preceding early-exit guards (`if (…)
+// return;`), and preceding `expect(...)` assertion statements (a failed
+// assertion throws, dominating everything after it) in the statement lists
+// between the call and the root.
 const collectDominatingGuardTests = (callNode: EsTreeNode): EsTreeNode[] => {
   const guardTests: EsTreeNode[] = [];
   let child: EsTreeNode = callNode;
@@ -232,6 +345,12 @@ const collectDominatingGuardTests = (callNode: EsTreeNode): EsTreeNode[] => {
         if (isNodeOfType(statement, "IfStatement") && isEarlyExitStatement(statement.consequent)) {
           guardTests.push(statement.test);
         }
+        if (
+          isNodeOfType(statement, "ExpressionStatement") &&
+          getExpectChainRootCall(stripParenExpression(statement.expression))
+        ) {
+          guardTests.push(statement.expression);
+        }
       }
     }
     child = ancestor;
@@ -240,18 +359,43 @@ const collectDominatingGuardTests = (callNode: EsTreeNode): EsTreeNode[] => {
   return guardTests;
 };
 
+// A non-default `case` pins the tainted discriminant to its literal:
+// `switch (location.hash) { case '#pricing': … }` cannot reach the query
+// with an arbitrary hash.
+const isPinnedByEnclosingSwitchCase = (
+  callNode: EsTreeNode,
+  referencesTaintedValue: (candidate: EsTreeNode) => boolean,
+): boolean => {
+  let ancestor: EsTreeNode | null | undefined = callNode.parent;
+  while (ancestor) {
+    if (
+      isNodeOfType(ancestor, "SwitchCase") &&
+      ancestor.test !== null &&
+      ancestor.parent &&
+      isNodeOfType(ancestor.parent, "SwitchStatement") &&
+      someNodeInSubtree(ancestor.parent.discriminant, referencesTaintedValue)
+    ) {
+      return true;
+    }
+    ancestor = ancestor.parent ?? null;
+  }
+  return false;
+};
+
 // A dominating guard already shape-validated the tainted value (regex test,
-// prefix check, containment check) — the selector's shape is self-controlled,
-// so the DOMException the rule warns about cannot occur in practice. Bare
-// truthiness guards (`if (href)`) do NOT count.
+// prefix check, containment/equality/membership check, assertion) — the
+// selector's shape is self-controlled, so the DOMException the rule warns
+// about cannot occur in practice. Bare truthiness guards (`if (href)`) do
+// NOT count.
 const isShapeValidatedByDominatingGuard = (
   callNode: EsTreeNode,
   selectorArgument: EsTreeNode,
 ): boolean => {
   const referencesTaintedValue = makeTaintedReferenceMatcher(selectorArgument);
+  if (isPinnedByEnclosingSwitchCase(callNode, referencesTaintedValue)) return true;
   return collectDominatingGuardTests(callNode).some((guardTest) =>
     someNodeInSubtree(guardTest, (candidate) =>
-      isShapeValidatingCall(candidate, referencesTaintedValue),
+      isShapeValidatingExpression(candidate, referencesTaintedValue),
     ),
   );
 };
@@ -290,6 +434,118 @@ const findDeferredCallbackBoundary = (node: EsTreeNode): EsTreeNode | null => {
     ancestor = ancestor.parent ?? null;
   }
   return null;
+};
+
+// The query sits in a callback of a promise chain that carries a rejection
+// handler (`.then(() => { … }).catch(() => {})` or a two-argument `.then`)
+// — a throw inside the callback rejects the chain and is captured, exactly
+// like the try/catch the rule recommends.
+const isInsideCatchGuardedPromiseCallback = (node: EsTreeNode): boolean => {
+  let ancestor: EsTreeNode | null | undefined = node.parent;
+  while (ancestor) {
+    if (isFunctionLikeNode(ancestor)) {
+      const enclosingCall = ancestor.parent;
+      if (
+        enclosingCall &&
+        isNodeOfType(enclosingCall, "CallExpression") &&
+        enclosingCall.arguments?.some((argument) => argument === ancestor) &&
+        getStaticMemberPropertyName(enclosingCall.callee) === "then"
+      ) {
+        let chainLink: EsTreeNode = enclosingCall;
+        while (
+          chainLink.parent &&
+          isNodeOfType(chainLink.parent, "MemberExpression") &&
+          chainLink.parent.object === chainLink &&
+          chainLink.parent.parent &&
+          isNodeOfType(chainLink.parent.parent, "CallExpression")
+        ) {
+          const linkName = getStaticMemberPropertyName(chainLink.parent);
+          const linkCall = chainLink.parent.parent;
+          if (linkName === "catch") return true;
+          if (linkName === "then" && (linkCall.arguments?.length ?? 0) >= 2) return true;
+          chainLink = linkCall;
+        }
+      }
+    }
+    ancestor = ancestor.parent ?? null;
+  }
+  return false;
+};
+
+// The query lives in a named same-file helper whose every call site is
+// inside a try block — the rule's recommended try/catch applied one frame
+// up. Any non-call reference (passed as a callback) disqualifies.
+const isInHelperOnlyInvokedInsideTry = (node: EsTreeNode): boolean => {
+  let helperFunction: EsTreeNode | null = null;
+  let ancestor: EsTreeNode | null | undefined = node.parent;
+  while (ancestor) {
+    if (isFunctionLikeNode(ancestor)) {
+      helperFunction = ancestor;
+      break;
+    }
+    ancestor = ancestor.parent ?? null;
+  }
+  if (!helperFunction) return false;
+  let helperDefinitionIdentifier: EsTreeNode | null = null;
+  if (
+    isNodeOfType(helperFunction, "FunctionDeclaration") &&
+    helperFunction.id &&
+    isNodeOfType(helperFunction.id, "Identifier")
+  ) {
+    helperDefinitionIdentifier = helperFunction.id;
+  } else if (
+    helperFunction.parent &&
+    isNodeOfType(helperFunction.parent, "VariableDeclarator") &&
+    isNodeOfType(helperFunction.parent.id, "Identifier")
+  ) {
+    helperDefinitionIdentifier = helperFunction.parent.id;
+  }
+  if (!helperDefinitionIdentifier || !isNodeOfType(helperDefinitionIdentifier, "Identifier")) {
+    return false;
+  }
+  const helperName = helperDefinitionIdentifier.name;
+  let programRoot: EsTreeNode = helperFunction;
+  while (programRoot.parent) programRoot = programRoot.parent;
+  let callSiteCount = 0;
+  let sawUnguardedOrNonCallReference = false;
+  someNodeInSubtree(programRoot, (candidate) => {
+    if (sawUnguardedOrNonCallReference) return true;
+    if (!isNodeOfType(candidate, "Identifier") || candidate.name !== helperName) return false;
+    if (candidate === helperDefinitionIdentifier) return false;
+    if (
+      candidate.parent &&
+      isNodeOfType(candidate.parent, "VariableDeclarator") &&
+      candidate.parent.id === candidate
+    ) {
+      return false;
+    }
+    // A non-computed member property (`foo.helperName`) is not a reference.
+    if (
+      candidate.parent &&
+      isNodeOfType(candidate.parent, "MemberExpression") &&
+      candidate.parent.property === candidate &&
+      !candidate.parent.computed
+    ) {
+      return false;
+    }
+    const isDirectCallSite =
+      candidate.parent &&
+      isNodeOfType(candidate.parent, "CallExpression") &&
+      candidate.parent.callee === candidate;
+    if (
+      !isDirectCallSite ||
+      !isInsideTryStatement(candidate.parent as EsTreeNode, {
+        region: "block",
+        boundary: findDeferredCallbackBoundary(candidate.parent as EsTreeNode),
+      })
+    ) {
+      sawUnguardedOrNonCallReference = true;
+      return true;
+    }
+    callSiteCount += 1;
+    return false;
+  });
+  return !sawUnguardedOrNonCallReference && callSiteCount > 0;
 };
 
 // Flags `document.querySelector(x)` / `querySelectorAll` / `Element.matches` /
@@ -335,6 +591,8 @@ export const noNonLiteralSelectorQueryWithoutTryCatch = defineRule({
       ) {
         return;
       }
+      if (isInsideCatchGuardedPromiseCallback(node)) return;
+      if (isInHelperOnlyInvokedInsideTry(node)) return;
       context.report({ node, message: MESSAGE });
     },
   }),

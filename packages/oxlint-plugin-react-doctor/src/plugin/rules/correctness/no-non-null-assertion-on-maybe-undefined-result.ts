@@ -1,6 +1,9 @@
 import { defineRule } from "../../utils/define-rule.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
+import { findVariableInitializer } from "../../utils/find-variable-initializer.js";
+import { isAlwaysMatchingRegexPattern } from "../../utils/is-always-matching-regex-pattern.js";
+import { isAstNode } from "../../utils/is-ast-node.js";
 import { isFunctionLike } from "../../utils/is-function-like.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
 import { isObjectOfMemberAccess } from "../../utils/is-object-of-member-access.js";
@@ -8,6 +11,56 @@ import { isTestlikeFilename } from "../../utils/is-testlike-filename.js";
 import { stripParenExpression } from "../../utils/strip-paren-expression.js";
 import { walkAst } from "../../utils/walk-ast.js";
 import type { RuleContext } from "../../utils/rule-context.js";
+
+// Deep structural equality over AST subtrees (positions and parent links
+// ignored, regex literals compared by raw source). Needed to prove a
+// `.some(pred)` guard uses the identical predicate as the asserted
+// `.find(pred)!` — the shared `areExpressionsStructurallyEqual` deliberately
+// refuses function nodes.
+const NODE_COMPARISON_IGNORED_KEYS = new Set(["parent", "range", "loc", "start", "end"]);
+const areNodesLooselyEqual = (first: unknown, second: unknown): boolean => {
+  if (first === second) return true;
+  if (Array.isArray(first) || Array.isArray(second)) {
+    return (
+      Array.isArray(first) &&
+      Array.isArray(second) &&
+      first.length === second.length &&
+      first.every((item, itemIndex) => areNodesLooselyEqual(item, second[itemIndex]))
+    );
+  }
+  if (first instanceof RegExp || second instanceof RegExp) {
+    return String(first) === String(second);
+  }
+  if (isAstNode(first) && isAstNode(second)) {
+    if (first.type !== second.type) return false;
+    const firstRecord = first as unknown as Record<string, unknown>;
+    const secondRecord = second as unknown as Record<string, unknown>;
+    const comparableKeys = new Set(
+      [...Object.keys(firstRecord), ...Object.keys(secondRecord)].filter(
+        (key) => !NODE_COMPARISON_IGNORED_KEYS.has(key),
+      ),
+    );
+    for (const key of comparableKeys) {
+      if (!areNodesLooselyEqual(firstRecord[key], secondRecord[key])) return false;
+    }
+    return true;
+  }
+  if (
+    first !== null &&
+    second !== null &&
+    typeof first === "object" &&
+    typeof second === "object"
+  ) {
+    const firstRecord = first as Record<string, unknown>;
+    const secondRecord = second as Record<string, unknown>;
+    const keys = new Set([...Object.keys(firstRecord), ...Object.keys(secondRecord)]);
+    for (const key of keys) {
+      if (!areNodesLooselyEqual(firstRecord[key], secondRecord[key])) return false;
+    }
+    return true;
+  }
+  return false;
+};
 
 // Built-in methods the language spec types as `T | undefined` / `T | null`
 // on a miss: Array `find`/`findLast` (undefined), String `match` (null),
@@ -61,11 +114,16 @@ const findOutermostScope = (node: EsTreeNode): EsTreeNode | null => {
   return outermostFunction ?? program;
 };
 
+// Methods that populate the map, check the key, or hand out keys that are
+// present by construction (`for (const k of map.keys()) map.get(k)!`).
+const KEY_PRESENCE_METHOD_NAMES = new Set(["set", "has", "keys", "entries", "forEach"]);
+
 // A `map.get(key)!` is likely safe when the same map is populated or
-// checked (`map.set(...)` / `map.has(...)`) somewhere in the enclosing
-// scope, so abstain there — a false negative is preferable to a false
-// positive. Matches `this.updateCallbacks`-style member receivers too, not
-// just bare identifiers.
+// checked (`map.set(...)` / `map.has(...)`), iterated by its own keys, or
+// passed as an argument to a helper (which may populate it) somewhere in
+// the enclosing scope, so abstain there — a false negative is preferable
+// to a false positive. Matches `this.updateCallbacks`-style member
+// receivers too, not just bare identifiers.
 const scopeProvesKeyPresence = (assertion: EsTreeNode, receiverKey: string): boolean => {
   const scope = findOutermostScope(assertion);
   if (!scope) return false;
@@ -78,8 +136,16 @@ const scopeProvesKeyPresence = (assertion: EsTreeNode, receiverKey: string): boo
       isNodeOfType(callee, "MemberExpression") &&
       !callee.computed &&
       isNodeOfType(callee.property, "Identifier") &&
-      (callee.property.name === "set" || callee.property.name === "has") &&
+      KEY_PRESENCE_METHOD_NAMES.has(callee.property.name) &&
       receiverPathKey(callee.object as EsTreeNode) === receiverKey
+    ) {
+      proven = true;
+      return false;
+    }
+    if (
+      (child.arguments ?? []).some(
+        (argument) => receiverPathKey(stripParenExpression(argument as EsTreeNode)) === receiverKey,
+      )
     ) {
       proven = true;
       return false;
@@ -123,17 +189,56 @@ const scopeDeclaresEmptyMap = (assertion: EsTreeNode, receiverName: string): boo
 };
 
 // Normalize the regex a `.match(...)` receives so it can be compared with
-// the receiver of a `.test(...)` call: same identifier, or a regex literal
-// with the same source text.
+// the receiver of a `.test(...)` call: same identifier, a member chain
+// (`this.pattern`), or a regex literal with the same pattern. The `g`/`y`
+// flags are dropped from the key — `/x/.test(s)` proves `s.match(/x/g)`
+// returns a non-empty array — while semantic flags (`i`, `m`, `s`, `u`)
+// must agree for the proof to hold.
 const regexComparableKey = (node: EsTreeNode): string | null => {
   const target = stripParenExpression(node);
   if (isNodeOfType(target, "Identifier")) return `id:${target.name}`;
-  if (isNodeOfType(target, "Literal") && "regex" in target) return `regex:${target.raw}`;
-  return null;
+  if (isNodeOfType(target, "Literal") && "regex" in target && target.regex) {
+    const semanticFlags = String(target.regex.flags ?? "").replaceAll(/[gy]/g, "");
+    return `regex:${target.regex.pattern}:${semanticFlags}`;
+  }
+  const memberPath = receiverPathKey(target);
+  return memberPath && memberPath.includes(".") ? `path:${memberPath}` : null;
+};
+
+// Walks up through `!`, `&&`/`||`, and parens: is this expression consumed
+// as a branch test (`if`/ternary/`while`)? A `.match(...)` in test position
+// is the guard of a validate-then-extract, not an extraction.
+const isInBranchTestPosition = (node: EsTreeNode): boolean => {
+  let child: EsTreeNode = node;
+  let parent = child.parent ?? null;
+  while (parent) {
+    if (
+      isNodeOfType(parent, "LogicalExpression") ||
+      (isNodeOfType(parent, "UnaryExpression") && parent.operator === "!") ||
+      parent.type === "ParenthesizedExpression" ||
+      isNodeOfType(parent, "ChainExpression")
+    ) {
+      child = parent;
+      parent = parent.parent ?? null;
+      continue;
+    }
+    if (
+      isNodeOfType(parent, "IfStatement") ||
+      isNodeOfType(parent, "ConditionalExpression") ||
+      isNodeOfType(parent, "WhileStatement") ||
+      isNodeOfType(parent, "DoWhileStatement")
+    ) {
+      return (parent as { test?: EsTreeNode }).test === child;
+    }
+    return false;
+  }
+  return false;
 };
 
 // `str.match(re)!` is likely on a proven-matching path when the enclosing
-// scope also runs `re.test(...)` (validate-then-extract), so abstain there.
+// scope also runs `re.test(...)` (validate-then-extract) or guards on
+// another `.match(...)` of the same regex in branch-test position
+// (`if (!line.match(re)) return null; line.match(re)![1]`), so abstain.
 const scopeProvesMatchTested = (assertion: EsTreeNode, regexKey: string): boolean => {
   const scope = findOutermostScope(assertion);
   if (!scope) return false;
@@ -143,11 +248,24 @@ const scopeProvesMatchTested = (assertion: EsTreeNode, regexKey: string): boolea
     if (!isNodeOfType(child, "CallExpression")) return;
     const callee = child.callee;
     if (
-      isNodeOfType(callee, "MemberExpression") &&
-      !callee.computed &&
-      isNodeOfType(callee.property, "Identifier") &&
+      !isNodeOfType(callee, "MemberExpression") ||
+      callee.computed ||
+      !isNodeOfType(callee.property, "Identifier")
+    ) {
+      return;
+    }
+    if (
       callee.property.name === "test" &&
       regexComparableKey(callee.object as EsTreeNode) === regexKey
+    ) {
+      proven = true;
+      return false;
+    }
+    if (
+      callee.property.name === "match" &&
+      child.arguments?.[0] &&
+      regexComparableKey(child.arguments[0] as EsTreeNode) === regexKey &&
+      isInBranchTestPosition(child)
     ) {
       proven = true;
       return false;
@@ -155,6 +273,73 @@ const scopeProvesMatchTested = (assertion: EsTreeNode, regexKey: string): boolea
   });
   return proven;
 };
+
+// The scope proves the asserted `.find(pred)!` cannot miss: a
+// `.some`/`.findIndex` guard with a structurally identical predicate on
+// the same receiver (validate-then-extract for arrays, or ensure-then-find
+// after a conditional push), or an `.includes(...)` membership check on a
+// projection of the same receiver (`const ids = rows.map(r => r.id)`).
+const scopeProvesFindMatch = (
+  assertion: EsTreeNode,
+  findReceiver: EsTreeNode,
+  findPredicate: EsTreeNode,
+): boolean => {
+  const scope = findOutermostScope(assertion);
+  if (!scope) return false;
+  let proven = false;
+  walkAst(scope, (child) => {
+    if (proven) return false;
+    if (!isNodeOfType(child, "CallExpression")) return;
+    const callee = child.callee;
+    if (
+      !isNodeOfType(callee, "MemberExpression") ||
+      callee.computed ||
+      !isNodeOfType(callee.property, "Identifier")
+    ) {
+      return;
+    }
+    const methodName = callee.property.name;
+    if (
+      (methodName === "some" || methodName === "findIndex") &&
+      areNodesLooselyEqual(
+        stripParenExpression(callee.object as EsTreeNode),
+        stripParenExpression(findReceiver),
+      ) &&
+      areNodesLooselyEqual(
+        child.arguments?.[0] ? stripParenExpression(child.arguments[0] as EsTreeNode) : null,
+        stripParenExpression(findPredicate),
+      )
+    ) {
+      proven = true;
+      return false;
+    }
+    if (methodName === "includes") {
+      const includesReceiver = stripParenExpression(callee.object as EsTreeNode);
+      if (!isNodeOfType(includesReceiver, "Identifier")) return;
+      const binding = findVariableInitializer(includesReceiver, includesReceiver.name);
+      const initializer = binding?.initializer ? stripParenExpression(binding.initializer) : null;
+      if (
+        initializer &&
+        isNodeOfType(initializer, "CallExpression") &&
+        isNodeOfType(initializer.callee, "MemberExpression") &&
+        getPropertyName(initializer.callee) === "map" &&
+        areNodesLooselyEqual(
+          stripParenExpression(initializer.callee.object as EsTreeNode),
+          stripParenExpression(findReceiver),
+        )
+      ) {
+        proven = true;
+        return false;
+      }
+    }
+  });
+  return proven;
+};
+
+const getPropertyName = (memberExpression: EsTreeNodeOfType<"MemberExpression">): string | null =>
+  !memberExpression.computed && isNodeOfType(memberExpression.property, "Identifier")
+    ? memberExpression.property.name
+    : null;
 
 const isPredicateArgument = (node: EsTreeNode | null | undefined): boolean =>
   Boolean(
@@ -186,10 +371,25 @@ export const noNonNullAssertionOnMaybeUndefinedResult = defineRule({
 
         const args = inner.arguments ?? [];
         if (methodName === "find" || methodName === "findLast") {
-          if (!isPredicateArgument(args[0] ? stripParenExpression(args[0]) : null)) return;
+          const predicate = args[0] ? stripParenExpression(args[0]) : null;
+          if (!isPredicateArgument(predicate)) return;
+          if (
+            predicate &&
+            scopeProvesFindMatch(node as EsTreeNode, callee.object as EsTreeNode, predicate)
+          ) {
+            return;
+          }
         }
         if (methodName === "match") {
           const pattern = args[0] ? stripParenExpression(args[0]) : null;
+          if (
+            pattern &&
+            isNodeOfType(pattern, "Literal") &&
+            "regex" in pattern &&
+            isAlwaysMatchingRegexPattern(pattern.regex?.pattern)
+          ) {
+            return;
+          }
           const regexKey = pattern ? regexComparableKey(pattern) : null;
           if (regexKey && scopeProvesMatchTested(node as EsTreeNode, regexKey)) return;
         }

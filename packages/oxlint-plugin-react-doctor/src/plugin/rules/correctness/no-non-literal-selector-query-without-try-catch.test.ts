@@ -152,4 +152,181 @@ describe("no-non-literal-selector-query-without-try-catch", () => {
     );
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("does not flag when a hash-named helper regex-validates and returns null (null-guarded call site)", () => {
+    const result = runRule(
+      noNonLiteralSelectorQueryWithoutTryCatch,
+      `const getHashSelector = (rawHash) => (/^#[A-Za-z][\\w-]*$/.test(rawHash) ? rawHash : null);
+      const scrollToSection = () => {
+        const selector = getHashSelector(window.location.hash);
+        if (!selector) return;
+        document.querySelector(selector)?.scrollIntoView({ behavior: 'smooth' });
+      };`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a Set.has membership guard over literal anchors", () => {
+    const result = runRule(
+      noNonLiteralSelectorQueryWithoutTryCatch,
+      `const SECTION_ANCHORS = new Set(['#about', '#projects']);
+      const hash = window.location.hash;
+      if (SECTION_ANCHORS.has(hash)) { document.querySelector(hash)?.scrollIntoView(); }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a strict-equality pin against literal hashes", () => {
+    const result = runRule(
+      noNonLiteralSelectorQueryWithoutTryCatch,
+      `const hash = window.location.hash;
+      if (hash === '#pricing' || hash === '#faq') { document.querySelector(hash)?.scrollIntoView(); }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag inside a switch case pinning the hash to literals", () => {
+    const result = runRule(
+      noNonLiteralSelectorQueryWithoutTryCatch,
+      `switch (window.location.hash) {
+        case '#features':
+        case '#pricing': {
+          document.querySelector(window.location.hash)?.scrollIntoView();
+          break;
+        }
+      }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a regex .exec() guard", () => {
+    const result = runRule(
+      noNonLiteralSelectorQueryWithoutTryCatch,
+      `const hash = location.hash; if (/^#[a-zA-Z][\\w-]*$/.exec(hash)) { document.querySelector(hash); }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a named-predicate early-return guard", () => {
+    const result = runRule(
+      noNonLiteralSelectorQueryWithoutTryCatch,
+      `const isValidAnchor = (value) => /^#[A-Za-z][\\w-]*$/.test(value);
+      const scrollToHash = () => {
+        const hash = window.location.hash;
+        if (!isValidAnchor(hash)) return;
+        document.querySelector(hash)?.scrollIntoView();
+      };`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a helper whose only invocation sits inside try/catch", () => {
+    const result = runRule(
+      noNonLiteralSelectorQueryWithoutTryCatch,
+      `const focusAnchorTarget = () => {
+        const target = document.querySelector(window.location.hash);
+        target?.scrollIntoView();
+      };
+      try { focusAnchorTarget(); } catch {}`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags a helper also invoked outside any try block", () => {
+    const result = runRule(
+      noNonLiteralSelectorQueryWithoutTryCatch,
+      `const focusAnchorTarget = () => { document.querySelector(window.location.hash); };
+      try { focusAnchorTarget(); } catch {}
+      focusAnchorTarget();`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("does not flag a preceding literal assertion on the hash in a test", () => {
+    const result = runRule(
+      noNonLiteralSelectorQueryWithoutTryCatch,
+      `it('navigates to the section', () => {
+        expect(window.location.hash).toBe('#travel-geography');
+        expect(document.querySelector(window.location.hash)).toBeTruthy();
+      });`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a preceding toMatch assertion on the href", () => {
+    const result = runRule(
+      noNonLiteralSelectorQueryWithoutTryCatch,
+      `for (const link of links) {
+        const href = link.getAttribute('href');
+        expect(href).toMatch(/^#[a-z][a-z0-9-]*$/);
+        expect(document.querySelector(href)).not.toBeNull();
+      }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag the css.escape npm polyfill inside a hash-named helper", () => {
+    const result = runRule(
+      noNonLiteralSelectorQueryWithoutTryCatch,
+      `import cssEscape from 'css.escape';
+      const buildHashSelector = (rawHash) => '#' + cssEscape(rawHash.slice(1));
+      document.querySelector(buildHashSelector(location.hash));`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag matches() on a route-named receiver", () => {
+    const result = runRule(
+      noNonLiteralSelectorQueryWithoutTryCatch,
+      `if (parentRoute && parentRoute.matches(window.location.hash)) { setExpandedSection(parentRoute.id); }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag inside a .then callback whose chain carries .catch", () => {
+    const result = runRule(
+      noNonLiteralSelectorQueryWithoutTryCatch,
+      `waitForRender().then(() => { document.querySelector(location.hash)?.scrollIntoView(); }).catch(() => {});`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags inside a .then callback with no rejection handler", () => {
+    const result = runRule(
+      noNonLiteralSelectorQueryWithoutTryCatch,
+      `waitForRender().then(() => { document.querySelector(location.hash)?.scrollIntoView(); });`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("does not flag when the derived id is regex-validated", () => {
+    const result = runRule(
+      noNonLiteralSelectorQueryWithoutTryCatch,
+      `const hash = window.location.hash;
+      const anchorId = hash.slice(1);
+      if (/^[A-Za-z][\\w-]*$/.test(anchorId)) { document.querySelector(hash)?.scrollIntoView(); }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag an `in` guard against a literal-keyed map", () => {
+    const result = runRule(
+      noNonLiteralSelectorQueryWithoutTryCatch,
+      `const sectionOffsets = { '#hero': 0, '#about': 480 };
+      const hash = window.location.hash;
+      if (hash in sectionOffsets) { document.querySelector(hash)?.scrollIntoView(); }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag an Array.some equality guard over literal anchors", () => {
+    const result = runRule(
+      noNonLiteralSelectorQueryWithoutTryCatch,
+      `const navSections = [{ anchor: '#top' }, { anchor: '#faq' }];
+      const hash = window.location.hash;
+      if (navSections.some((section) => section.anchor === hash)) { document.querySelector(hash); }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
 });

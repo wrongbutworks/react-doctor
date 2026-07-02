@@ -5,6 +5,7 @@ import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
 import { findVariableInitializer } from "../../utils/find-variable-initializer.js";
 import { isEarlyExitStatement } from "../../utils/is-early-exit-statement.js";
 import { isFunctionLike } from "../../utils/is-function-like.js";
+import { isAlwaysMatchingRegexPattern } from "../../utils/is-always-matching-regex-pattern.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
 import { stripParenExpression } from "../../utils/strip-paren-expression.js";
 import { unwrapNegativeGuardForm } from "../../utils/unwrap-negative-guard-form.js";
@@ -278,11 +279,6 @@ const isRegexResultDerefGuarded = (node: EsTreeNode, regexResultCall: EsTreeNode
   );
 };
 
-// Regex literals that match at every position (`/^\s*/`, `/.*/`) — a
-// single star-quantified atom, optionally anchored — always produce a
-// non-null result with `[0]` present.
-const ALWAYS_MATCH_REGEX_PATTERN = /^\^?(?:\\[a-zA-Z]|\.|\[[^\]]*\])\*$/;
-
 const isAlwaysMatchRegexResult = (regexResultCall: EsTreeNode, partIndex: number): boolean => {
   if (partIndex !== 0) return false;
   if (!isNodeOfType(regexResultCall, "CallExpression")) return false;
@@ -297,10 +293,7 @@ const isAlwaysMatchRegexResult = (regexResultCall: EsTreeNode, partIndex: number
   if (!regexOperand || !isNodeOfType(regexOperand, "Literal") || !("regex" in regexOperand)) {
     return false;
   }
-  return (
-    typeof regexOperand.regex?.pattern === "string" &&
-    ALWAYS_MATCH_REGEX_PATTERN.test(regexOperand.regex.pattern)
-  );
+  return isAlwaysMatchingRegexPattern(regexOperand.regex?.pattern);
 };
 
 // `"1.2.3".split(".")[1]` — splitting a string literal by a string-literal
