@@ -16,10 +16,7 @@ const isStringArray = (value: unknown): value is string[] =>
 const collectStringList = (value: unknown): string[] =>
   Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
 
-const hasMatchingRuleOverride = (
-  ruleIds: ReadonlySet<string>,
-  ruleIdentifier: string,
-): boolean => {
+const hasMatchingRuleOverride = (ruleIds: ReadonlySet<string>, ruleIdentifier: string): boolean => {
   if (ruleIds.size === 0) return true;
   for (const ruleId of ruleIds) {
     if (isSameRuleKey(ruleId, ruleIdentifier)) return true;
