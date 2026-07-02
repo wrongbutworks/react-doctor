@@ -262,13 +262,22 @@ const functionHasUnhandledRejectableSource = (
   return didFindRejectableSource;
 };
 
+// A `set*`-named identifier resolving to a plain same-file function
+// (`const setDocumentTitle = (title) => { document.title = title; }`) is a
+// DOM helper, not React state.
+const resolvesToPlainLocalFunction = (callee: EsTreeNodeOfType<"Identifier">): boolean => {
+  const binding = findVariableInitializer(callee, callee.name);
+  return Boolean(binding?.initializer && isFunctionLike(binding.initializer));
+};
+
 const collectStateSideEffectNodes = (callback: EsTreeNode): EsTreeNode[] => {
   const sideEffectNodes: EsTreeNode[] = [];
   walkAst(callback, (child: EsTreeNode) => {
     if (
       isNodeOfType(child, "CallExpression") &&
       isNodeOfType(child.callee, "Identifier") &&
-      isReactStateSetterName(child.callee.name)
+      isReactStateSetterName(child.callee.name) &&
+      !resolvesToPlainLocalFunction(child.callee)
     ) {
       sideEffectNodes.push(child);
     }
@@ -297,18 +306,35 @@ const isNullishComparisonAgainstParam = (test: EsTreeNode, paramName: string): b
   return (isParamSide(left) && isNullishSide(right)) || (isNullishSide(left) && isParamSide(right));
 };
 
+// The guard test references the resolved param (through negation, member
+// reads like `!response.ok` / `!response?.ok`, `||`-combined cancellation
+// flags, nullish/emptiness comparisons) — the exact De Morgan spellings of
+// the rule's own clean fixtures.
+const testReferencesParam = (test: EsTreeNode, paramName: string): boolean => {
+  let referencesParam = false;
+  walkAst(test, (child: EsTreeNode) => {
+    if (referencesParam) return false;
+    if (isNodeOfType(child, "Identifier") && child.name === paramName) {
+      const parent = child.parent;
+      if (
+        parent &&
+        isNodeOfType(parent, "MemberExpression") &&
+        parent.property === child &&
+        !parent.computed
+      ) {
+        return;
+      }
+      referencesParam = true;
+      return false;
+    }
+  });
+  return referencesParam;
+};
+
 const isParamNullGuardReturn = (statement: EsTreeNode, paramName: string): boolean => {
   if (!isNodeOfType(statement, "IfStatement")) return false;
   const test = stripParenExpression(statement.test);
-  const negatedArgument =
-    isNodeOfType(test, "UnaryExpression") && test.operator === "!"
-      ? stripParenExpression(test.argument)
-      : null;
-  const isNegatedParam =
-    negatedArgument !== null &&
-    isNodeOfType(negatedArgument, "Identifier") &&
-    negatedArgument.name === paramName;
-  if (!isNegatedParam && !isNullishComparisonAgainstParam(test, paramName)) return false;
+  if (!testReferencesParam(test, paramName)) return false;
   const consequent = statement.consequent;
   if (isNodeOfType(consequent, "ReturnStatement")) return true;
   return (
@@ -318,6 +344,8 @@ const isParamNullGuardReturn = (statement: EsTreeNode, paramName: string): boole
   );
 };
 
+const ERROR_FIELD_NAME_PATTERN = /^errors?$/;
+
 const callbackReadsParamError = (callback: EsTreeNode, paramName: string): boolean => {
   let didFindErrorRead = false;
   walkAst(callback, (child: EsTreeNode) => {
@@ -326,34 +354,68 @@ const callbackReadsParamError = (callback: EsTreeNode, paramName: string): boole
       isNodeOfType(child, "MemberExpression") &&
       !child.computed &&
       isNodeOfType(child.property, "Identifier") &&
-      child.property.name === "error"
+      ERROR_FIELD_NAME_PATTERN.test(child.property.name)
     ) {
       const errorReadObject = stripParenExpression(child.object);
       if (isNodeOfType(errorReadObject, "Identifier") && errorReadObject.name === paramName) {
         didFindErrorRead = true;
       }
     }
+    // `const { error } = result` — destructured error folding.
+    if (
+      isNodeOfType(child, "VariableDeclarator") &&
+      isNodeOfType(child.id, "ObjectPattern") &&
+      child.init &&
+      isNodeOfType(stripParenExpression(child.init as EsTreeNode), "Identifier") &&
+      (stripParenExpression(child.init as EsTreeNode) as EsTreeNodeOfType<"Identifier">).name ===
+        paramName &&
+      (child.id.properties ?? []).some(
+        (property) =>
+          isNodeOfType(property, "Property") &&
+          !property.computed &&
+          isNodeOfType(property.key, "Identifier") &&
+          ERROR_FIELD_NAME_PATTERN.test(property.key.name),
+      )
+    ) {
+      didFindErrorRead = true;
+    }
   });
   return didFindErrorRead;
 };
+
+// `({ data, error }) => { if (error) ... }` — an ObjectPattern then-param
+// that binds an error field IS the resolve-null contract.
+const objectPatternBindsErrorField = (pattern: EsTreeNode): boolean =>
+  isNodeOfType(pattern, "ObjectPattern") &&
+  (pattern.properties ?? []).some(
+    (property) =>
+      isNodeOfType(property, "Property") &&
+      !property.computed &&
+      isNodeOfType(property.key, "Identifier") &&
+      ERROR_FIELD_NAME_PATTERN.test(property.key.name),
+  );
 
 const hasParamGuardingIfAncestor = (
   node: EsTreeNode,
   callback: EsTreeNode,
   paramName: string,
 ): boolean => {
+  let child: EsTreeNode = node;
   let ancestor: EsTreeNode | null | undefined = node.parent;
   while (ancestor && ancestor !== callback) {
-    if (isNodeOfType(ancestor, "IfStatement")) {
-      let testReferencesParam = false;
-      walkAst(ancestor.test, (testChild: EsTreeNode) => {
-        if (isNodeOfType(testChild, "Identifier") && testChild.name === paramName) {
-          testReferencesParam = true;
-          return false;
-        }
-      });
-      if (testReferencesParam) return true;
+    if (isNodeOfType(ancestor, "IfStatement") && testReferencesParam(ancestor.test, paramName)) {
+      return true;
     }
+    // `view && setView(view)` — the &&-guard spelling of the same if.
+    if (
+      isNodeOfType(ancestor, "LogicalExpression") &&
+      ancestor.operator === "&&" &&
+      ancestor.right === child &&
+      testReferencesParam(ancestor.left as EsTreeNode, paramName)
+    ) {
+      return true;
+    }
+    child = ancestor;
     ancestor = ancestor.parent ?? null;
   }
   return false;
@@ -367,16 +429,23 @@ const callbackSignalsResolveNullContract = (
   sideEffectNodes: EsTreeNode[],
 ): boolean => {
   const firstParam = callback.params[0] ? stripParenExpression(callback.params[0]) : null;
+  if (firstParam && objectPatternBindsErrorField(firstParam)) return true;
   if (!firstParam || !isNodeOfType(firstParam, "Identifier")) return false;
   const paramName = firstParam.name;
   if (callbackReadsParamError(callback, paramName)) return true;
   const body = callback.body;
-  if (
-    body &&
-    isNodeOfType(body, "BlockStatement") &&
-    body.body.some((statement: EsTreeNode) => isParamNullGuardReturn(statement, paramName))
-  ) {
-    return true;
+  if (body && isNodeOfType(body, "BlockStatement")) {
+    // Guard-clause returns count anywhere in the callback's own scope —
+    // `if (!cancelled) { if (!data) return; ... }` nests one block deep.
+    let hasGuardReturn = false;
+    walkOwnFunctionScope(callback, (statement: EsTreeNode) => {
+      if (hasGuardReturn) return false;
+      if (isParamNullGuardReturn(statement, paramName)) {
+        hasGuardReturn = true;
+        return false;
+      }
+    });
+    if (hasGuardReturn) return true;
   }
   return sideEffectNodes.every((sideEffectNode) =>
     hasParamGuardingIfAncestor(sideEffectNode, callback, paramName),

@@ -250,4 +250,172 @@ describe("no-promise-then-side-effect-in-effect-without-catch", () => {
     );
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("stays quiet: Logical-AND param guard (`view && setView(view)`)", () => {
+    const result = runRule(
+      noPromiseThenSideEffectInEffectWithoutCatch,
+      `useEffect(() => { fetch(src).then((view) => { view && setView(view); }); }, [src]);`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Null guard combined with cancellation flag (`if (!view || cancelled) return`)", () => {
+    const result = runRule(
+      noPromiseThenSideEffectInEffectWithoutCatch,
+      `useEffect(() => {
+  let cancelled = false;
+  fetch(src).then((view) => {
+    if (!view || cancelled) return;
+    setView(view);
+  });
+  return () => { cancelled = true; };
+}, [src]);`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Negated `.ok` early return (`if (!response.ok) return; setAvailable(true)`)", () => {
+    const result = runRule(
+      noPromiseThenSideEffectInEffectWithoutCatch,
+      `useEffect(() => {
+  fetch(statusUrl).then((response) => {
+    if (!response.ok) return;
+    setAvailable(true);
+  });
+}, [statusUrl]);`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Destructured then-param error folding (`({ data, error })`)", () => {
+    const result = runRule(
+      noPromiseThenSideEffectInEffectWithoutCatch,
+      `useEffect(() => {
+  fetch(url).then((response) => response.json()).then(({ data, error }) => {
+    if (error) { setError(error); return; }
+    setData(data);
+  });
+}, [url]);`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: GraphQL plural `result.errors` folding", () => {
+    const result = runRule(
+      noPromiseThenSideEffectInEffectWithoutCatch,
+      `const runQuery = async (query) => {
+  const response = await fetch("/graphql", { method: "POST", body: JSON.stringify({ query }) });
+  return response.json();
+};
+useEffect(() => {
+  runQuery(query).then((result) => {
+    if (result.errors) { setErrors(result.errors); return; }
+    setData(result.data.viewer);
+  });
+}, [query]);`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Non-React `set*`-named DOM helper in a dynamic-import then", () => {
+    const result = runRule(
+      noPromiseThenSideEffectInEffectWithoutCatch,
+      `const setDocumentTitle = (title) => { document.title = title; };
+useEffect(() => {
+  import("./page-meta.js").then((mod) => { setDocumentTitle(mod.pageTitle); });
+}, []);`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Richer null-or-empty param guard (`rows == null || rows.length === 0`)", () => {
+    const result = runRule(
+      noPromiseThenSideEffectInEffectWithoutCatch,
+      `useEffect(() => {
+  fetch(url).then((response) => response.json()).then((rows) => {
+    if (rows == null || rows.length === 0) return;
+    setRows(rows);
+  });
+}, [url]);`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Nested cancelled-then-null-guard spelling", () => {
+    const result = runRule(
+      noPromiseThenSideEffectInEffectWithoutCatch,
+      `useEffect(() => {
+  let cancelled = false;
+  fetch(src).then((data) => {
+    if (!cancelled) {
+      if (!data) return;
+      setData(data);
+    }
+  });
+  return () => { cancelled = true; };
+}, [src]);`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Dynamic-import then guarded by null check + mounted ref", () => {
+    const result = runRule(
+      noPromiseThenSideEffectInEffectWithoutCatch,
+      `useEffect(() => {
+  import("./i18n/" + locale + ".js").then((mod) => {
+    if (mod == null || !mountedRef.current) return;
+    setMessages(mod.default);
+  });
+}, [locale]);`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Optional-chained ok guard early return (`if (!response?.ok) return`)", () => {
+    const result = runRule(
+      noPromiseThenSideEffectInEffectWithoutCatch,
+      `useEffect(() => {
+  fetch(healthUrl).then((response) => {
+    if (!response?.ok) return;
+    setHealthy(true);
+  });
+}, [healthUrl]);`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags an unguarded setter in a then over raw fetch", () => {
+    const result = runRule(
+      noPromiseThenSideEffectInEffectWithoutCatch,
+      `useEffect(() => {
+         fetch(url).then((response) => response.json()).then((data) => {
+           setRows(data);
+         });
+       }, [url]);`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags when the only guard references an unrelated variable", () => {
+    const result = runRule(
+      noPromiseThenSideEffectInEffectWithoutCatch,
+      `useEffect(() => {
+         fetch(url).then((data) => {
+           if (!enabled) return;
+           setRows(data);
+         });
+       }, [url, enabled]);`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
 });
