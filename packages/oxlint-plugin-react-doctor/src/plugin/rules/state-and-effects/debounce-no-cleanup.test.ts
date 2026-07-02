@@ -370,4 +370,245 @@ describe("debounce-no-cleanup", () => {
     );
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("stays quiet: Hoisted null-ref guard (TS narrowing idiom) instead of inline if-test", () => {
+    const result = runRule(
+      debounceNoCleanup,
+      `import { debounce, throttle } from 'lodash';
+
+function Popover() {
+  const reposition = useMemo(() => debounce(() => {
+    const anchor = anchorRef.current;
+    if (!anchor) return;
+    window.requestAnimationFrame(() => positionPopover(anchor));
+  }, 100), []);
+  useEffect(() => {
+    reposition();
+  }, [reposition]);
+  return null;
+}`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Guard hoisted via optional-chained measurement before early return", () => {
+    const result = runRule(
+      debounceNoCleanup,
+      `import { debounce, throttle } from 'lodash';
+
+function Tooltip() {
+  const measure = useMemo(() => debounce(() => {
+    const rect = anchorRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    window.requestAnimationFrame(() => place(rect));
+  }, 150), []);
+  useEffect(() => {
+    measure();
+  }, [measure]);
+  return null;
+}`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Destructured cancel returned as effect cleanup", () => {
+    const result = runRule(
+      debounceNoCleanup,
+      `import { debounce, throttle } from 'lodash';
+
+function Search() {
+  const search = useMemo(() => debounce(async (value) => {
+    const results = await fetchResults(value);
+    setResults(results);
+  }, 500), []);
+  useEffect(() => {
+    search(query);
+    const { cancel } = search;
+    return () => cancel();
+  }, [query, search]);
+  return null;
+}`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Cancel-on-unmount through a latest-ref holding the debounced fn", () => {
+    const result = runRule(
+      debounceNoCleanup,
+      `import { debounce, throttle } from 'lodash';
+
+function Search({ query }) {
+  const search = useMemo(() => debounce(async (value) => {
+    setResults(await fetchResults(value));
+  }, 300), []);
+  const searchRef = useRef(search);
+  useEffect(() => {
+    search(query);
+  }, [query, search]);
+  useEffect(() => {
+    return () => searchRef.current.cancel();
+  }, []);
+  return null;
+}`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Cancel delegated to a same-file reusable cleanup hook", () => {
+    const result = runRule(
+      debounceNoCleanup,
+      `import { debounce, throttle } from 'lodash';
+
+const useCancelOnUnmount = (debounced) => {
+  useEffect(() => () => debounced.cancel(), [debounced]);
+};
+function Search({ query }) {
+  const search = useMemo(() => debounce(async (value) => {
+    setResults(await fetchResults(value));
+  }, 300), []);
+  useCancelOnUnmount(search);
+  useEffect(() => {
+    search(query);
+  }, [query, search]);
+  return null;
+}`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: trailing:false passed via a module-scope options constant", () => {
+    const result = runRule(
+      debounceNoCleanup,
+      `import { debounce, throttle } from 'lodash';
+
+const TRACK_OPTIONS = { leading: true, trailing: false };
+function Tracker({ position }) {
+  const report = useMemo(() => debounce(async (value) => {
+    await api.reportScroll(value);
+  }, 500, TRACK_OPTIONS), []);
+  useEffect(() => {
+    report(position);
+  }, [position, report]);
+  return null;
+}`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: useWindowWidth: throttled no-op setter reading window.innerWidth, listener removed on unmount", () => {
+    const result = runRule(
+      debounceNoCleanup,
+      `import { debounce, throttle } from 'lodash';
+
+function useWindowWidth() {
+  const [width, setWidth] = useState(0);
+  const handleResize = useMemo(() => throttle(() => {
+    setWidth(window.innerWidth);
+  }, 100), []);
+  useEffect(() => {
+    handleResize();
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, [handleResize]);
+  return width;
+}`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Callback parameter named `document` (domain noun) in a benign parent-notification debounce", () => {
+    const result = runRule(
+      debounceNoCleanup,
+      `import { debounce, throttle } from 'lodash';
+
+function DocumentEditor({ document, onDocumentChange }) {
+  const notifyChange = useMemo(() => debounce((document) => {
+    onDocumentChange(document);
+  }, 400), [onDocumentChange]);
+  useEffect(() => {
+    notifyChange(document);
+  }, [document, notifyChange]);
+  return null;
+}`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Debounced localStorage persistence where the trailing write IS the desired behavior", () => {
+    const result = runRule(
+      debounceNoCleanup,
+      `import { debounce, throttle } from 'lodash';
+
+function useColumnWidthStorage(columnWidths) {
+  const writeWidths = useMemo(() => debounce((widths) => {
+    window.localStorage.setItem('table-column-widths', JSON.stringify(widths));
+  }, 300), []);
+  useEffect(() => {
+    writeWidths(columnWidths);
+  }, [columnWidths, writeWidths]);
+}`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Debounced fire-and-forget analytics with .catch(noop)", () => {
+    const result = runRule(
+      debounceNoCleanup,
+      `import { debounce, throttle } from 'lodash';
+
+function SearchBox({ query }) {
+  const trackSearch = useMemo(() => debounce((value) => {
+    analytics.track('search-input', { value }).catch(() => {});
+  }, 1000), []);
+  useEffect(() => {
+    if (query) trackSearch(query);
+  }, [query, trackSearch]);
+  return null;
+}`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags a debounced fetch with no cancel anywhere", () => {
+    const result = runRule(
+      debounceNoCleanup,
+      `import { debounce } from 'lodash';
+       function Search({ query }) {
+         const search = useMemo(() => debounce(async (value) => {
+           const results = await fetchResults(value);
+           setResults(results);
+         }, 500), []);
+         useEffect(() => {
+           search(query);
+         }, [query, search]);
+       }`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags a debounced DOM write with no cancel", () => {
+    const result = runRule(
+      debounceNoCleanup,
+      `import { debounce } from 'lodash';
+       function Title({ title }) {
+         const apply = useMemo(() => debounce((value) => {
+           document.title = value;
+         }, 300), []);
+         useEffect(() => {
+           apply(title);
+         }, [title, apply]);
+       }`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
 });

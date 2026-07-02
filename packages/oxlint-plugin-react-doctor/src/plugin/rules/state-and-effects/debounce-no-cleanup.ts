@@ -1,5 +1,7 @@
 import { defineRule } from "../../utils/define-rule.js";
 import { getImportSourceForName } from "../../utils/find-import-source-for-name.js";
+import { collectPatternNames } from "../../utils/collect-pattern-names.js";
+import { findVariableInitializer } from "../../utils/find-variable-initializer.js";
 import { isFunctionLike } from "../../utils/is-function-like.js";
 import { isHookCall } from "../../utils/is-hook-call.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
@@ -79,7 +81,12 @@ const findDebounceCallInHookInitializer = (hookCall: EsTreeNode): EsTreeNode | n
 
 const hasTrailingFalseOption = (debounceCall: EsTreeNode): boolean => {
   if (!isNodeOfType(debounceCall, "CallExpression")) return false;
-  const optionsArgument = debounceCall.arguments?.[2];
+  let optionsArgument: EsTreeNode | null = (debounceCall.arguments?.[2] as EsTreeNode) ?? null;
+  // `debounce(fn, 500, TRACK_OPTIONS)` — resolve the options binding.
+  if (optionsArgument && isNodeOfType(optionsArgument, "Identifier")) {
+    const binding = findVariableInitializer(optionsArgument, optionsArgument.name);
+    if (binding?.initializer) optionsArgument = stripParenExpression(binding.initializer);
+  }
   if (!optionsArgument || !isNodeOfType(optionsArgument, "ObjectExpression")) return false;
   return (optionsArgument.properties ?? []).some(
     (property) =>
@@ -102,7 +109,22 @@ const collectBindingAliasNames = (searchRoot: EsTreeNode, bindingName: string): 
       if (!isNodeOfType(child.id, "Identifier") || !child.init) return;
       if (aliasNames.has(child.id.name)) return;
       const initializer = stripParenExpression(child.init);
-      if (isNodeOfType(initializer, "CallExpression")) return;
+      if (isNodeOfType(initializer, "CallExpression")) {
+        // `const searchRef = useRef(search)` — the ref box carries the
+        // debounced binding, so `searchRef.current.cancel()` releases it.
+        const callee = initializer.callee;
+        if (
+          isNodeOfType(callee, "Identifier") &&
+          callee.name === "useRef" &&
+          initializer.arguments?.some((argument) =>
+            subtreeReferencesIdentifierName(argument as EsTreeNode, aliasNames),
+          )
+        ) {
+          aliasNames.add(child.id.name);
+          didGrow = true;
+        }
+        return;
+      }
       if (subtreeReferencesIdentifierName(initializer, aliasNames)) {
         aliasNames.add(child.id.name);
         didGrow = true;
@@ -116,12 +138,65 @@ const hasReleaseForBinding = (searchRoot: EsTreeNode, aliasNames: ReadonlySet<st
   let didRelease = false;
   walkAst(searchRoot, (child: EsTreeNode) => {
     if (didRelease) return false;
-    if (!isNodeOfType(child, "MemberExpression") || child.computed) return;
-    if (!isNodeOfType(child.property, "Identifier")) return;
-    if (!DEBOUNCE_RELEASE_METHOD_NAMES.has(child.property.name)) return;
-    if (subtreeReferencesIdentifierName(child.object, aliasNames)) {
+    if (
+      isNodeOfType(child, "MemberExpression") &&
+      !child.computed &&
+      isNodeOfType(child.property, "Identifier") &&
+      DEBOUNCE_RELEASE_METHOD_NAMES.has(child.property.name) &&
+      subtreeReferencesIdentifierName(child.object, aliasNames)
+    ) {
       didRelease = true;
       return false;
+    }
+    // `const { cancel } = search; return () => cancel();` — destructuring a
+    // release method off the binding is the same release, one syntax over.
+    if (
+      isNodeOfType(child, "VariableDeclarator") &&
+      isNodeOfType(child.id, "ObjectPattern") &&
+      child.init &&
+      subtreeReferencesIdentifierName(stripParenExpression(child.init as EsTreeNode), aliasNames) &&
+      (child.id.properties ?? []).some(
+        (property) =>
+          isNodeOfType(property, "Property") &&
+          !property.computed &&
+          isNodeOfType(property.key, "Identifier") &&
+          DEBOUNCE_RELEASE_METHOD_NAMES.has(property.key.name),
+      )
+    ) {
+      didRelease = true;
+      return false;
+    }
+    // `useCancelOnUnmount(search)` — the binding escapes into a same-file
+    // helper whose body releases its parameter.
+    if (isNodeOfType(child, "CallExpression")) {
+      const callee = stripParenExpression(child.callee as EsTreeNode);
+      if (
+        isNodeOfType(callee, "Identifier") &&
+        (child.arguments ?? []).some(
+          (argument) => isNodeOfType(argument, "Identifier") && aliasNames.has(argument.name),
+        )
+      ) {
+        const binding = findVariableInitializer(callee, callee.name);
+        if (binding?.initializer && isFunctionLike(binding.initializer)) {
+          let helperReleases = false;
+          walkAst(binding.initializer, (helperChild: EsTreeNode) => {
+            if (helperReleases) return false;
+            if (
+              isNodeOfType(helperChild, "MemberExpression") &&
+              !helperChild.computed &&
+              isNodeOfType(helperChild.property, "Identifier") &&
+              DEBOUNCE_RELEASE_METHOD_NAMES.has(helperChild.property.name)
+            ) {
+              helperReleases = true;
+              return false;
+            }
+          });
+          if (helperReleases) {
+            didRelease = true;
+            return false;
+          }
+        }
+      }
     }
   });
   return didRelease;
@@ -215,8 +290,42 @@ const resolveWrappedCallbackFunction = (
   return resolvedFunction;
 };
 
+const WEB_STORAGE_RECEIVER_NAMES = new Set(["localStorage", "sessionStorage"]);
+
+const chainEndsInCatch = (callNode: EsTreeNode): boolean => {
+  let outermost: EsTreeNode = callNode;
+  while (true) {
+    const parent = outermost.parent;
+    if (
+      parent &&
+      isNodeOfType(parent, "MemberExpression") &&
+      parent.object === outermost &&
+      parent.parent &&
+      isNodeOfType(parent.parent, "CallExpression") &&
+      parent.parent.callee === parent
+    ) {
+      outermost = parent.parent;
+      continue;
+    }
+    break;
+  }
+  return (
+    isNodeOfType(outermost, "CallExpression") &&
+    isNodeOfType(outermost.callee, "MemberExpression") &&
+    !outermost.callee.computed &&
+    isNodeOfType(outermost.callee.property, "Identifier") &&
+    outermost.callee.property.name === "catch"
+  );
+};
+
 const hasAsyncOrDomWork = (wrappedFunction: FunctionEsTreeNode): boolean => {
   if (wrappedFunction.async) return true;
+  // A callback param shadowing a browser global (`(document) => ...` for a
+  // domain noun) is a different binding entirely.
+  const shadowedNames = new Set<string>();
+  for (const param of wrappedFunction.params ?? []) {
+    collectPatternNames(param as EsTreeNode, shadowedNames);
+  }
   let didFindWork = false;
   walkAst(wrappedFunction, (child: EsTreeNode) => {
     if (didFindWork) return false;
@@ -228,6 +337,7 @@ const hasAsyncOrDomWork = (wrappedFunction: FunctionEsTreeNode): boolean => {
     if (
       isNodeOfType(child, "Identifier") &&
       BROWSER_GLOBAL_NAMES.has(child.name) &&
+      !shadowedNames.has(child.name) &&
       !(
         isNodeOfType(parent, "MemberExpression") &&
         !parent.computed &&
@@ -235,6 +345,40 @@ const hasAsyncOrDomWork = (wrappedFunction: FunctionEsTreeNode): boolean => {
       ) &&
       !(isNodeOfType(parent, "Property") && !parent.computed && parent.key === child)
     ) {
+      // Reading a metric off the global (`window.innerWidth`) into state is
+      // benign after unmount; writing debounced persistence
+      // (`localStorage.setItem(...)`) is the POINT of the trailing call.
+      // Only calls THROUGH the global (`document.title = ...` assignments,
+      // `window.scrollTo(...)`) remain DOM work.
+      if (isNodeOfType(parent, "MemberExpression") && parent.object === child) {
+        const memberUse = parent.parent;
+        const isReadIntoExpression =
+          !isNodeOfType(memberUse, "CallExpression") ||
+          (memberUse.callee !== parent && !(memberUse.arguments ?? []).includes(parent as never));
+        const isStorageReceiver =
+          isNodeOfType(parent.property, "Identifier") &&
+          WEB_STORAGE_RECEIVER_NAMES.has(parent.property.name);
+        if (isStorageReceiver) return;
+        // metric/member READ: the member is not itself called
+        let cursor: EsTreeNode = parent;
+        while (
+          cursor.parent &&
+          isNodeOfType(cursor.parent, "MemberExpression") &&
+          cursor.parent.object === cursor
+        ) {
+          cursor = cursor.parent;
+        }
+        const isCalled =
+          cursor.parent &&
+          isNodeOfType(cursor.parent, "CallExpression") &&
+          cursor.parent.callee === cursor;
+        const isAssigned =
+          cursor.parent &&
+          isNodeOfType(cursor.parent, "AssignmentExpression") &&
+          cursor.parent.left === cursor;
+        if (!isCalled && !isAssigned) return;
+        void isReadIntoExpression;
+      }
       didFindWork = true;
       return false;
     }
@@ -248,10 +392,20 @@ const hasAsyncOrDomWork = (wrappedFunction: FunctionEsTreeNode): boolean => {
         isNodeOfType(callee, "MemberExpression") &&
         !callee.computed &&
         isNodeOfType(callee.property, "Identifier") &&
-        PROMISE_CHAIN_METHOD_NAMES.has(callee.property.name)
+        PROMISE_CHAIN_METHOD_NAMES.has(callee.property.name) &&
+        callee.property.name !== "catch" &&
+        !chainEndsInCatch(child)
       ) {
         didFindWork = true;
         return false;
+      }
+      if (
+        isNodeOfType(callee, "MemberExpression") &&
+        !callee.computed &&
+        isNodeOfType(callee.object, "Identifier") &&
+        WEB_STORAGE_RECEIVER_NAMES.has(callee.object.name)
+      ) {
+        return;
       }
     }
   });
@@ -260,28 +414,54 @@ const hasAsyncOrDomWork = (wrappedFunction: FunctionEsTreeNode): boolean => {
 
 const startsWithNullRefGuard = (wrappedFunction: FunctionEsTreeNode): boolean => {
   if (!isNodeOfType(wrappedFunction.body, "BlockStatement")) return false;
-  const firstStatement = wrappedFunction.body.body?.[0];
-  if (!isNodeOfType(firstStatement, "IfStatement")) return false;
-  const consequent = firstStatement.consequent;
-  const isEarlyReturn =
-    isNodeOfType(consequent, "ReturnStatement") ||
-    (isNodeOfType(consequent, "BlockStatement") &&
-      isNodeOfType(consequent.body?.[0], "ReturnStatement"));
-  if (!isEarlyReturn) return false;
-  let didTestRefCurrent = false;
-  walkAst(firstStatement.test, (child: EsTreeNode) => {
-    if (didTestRefCurrent) return false;
+  // TS narrowing hoists the read: `const el = ref.current; if (!el) return;`
+  // (or an optional-chained measurement) — collect leading bindings seeded
+  // from a `.current` read, then find the early-return guard among the
+  // leading statements.
+  const currentSeededNames = new Set<string>();
+  const readsCurrentOrSeeded = (root: EsTreeNode): boolean => {
+    let found = false;
+    walkAst(root, (child: EsTreeNode) => {
+      if (found) return false;
+      if (
+        isNodeOfType(child, "MemberExpression") &&
+        !child.computed &&
+        isNodeOfType(child.property, "Identifier") &&
+        child.property.name === "current"
+      ) {
+        found = true;
+        return false;
+      }
+      if (isNodeOfType(child, "Identifier") && currentSeededNames.has(child.name)) {
+        found = true;
+        return false;
+      }
+    });
+    return found;
+  };
+  for (const statement of wrappedFunction.body.body ?? []) {
     if (
-      isNodeOfType(child, "MemberExpression") &&
-      !child.computed &&
-      isNodeOfType(child.property, "Identifier") &&
-      child.property.name === "current"
+      isNodeOfType(statement, "VariableDeclaration") &&
+      (statement.declarations ?? []).every(
+        (declarator) => declarator.init && readsCurrentOrSeeded(declarator.init as EsTreeNode),
+      )
     ) {
-      didTestRefCurrent = true;
-      return false;
+      for (const declarator of statement.declarations ?? []) {
+        if (isNodeOfType(declarator.id, "Identifier")) currentSeededNames.add(declarator.id.name);
+      }
+      continue;
     }
-  });
-  return didTestRefCurrent;
+    if (isNodeOfType(statement, "IfStatement")) {
+      const consequent = statement.consequent;
+      const isEarlyReturn =
+        isNodeOfType(consequent, "ReturnStatement") ||
+        (isNodeOfType(consequent, "BlockStatement") &&
+          isNodeOfType(consequent.body?.[0], "ReturnStatement"));
+      return isEarlyReturn && readsCurrentOrSeeded(statement.test as EsTreeNode);
+    }
+    return false;
+  }
+  return false;
 };
 
 export const debounceNoCleanup = defineRule({
