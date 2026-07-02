@@ -114,7 +114,11 @@ const chainMemberPath = (memberExpression: EsTreeNode): string | null => {
 
 // Same-scope bindings that alias the exact chain being multiplied
 // (`const price = item?.price;` before `item?.price * 2`) — a guard on the
-// alias narrows the chain just as soundly as a guard on the root.
+// alias narrows the chain just as soundly as a guard on the root. Only
+// declarators whose OWN function scope encloses the arithmetic count: a
+// same-named alias inside a sibling nested function is a different
+// variable, and crediting its name would let an unrelated `if (price)`
+// suppress real findings.
 const collectSameChainAliasNames = (operandMember: EsTreeNode): string[] => {
   const operandPath = chainMemberPath(operandMember);
   if (!operandPath) return [];
@@ -129,6 +133,7 @@ const collectSameChainAliasNames = (operandMember: EsTreeNode): string[] => {
     ) {
       return;
     }
+    if (findScopeOwner(child) !== scopeOwner) return;
     const initializerMember = asDirectOptionalChainMember(child.init);
     if (initializerMember && chainMemberPath(initializerMember) === operandPath) {
       aliasNames.push(child.id.name);

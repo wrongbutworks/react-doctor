@@ -6,10 +6,12 @@ import type { PackageJson } from "../types/index.js";
 const MOBX_PACKAGES = ["mobx", "mobx-react", "mobx-react-lite", "mobx-state-tree"];
 
 export const getMobxVersion = (packageJson: PackageJson): string | null => {
+  // devDependencies lowest, runtime dependencies highest: a dev-only pin
+  // must not override the spec the shipped app actually resolves.
   const allDependencies = {
+    ...packageJson.devDependencies,
     ...packageJson.peerDependencies,
     ...packageJson.dependencies,
-    ...packageJson.devDependencies,
   };
   for (const packageName of MOBX_PACKAGES) {
     const version = allDependencies[packageName];

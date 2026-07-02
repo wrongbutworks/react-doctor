@@ -287,7 +287,9 @@ const isRenderExpression = (node: EsTreeNode): boolean => {
 
 // A falsy-numeric `&&` leaks its `0` whenever the expression's value
 // reaches a JSX child position, including through ternary branches, the
-// right arm of `||` / `??`, and the right arm of an enclosing `&&`.
+// right arm of any logical, and the LEFT arm of `&&`/`??` — a falsy left
+// IS the `&&` result, and `0` is not nullish so `??` passes it through.
+// Only a left arm of `||` swallows the falsy value.
 const flowsIntoJsxChild = (node: EsTreeNode): boolean => {
   let current: EsTreeNode = node;
   let parent: EsTreeNode | null | undefined = current.parent;
@@ -304,9 +306,10 @@ const flowsIntoJsxChild = (node: EsTreeNode): boolean => {
     const isFlowingConditionalBranch =
       isNodeOfType(parent, "ConditionalExpression") &&
       (parent.consequent === current || parent.alternate === current);
-    const isFlowingLogicalRightArm =
-      isNodeOfType(parent, "LogicalExpression") && parent.right === current;
-    if (!isPassthroughWrapper && !isFlowingConditionalBranch && !isFlowingLogicalRightArm) {
+    const isFlowingLogicalArm =
+      isNodeOfType(parent, "LogicalExpression") &&
+      (parent.right === current || (parent.left === current && parent.operator !== "||"));
+    if (!isPassthroughWrapper && !isFlowingConditionalBranch && !isFlowingLogicalArm) {
       return false;
     }
     current = parent;

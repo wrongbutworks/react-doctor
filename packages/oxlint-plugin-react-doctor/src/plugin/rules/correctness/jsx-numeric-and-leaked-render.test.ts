@@ -266,4 +266,27 @@ describe("jsx-numeric-and-leaked-render", () => {
     );
     expect(result.diagnostics).toHaveLength(1);
   });
+
+  it("flags a numeric && wrapped by ?? (0 is not nullish, so it still leaks)", () => {
+    const result = runRule(
+      jsxNumericAndLeakedRender,
+      `const List = ({ items, fallback }) => (
+        <div>{(items.length && <Rows items={items} />) ?? fallback}</div>
+      );`,
+      { filename: "list.tsx" },
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("does not flag a numeric && swallowed by the left arm of ||", () => {
+    const result = runRule(
+      jsxNumericAndLeakedRender,
+      `const List = ({ items, fallback }) => (
+        <div>{(items.length && <Rows items={items} />) || fallback}</div>
+      );`,
+      { filename: "list.tsx" },
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
 });

@@ -94,6 +94,21 @@ describe("discoverProject", () => {
     expect(discoverProject(projectDirectory).hasI18nLibrary).toBe(false);
   });
 
+  it("prefers the runtime styled-components spec over a dev-only pin", () => {
+    const projectDirectory = path.join(tempDirectory, "styled-dev-pin");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "styled-dev-pin",
+        dependencies: { react: "^19.0.0", "styled-components": "^6.1.0" },
+        devDependencies: { "styled-components": "^5.3.11" },
+      }),
+    );
+
+    expect(discoverProject(projectDirectory).styledComponentsVersion).toBe("^6.1.0");
+  });
+
   it("prefers runtime React dependencies over conflicting devDependencies", () => {
     const projectDirectory = path.join(tempDirectory, "react-runtime-over-dev-deps");
     fs.mkdirSync(projectDirectory, { recursive: true });

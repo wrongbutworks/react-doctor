@@ -452,4 +452,36 @@ describe("no-arithmetic-on-optional-chained-operand", () => {
     );
     expect(result.diagnostics.length).toBeGreaterThanOrEqual(1);
   });
+
+  it("still flags when a same-named alias lives in a sibling nested function (bugbot)", () => {
+    const result = runRule(
+      noArithmeticOnOptionalChainedOperand,
+      `const Checkout = ({ item, config }) => {
+        const formatBadge = () => {
+          const price = item?.price;
+          return price;
+        };
+        if (config.price) {
+          const total = item?.price * config.taxRate;
+          return total.toFixed(2);
+        }
+        return formatBadge();
+      };`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("does not flag when the alias in the SAME scope is guarded", () => {
+    const result = runRule(
+      noArithmeticOnOptionalChainedOperand,
+      `const Checkout = ({ item, taxRate }) => {
+        const price = item?.price;
+        if (!price) return null;
+        const total = item?.price * taxRate;
+        return total.toFixed(2);
+      };`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
 });

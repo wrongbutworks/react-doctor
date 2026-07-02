@@ -251,6 +251,19 @@ describe("buildCapabilities", () => {
     expect(buildCapabilities({ ...baseProject, mobxVersion: null }).has("mobx")).toBe(false);
   });
 
+  it("does not enable library capabilities when the version fields are missing entirely", () => {
+    const {
+      tanstackQueryVersion: _tanstackQueryVersion,
+      mobxVersion: _mobxVersion,
+      styledComponentsVersion: _styledComponentsVersion,
+      ...withoutLibraryVersions
+    } = baseProject;
+    const capabilities = buildCapabilities(withoutLibraryVersions as unknown as ProjectInfo);
+    expect(capabilities.has("tanstack-query")).toBe(false);
+    expect(capabilities.has("mobx")).toBe(false);
+    expect(capabilities.has("styled-components")).toBe(false);
+  });
+
   it("emits the `i18n` capability only when the project declares an i18n library", () => {
     expect(buildCapabilities({ ...baseProject, hasI18nLibrary: true }).has("i18n")).toBe(true);
     expect(buildCapabilities({ ...baseProject, hasI18nLibrary: false }).has("i18n")).toBe(false);

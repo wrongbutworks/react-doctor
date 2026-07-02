@@ -122,9 +122,12 @@ export const buildCapabilities = (project: ProjectInfo): ReadonlySet<string> => 
   if (project.isPreES2023Target) capabilities.add("pre-es2023");
 
   if (project.hasReactCompiler) capabilities.add("react-compiler");
-  if (project.tanstackQueryVersion !== null) capabilities.add("tanstack-query");
-  if (project.mobxVersion !== null) capabilities.add("mobx");
-  if (project.styledComponentsVersion !== null) {
+  // Truthiness, not `!== null`: a ProjectInfo built without these fields
+  // (a JS caller, a stale cached payload) must not enable the capability
+  // via `undefined !== null`.
+  if (project.tanstackQueryVersion) capabilities.add("tanstack-query");
+  if (project.mobxVersion) capabilities.add("mobx");
+  if (project.styledComponentsVersion) {
     capabilities.add("styled-components");
     // `styled-components:6` gates rules about v6-only behavior — v6 removed
     // the automatic @emotion/is-prop-valid filtering, so forwarding a custom
