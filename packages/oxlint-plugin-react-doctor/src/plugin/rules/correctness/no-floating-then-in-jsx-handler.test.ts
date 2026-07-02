@@ -174,4 +174,95 @@ describe("no-floating-then-in-jsx-handler", () => {
     );
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("stays quiet when the chain root is a same-file helper whose fetch chain ends in .catch (NextChat shape)", () => {
+    const result = runRule(
+      noFloatingThenInJsxHandler,
+      `const upload = (code) => {
+         if (cachedId) return Promise.resolve({ id: cachedId });
+         return fetch("/api/upload", { method: "POST", body: code })
+           .then((res) => res.json())
+           .catch((e) => showToast(String(e)));
+       };
+       const Artifacts = ({ code }) => (
+         <button onClick={() => upload(code).then((res) => setShareUrl(res.id))}>Share</button>
+       );`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet when the chain root is a same-file async helper with fully try/caught awaits", () => {
+    const result = runRule(
+      noFloatingThenInJsxHandler,
+      `const copyToClipboard = async (text) => {
+         try {
+           await navigator.clipboard.writeText(text);
+           return true;
+         } catch (error) {
+           console.error(error);
+           return false;
+         }
+       };
+       const Table = ({ value }) => (
+         <button onClick={() => copyToClipboard(value).then((ok) => ok && toastSuccess())}>Copy</button>
+       );`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet on a synchronously-resolved new Promise sequencing wrapper", () => {
+    const result = runRule(
+      noFloatingThenInJsxHandler,
+      `const Editor = ({ commit }) => (
+         <button
+           onClick={() =>
+             new Promise((resolve) => {
+               commit();
+               resolve(true);
+             }).then(() => focusNextRow())
+           }
+         >
+           Save
+         </button>
+       );`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags when the same-file helper's awaits are not all try/caught", () => {
+    const result = runRule(
+      noFloatingThenInJsxHandler,
+      `const save = async (draft) => {
+         const validated = await validate(draft);
+         try {
+           return await persist(validated);
+         } catch (error) {
+           return null;
+         }
+       };
+       const Form = ({ draft }) => (
+         <button onClick={() => save(draft).then((res) => setSaved(res))}>Save</button>
+       );`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags a new Promise wrapper whose executor declares reject", () => {
+    const result = runRule(
+      noFloatingThenInJsxHandler,
+      `const Uploader = ({ file }) => (
+         <button
+           onClick={() =>
+             new Promise((resolve, reject) => {
+               reader.onerror = reject;
+               reader.readAsText(file);
+             }).then((text) => setContent(text))
+           }
+         >
+           Read
+         </button>
+       );`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
 });

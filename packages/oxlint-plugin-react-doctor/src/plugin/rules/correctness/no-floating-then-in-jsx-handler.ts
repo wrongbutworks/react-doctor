@@ -1,10 +1,15 @@
 import { defineRule } from "../../utils/define-rule.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
+import { findVariableInitializer } from "../../utils/find-variable-initializer.js";
 import { getCallMethodName } from "../../utils/get-call-method-name.js";
 import { getJsxAttributeName } from "../../utils/get-jsx-attribute-name.js";
+import { isFunctionLike } from "../../utils/is-function-like.js";
+import { isInsideTryStatement } from "../../utils/is-inside-try-statement.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
 import { stripParenExpression } from "../../utils/strip-paren-expression.js";
+import { walkAst } from "../../utils/walk-ast.js";
+import { walkOwnFunctionScope } from "../../utils/walk-own-function-scope.js";
 import type { RuleContext } from "../../utils/rule-context.js";
 
 const HANDLER_PROP_PATTERN = /^on[A-Z]/;
@@ -46,46 +51,150 @@ const chainHasRejectionHandler = (node: EsTreeNode): boolean => {
   return false;
 };
 
-// The `Promise.resolve().then(...)` microtask-scheduling idiom never
-// rejects on its own, so a missing `.catch` is not a floating rejection
-// (mirrors the Promise.resolve exemption in
-// no-promise-then-side-effect-in-effect-without-catch).
-const chainRootIsPromiseResolve = (thenCall: EsTreeNodeOfType<"CallExpression">): boolean => {
-  let cursor: EsTreeNode | null | undefined = thenCall;
-  while (cursor) {
+const PROMISE_COMBINATOR_METHOD_NAMES = new Set(["then", "catch", "finally"]);
+
+// Walks a `.then`-ended chain back through then/catch/finally links only, to
+// the expression that produced the promise: `upload(code).then(...)` -> the
+// `upload(code)` call, `Promise.resolve(v).then(...)` -> the resolve call,
+// `new Promise(...).then(...)` -> the NewExpression.
+const chainRootExpression = (thenCall: EsTreeNode): EsTreeNode => {
+  let cursor = stripParenExpression(thenCall);
+  while (true) {
     if (isNodeOfType(cursor, "ChainExpression")) {
-      cursor = cursor.expression as EsTreeNode;
+      cursor = stripParenExpression(cursor.expression as EsTreeNode);
       continue;
     }
     if (isNodeOfType(cursor, "CallExpression")) {
-      const callee = cursor.callee as EsTreeNode;
+      const callee = stripParenExpression(cursor.callee as EsTreeNode);
       if (
         isNodeOfType(callee, "MemberExpression") &&
-        isNodeOfType(callee.object, "Identifier") &&
-        callee.object.name === "Promise" &&
-        !callee.computed &&
         isNodeOfType(callee.property, "Identifier") &&
-        callee.property.name === "resolve"
+        PROMISE_COMBINATOR_METHOD_NAMES.has(callee.property.name)
       ) {
-        return true;
+        cursor = stripParenExpression(callee.object as EsTreeNode);
+        continue;
       }
-      cursor = callee;
-      continue;
+      return cursor;
     }
-    if (isNodeOfType(cursor, "MemberExpression")) {
-      cursor = cursor.object as EsTreeNode;
-      continue;
+    return cursor;
+  }
+};
+
+const subtreeContainsThrow = (root: EsTreeNode): boolean => {
+  let found = false;
+  walkAst(root, (child: EsTreeNode) => {
+    if (found) return false;
+    if (isNodeOfType(child, "ThrowStatement")) {
+      found = true;
+      return false;
     }
-    break;
+  });
+  return found;
+};
+
+// `new Promise((resolve) => { ...sync work...; resolve(v) })` used as a
+// sequencing/microtask wrapper: the executor declares no reject parameter
+// and contains no throw, so the promise structurally cannot reject and a
+// `.catch` on the chain would be dead code.
+const isNonRejectingPromiseConstruction = (root: EsTreeNode): boolean => {
+  if (!isNodeOfType(root, "NewExpression")) return false;
+  if (!isNodeOfType(root.callee, "Identifier") || root.callee.name !== "Promise") return false;
+  const executor = root.arguments?.[0];
+  if (!executor || !isFunctionLike(executor as EsTreeNode)) return false;
+  const executorFunction = executor as EsTreeNode;
+  if ((executorFunction.params?.length ?? 0) >= 2) return false;
+  return !subtreeContainsThrow(executorFunction);
+};
+
+const isPromiseResolveCall = (node: EsTreeNode): boolean =>
+  isNodeOfType(node, "CallExpression") &&
+  isNodeOfType(node.callee, "MemberExpression") &&
+  !node.callee.computed &&
+  isNodeOfType(node.callee.object, "Identifier") &&
+  node.callee.object.name === "Promise" &&
+  isNodeOfType(node.callee.property, "Identifier") &&
+  node.callee.property.name === "resolve";
+
+// A node is rejection-proof inside `fn` when it sits in a try BLOCK whose
+// catch handler exists and does not rethrow.
+const isInsideNonRethrowingTry = (node: EsTreeNode, functionBoundary: EsTreeNode): boolean => {
+  let child: EsTreeNode = node;
+  let ancestor: EsTreeNode | null | undefined = node.parent;
+  while (ancestor && ancestor !== functionBoundary) {
+    if (
+      isNodeOfType(ancestor, "TryStatement") &&
+      ancestor.block === child &&
+      ancestor.handler &&
+      !subtreeContainsThrow(ancestor.handler as EsTreeNode)
+    ) {
+      return true;
+    }
+    child = ancestor;
+    ancestor = ancestor.parent ?? null;
   }
   return false;
+};
+
+// A same-file helper whose returned promise structurally cannot reject:
+// an async function whose every await (and throw) is inside a try with a
+// non-rethrowing catch, or a sync function whose every return is a chain
+// carrying its own rejection handler / a `Promise.resolve(...)`. NextChat's
+// `upload` (fetch chain ending in .catch) is the corpus shape.
+const isNeverRejectingHelperCall = (root: EsTreeNode): boolean => {
+  if (!isNodeOfType(root, "CallExpression")) return false;
+  const callee = stripParenExpression(root.callee as EsTreeNode);
+  if (!isNodeOfType(callee, "Identifier")) return false;
+  const binding = findVariableInitializer(callee, callee.name);
+  const helper = binding?.initializer;
+  if (!helper || !isFunctionLike(helper)) return false;
+
+  if (helper.async) {
+    let isRejectionProof = true;
+    let sawSuspension = false;
+    walkOwnFunctionScope(helper, (child: EsTreeNode) => {
+      if (!isRejectionProof) return false;
+      if (isNodeOfType(child, "AwaitExpression")) {
+        sawSuspension = true;
+        if (!isInsideNonRethrowingTry(child, helper)) isRejectionProof = false;
+      }
+      if (
+        isNodeOfType(child, "ThrowStatement") &&
+        !isInsideTryStatement(child, { region: "block", boundary: helper })
+      ) {
+        isRejectionProof = false;
+      }
+    });
+    return isRejectionProof && sawSuspension;
+  }
+
+  const returnedExpressions: EsTreeNode[] = [];
+  if (
+    isNodeOfType(helper, "ArrowFunctionExpression") &&
+    !isNodeOfType(helper.body, "BlockStatement")
+  ) {
+    returnedExpressions.push(stripParenExpression(helper.body as EsTreeNode));
+  } else {
+    walkOwnFunctionScope(helper, (child: EsTreeNode) => {
+      if (isNodeOfType(child, "ReturnStatement") && child.argument) {
+        returnedExpressions.push(stripParenExpression(child.argument as EsTreeNode));
+      }
+    });
+  }
+  return (
+    returnedExpressions.length > 0 &&
+    returnedExpressions.every(
+      (returned) => chainHasRejectionHandler(returned) || isPromiseResolveCall(returned),
+    )
+  );
 };
 
 // Returns the last `.then(...)` call when `expression` is a `.then`-ended
 // chain (optionally followed by `.finally` calls, which re-throw
 // rejections) with no rejection handler, else null. Keyed purely off the
 // literal `.then(` shape — no inference about whether a bare call returns
-// a promise.
+// a promise — except for two structurally rejection-proof roots (a
+// no-reject `new Promise` wrapper, a same-file never-rejecting helper),
+// where a `.catch` would be dead code.
 const floatingThenCall = (expression: EsTreeNode): EsTreeNodeOfType<"CallExpression"> | null => {
   let terminal = stripParenExpression(expression);
   while (
@@ -99,7 +208,13 @@ const floatingThenCall = (expression: EsTreeNode): EsTreeNodeOfType<"CallExpress
   if (!isNodeOfType(terminal, "CallExpression")) return null;
   if (getCallMethodName(terminal.callee as EsTreeNode) !== "then") return null;
   if (chainHasRejectionHandler(terminal)) return null;
-  if (chainRootIsPromiseResolve(terminal)) return null;
+  const root = chainRootExpression(terminal);
+  // `Promise.resolve(...)` roots never reject on their own — the
+  // microtask-scheduling idiom (upstream exemption, folded into the
+  // root-based checks).
+  if (isPromiseResolveCall(root)) return null;
+  if (isNonRejectingPromiseConstruction(root)) return null;
+  if (isNeverRejectingHelperCall(root)) return null;
   return terminal;
 };
 
