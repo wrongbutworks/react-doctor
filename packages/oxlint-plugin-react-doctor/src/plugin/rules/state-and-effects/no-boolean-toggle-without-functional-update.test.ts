@@ -239,4 +239,102 @@ describe("no-boolean-toggle-without-functional-update", () => {
     );
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("stays quiet: Inline keydown listener with AbortController cleanup and state in deps (re-subscribed on every toggle)", () => {
+    const result = runRule(
+      noBooleanToggleWithoutFunctionalUpdate,
+      `const VideoPlayer = () => {
+  const [isPlaying, setIsPlaying] = useState(false);
+  useEffect(() => {
+    const controller = new AbortController();
+    document.addEventListener(
+      "keydown",
+      (event) => {
+        if (event.code === "Space") setIsPlaying(!isPlaying);
+      },
+      { signal: controller.signal },
+    );
+    return () => controller.abort();
+  }, [isPlaying]);
+  return <video muted={!isPlaying} />;
+};`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Blinking-cursor setInterval with clearInterval cleanup and state in deps", () => {
+    const result = runRule(
+      noBooleanToggleWithoutFunctionalUpdate,
+      `const Cursor = () => {
+  const [visible, setVisible] = useState(true);
+  useEffect(() => {
+    const intervalId = setInterval(() => setVisible(!visible), 500);
+    return () => clearInterval(intervalId);
+  }, [visible]);
+  return <span style={{ opacity: visible ? 1 : 0 }}>|</span>;
+};`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Write-through mirror of an absolute external command in .then — the rule's own remediation would introduce a desync bug", () => {
+    const result = runRule(
+      noBooleanToggleWithoutFunctionalUpdate,
+      `const MuteButton = ({ player }) => {
+  const [muted, setMuted] = useState(false);
+  const handleToggleMute = () => {
+    player.setMuted(!muted).then(() => setMuted(!muted));
+  };
+  return <button onClick={handleToggleMute}>{muted ? "Unmute" : "Mute"}</button>;
+};`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Latest-ref equality guard proving the captured value is still current before toggling", () => {
+    const result = runRule(
+      noBooleanToggleWithoutFunctionalUpdate,
+      `const DelayedToggle = ({ trigger }) => {
+  const [open, setOpen] = useState(false);
+  const openRef = useRef(open);
+  openRef.current = open;
+  useEffect(() => {
+    if (!trigger) return;
+    const timerId = setTimeout(() => {
+      if (openRef.current === open) setOpen(!open);
+    }, 200);
+    return () => clearTimeout(timerId);
+  }, [trigger, open]);
+  return <div data-open={open} />;
+};`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags a toggle in a deferred callback of a mount-only effect", () => {
+    const result = runRule(
+      noBooleanToggleWithoutFunctionalUpdate,
+      `const Cursor = () => {
+         const [visible, setVisible] = useState(true);
+         useEffect(() => {
+           const intervalId = setInterval(() => setVisible(!visible), 500);
+           return () => clearInterval(intervalId);
+         }, []);
+       };`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags a state-dep effect toggle with no cleanup", () => {
+    const result = runRule(
+      noBooleanToggleWithoutFunctionalUpdate,
+      `const Poller = () => {
+         const [on, setOn] = useState(false);
+         useEffect(() => {
+           setTimeout(() => setOn(!on), 500);
+         }, [on]);
+       };`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
 });

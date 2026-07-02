@@ -225,4 +225,112 @@ describe("effect-observer-needs-disconnect", () => {
     );
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("stays quiet: Reveal-once IntersectionObserver releasing each target via the callback's second parameter (obs.unobserve)", () => {
+    const result = runRule(
+      effectObserverNeedsDisconnect,
+      `useEffect(() => {
+  const node = ref.current;
+  if (!node) return;
+  const observer = new IntersectionObserver(
+    (entries, obs) => {
+      entries.forEach((entry) => {
+        if (entry.isIntersecting) {
+          entry.target.classList.add("animate-fade-in");
+          obs.unobserve(entry.target);
+        }
+      });
+    },
+    { threshold: 0.2 },
+  );
+  observer.observe(node);
+}, []);`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Lazy-load IntersectionObserver one-shot disconnecting via the destructured-callback observer parameter", () => {
+    const result = runRule(
+      effectObserverNeedsDisconnect,
+      `useEffect(() => {
+  const img = imageRef.current;
+  if (!img) return;
+  const observer = new IntersectionObserver(([entry], obs) => {
+    if (entry.isIntersecting) {
+      setShouldLoad(true);
+      obs.disconnect();
+    }
+  });
+  observer.observe(img);
+}, []);`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Buffered PerformanceObserver FCP one-shot disconnecting via the callback parameter", () => {
+    const result = runRule(
+      effectObserverNeedsDisconnect,
+      `useEffect(() => {
+  if (typeof PerformanceObserver === "undefined") return;
+  const observer = new PerformanceObserver((entryList, perfObserver) => {
+    for (const entry of entryList.getEntries()) {
+      if (entry.name === "first-contentful-paint") {
+        reportMetric("FCP", entry.startTime);
+        perfObserver.disconnect();
+      }
+    }
+  });
+  observer.observe({ type: "paint", buffered: true });
+}, []);`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: MutationObserver wait-for-element one-shot (focus a portal dialog) disconnecting via the callback parameter", () => {
+    const result = runRule(
+      effectObserverNeedsDisconnect,
+      `useEffect(() => {
+  const container = containerRef.current;
+  if (!container) return;
+  const observer = new MutationObserver((mutations, mutationObserver) => {
+    const dialog = container.querySelector("[role='dialog']");
+    if (dialog instanceof HTMLElement) {
+      dialog.focus();
+      mutationObserver.disconnect();
+    }
+  });
+  observer.observe(container, { childList: true, subtree: true });
+}, []);`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: ResizeObserver initial post-layout measure one-shot disconnecting via the callback parameter", () => {
+    const result = runRule(
+      effectObserverNeedsDisconnect,
+      `useEffect(() => {
+  const node = ref.current;
+  if (!node) return;
+  const observer = new ResizeObserver(([entry], resizeObserver) => {
+    setInitialHeight(entry.contentRect.height);
+    resizeObserver.disconnect();
+  });
+  observer.observe(node);
+}, []);`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags an observer whose two-param callback never releases", () => {
+    const result = runRule(
+      effectObserverNeedsDisconnect,
+      `useEffect(() => {
+         const observer = new IntersectionObserver((entries, obs) => {
+           entries.forEach((entry) => setVisible(entry.isIntersecting));
+         });
+         observer.observe(ref.current);
+       }, []);`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
 });

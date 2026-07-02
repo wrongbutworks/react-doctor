@@ -2,6 +2,7 @@ import { defineRule } from "../../utils/define-rule.js";
 import { isFunctionLike } from "../../utils/is-function-like.js";
 import { isHookCall } from "../../utils/is-hook-call.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
+import { walkAst } from "../../utils/walk-ast.js";
 import { isSetterCall } from "../../utils/is-setter-call.js";
 import { stripParenExpression } from "../../utils/strip-paren-expression.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
@@ -117,6 +118,124 @@ const isStateNameShadowedAtCall = (node: EsTreeNode, stateName: string): boolean
   return false;
 };
 
+const EFFECT_HOOK_NAMES = new Set(["useEffect", "useLayoutEffect", "useInsertionEffect"]);
+
+// A deferred closure created inside a useEffect that LISTS the state in its
+// deps and returns a cleanup is torn down and re-created on every committed
+// state change — the captured value is always the latest committed one, so
+// `set(!state)` cannot read stale state.
+const deferredClosureIsResubscribedOnState = (node: EsTreeNode, stateName: string): boolean => {
+  let cursor: EsTreeNode | null | undefined = node;
+  while (cursor) {
+    if (
+      isNodeOfType(cursor, "CallExpression") &&
+      isNodeOfType(cursor.callee, "Identifier") &&
+      EFFECT_HOOK_NAMES.has(cursor.callee.name)
+    ) {
+      const dependencyArray = cursor.arguments?.[1];
+      if (!dependencyArray || !isNodeOfType(dependencyArray, "ArrayExpression")) return false;
+      const listsState = (dependencyArray.elements ?? []).some(
+        (element) => isNodeOfType(element, "Identifier") && element.name === stateName,
+      );
+      if (!listsState) return false;
+      const effectCallback = cursor.arguments?.[0]
+        ? stripParenExpression(cursor.arguments[0] as EsTreeNode)
+        : null;
+      if (
+        !effectCallback ||
+        (!isNodeOfType(effectCallback, "ArrowFunctionExpression") &&
+          !isNodeOfType(effectCallback, "FunctionExpression"))
+      ) {
+        return false;
+      }
+      const effectBody = effectCallback.body as EsTreeNode;
+      let hasCleanup = false;
+      walkAst(effectBody, (child: EsTreeNode) => {
+        if (hasCleanup) return false;
+        if (child !== effectBody && isFunctionLike(child)) return false;
+        if (isNodeOfType(child, "ReturnStatement") && child.argument) {
+          hasCleanup = true;
+          return false;
+        }
+      });
+      return hasCleanup;
+    }
+    cursor = cursor.parent;
+  }
+  return false;
+};
+
+// `player.setMuted(!muted).then(() => setMuted(!muted))` — the state write
+// mirrors an absolute external command built from the SAME `!state`
+// expression; a functional updater here would desync the mirror from the
+// command actually sent.
+const thenChainRootReceivesSameToggle = (node: EsTreeNode, stateName: string): boolean => {
+  let cursor: EsTreeNode | null | undefined = node;
+  while (cursor) {
+    const parent: EsTreeNode | null | undefined = cursor.parent;
+    if (!parent) return false;
+    if (isFunctionLike(cursor) && isNodeOfType(parent, "CallExpression")) {
+      const callee = parent.callee;
+      if (
+        isNodeOfType(callee, "MemberExpression") &&
+        !callee.computed &&
+        isNodeOfType(callee.property, "Identifier") &&
+        callee.property.name === "then"
+      ) {
+        const chainRoot = stripParenExpression(callee.object as EsTreeNode);
+        if (isNodeOfType(chainRoot, "CallExpression")) {
+          return (chainRoot.arguments ?? []).some((argument) => {
+            const inner = stripParenExpression(argument as EsTreeNode);
+            return (
+              isNodeOfType(inner, "UnaryExpression") &&
+              inner.operator === "!" &&
+              isNodeOfType(stripParenExpression(inner.argument), "Identifier") &&
+              (stripParenExpression(inner.argument) as EsTreeNodeOfType<"Identifier">).name ===
+                stateName
+            );
+          });
+        }
+      }
+    }
+    cursor = parent;
+  }
+  return false;
+};
+
+// `if (openRef.current === open) setOpen(!open)` — a latest-ref equality
+// guard proving the captured value is still current before toggling.
+const dominatedByLatestRefEqualityGuard = (node: EsTreeNode, stateName: string): boolean => {
+  let cursor: EsTreeNode | null | undefined = node;
+  let child: EsTreeNode | null = null;
+  while (cursor) {
+    if (isNodeOfType(cursor, "IfStatement") && child === cursor.consequent) {
+      const test = stripParenExpression(cursor.test as EsTreeNode);
+      if (
+        isNodeOfType(test, "BinaryExpression") &&
+        (test.operator === "===" || test.operator === "==")
+      ) {
+        const sides = [test.left, test.right].map((side) =>
+          stripParenExpression(side as EsTreeNode),
+        );
+        const readsCurrent = sides.some(
+          (side) =>
+            isNodeOfType(side, "MemberExpression") &&
+            !side.computed &&
+            isNodeOfType(side.property, "Identifier") &&
+            side.property.name === "current",
+        );
+        const readsState = sides.some(
+          (side) => isNodeOfType(side, "Identifier") && side.name === stateName,
+        );
+        if (readsCurrent && readsState) return true;
+      }
+    }
+    child = cursor;
+    cursor = cursor.parent;
+  }
+  return false;
+};
+
 export const noBooleanToggleWithoutFunctionalUpdate = defineRule({
   id: "no-boolean-toggle-without-functional-update",
   title: "Boolean toggle reads a stale value",
@@ -144,6 +263,9 @@ export const noBooleanToggleWithoutFunctionalUpdate = defineRule({
       if (isStateNameShadowedAtCall(node, pairedStateName)) return;
 
       if (!isInsideDeferredCallback(node)) return;
+      if (deferredClosureIsResubscribedOnState(node, pairedStateName)) return;
+      if (thenChainRootReceivesSameToggle(node, pairedStateName)) return;
+      if (dominatedByLatestRefEqualityGuard(node, pairedStateName)) return;
 
       context.report({
         node,

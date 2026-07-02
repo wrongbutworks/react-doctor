@@ -96,4 +96,40 @@ describe("effect-remove-listener-inline-handler", () => {
     );
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("stays quiet on a device API off(duration, completionCallback)", () => {
+    const result = runRule(
+      effectRemoveListenerInlineHandler,
+      `const LampPreview = ({ light }: LampPreviewProps) => {
+  const [isPreviewing, setIsPreviewing] = useState(false);
+
+  useEffect(() => {
+    light.on(0, () => setIsPreviewing(true));
+    return () => {
+      light.off(FADE_DURATION_MS, (error: Error | null) => {
+        if (error) console.error("failed to power down preview lamp", error);
+      });
+    };
+  }, [light]);
+
+  return <LampIndicator active={isPreviewing} />;
+};`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags off() with a string event name and inline handler", () => {
+    const result = runRule(
+      effectRemoveListenerInlineHandler,
+      `useEffect(() => {
+         emitter.on("change", handleChange);
+         return () => emitter.off("change", () => handleChange());
+       }, []);`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("carries the test-noise tag so unit tests asserting off() tolerance are pipeline-skipped", () => {
+    expect(effectRemoveListenerInlineHandler.tags).toContain("test-noise");
+  });
 });

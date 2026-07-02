@@ -4,6 +4,8 @@ import { defineRule } from "../../utils/define-rule.js";
 import { getEffectCallback } from "../../utils/get-effect-callback.js";
 import { isHookCall } from "../../utils/is-hook-call.js";
 import { walkAst } from "../../utils/walk-ast.js";
+import { isFunctionLike } from "../../utils/is-function-like.js";
+import { stripParenExpression } from "../../utils/strip-paren-expression.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
@@ -59,6 +61,48 @@ const recordObserverUsage = (
   tracked.didEscape = true;
 };
 
+// One-shot observers release themselves through the callback's SECOND
+// parameter — `new IntersectionObserver((entries, obs) => { ...
+// obs.disconnect() })` — the spec-provided reference to the observer
+// itself. A release through that alias is as real as one through the
+// binding.
+const callbackReleasesViaObserverParameter = (
+  construction: EsTreeNodeOfType<"NewExpression">,
+): boolean => {
+  const observerCallback = construction.arguments?.[0]
+    ? stripParenExpression(construction.arguments[0] as EsTreeNode)
+    : null;
+  if (
+    !observerCallback ||
+    (!isNodeOfType(observerCallback, "ArrowFunctionExpression") &&
+      !isNodeOfType(observerCallback, "FunctionExpression"))
+  ) {
+    return false;
+  }
+  const callbackFunction = observerCallback;
+  const observerParameter = callbackFunction.params?.[1];
+  if (!observerParameter || !isNodeOfType(observerParameter as EsTreeNode, "Identifier")) {
+    return false;
+  }
+  const parameterName = (observerParameter as EsTreeNodeOfType<"Identifier">).name;
+  let didRelease = false;
+  walkAst(callbackFunction, (child: EsTreeNode) => {
+    if (didRelease) return false;
+    if (
+      isNodeOfType(child, "MemberExpression") &&
+      !child.computed &&
+      isNodeOfType(child.object, "Identifier") &&
+      child.object.name === parameterName &&
+      isNodeOfType(child.property, "Identifier") &&
+      OBSERVER_RELEASE_METHOD_NAMES.has(child.property.name)
+    ) {
+      didRelease = true;
+      return false;
+    }
+  });
+  return didRelease;
+};
+
 export const effectObserverNeedsDisconnect = defineRule({
   id: "effect-observer-needs-disconnect",
   title: "Observer created in an effect never disconnected",
@@ -91,7 +135,7 @@ export const effectObserverNeedsDisconnect = defineRule({
         trackedObserversByName.set(bindingName, {
           construction: child,
           didObserve: false,
-          didRelease: false,
+          didRelease: callbackReleasesViaObserverParameter(child),
           didEscape: false,
         });
       });
