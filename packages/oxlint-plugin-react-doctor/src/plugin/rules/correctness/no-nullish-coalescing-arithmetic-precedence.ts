@@ -41,7 +41,10 @@ const isSentinelLiteralSwallow = (node: EsTreeNodeOfType<"BinaryExpression">): b
   }
   const leftmostValue = resolveNumericLeafValue(innermost.left as EsTreeNode);
   if (leftmostValue === null) return false;
-  if (leftmostValue === 0 || leftmostValue === -1) return true;
+  if (leftmostValue === 0) return true;
+  // `-1` is the indexOf sentinel only under `-` (the sort-comparator
+  // swallow); `-1 * gutter` is the explicit negation spelling of `-gutter`.
+  if (leftmostValue === -1) return innermost.operator === "-";
   return leftmostValue === 1 && innermost.operator === "*";
 };
 

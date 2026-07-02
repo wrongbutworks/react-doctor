@@ -308,4 +308,17 @@ describe("no-non-null-assertion-on-maybe-undefined-result", () => {
     );
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("does not flag find! guarded by findIndex !== -1 with the identical predicate", () => {
+    const result = runRule(
+      noNonNullAssertionOnMaybeUndefinedResult,
+      `function pick(tabs: Tab[], id: string) {
+        if (tabs.findIndex((tab) => tab.id === id) !== -1) {
+          return tabs.find((tab) => tab.id === id)!.label;
+        }
+        return null;
+      }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
 });

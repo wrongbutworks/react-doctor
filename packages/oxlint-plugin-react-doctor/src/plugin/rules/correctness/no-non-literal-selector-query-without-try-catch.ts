@@ -154,21 +154,27 @@ const isRegexValidationCall = (node: EsTreeNode): boolean => {
   return Boolean(methodName && REGEX_VALIDATION_METHOD_NAMES.has(methodName));
 };
 
+const isImportSpecifierNode = (node: EsTreeNode): boolean =>
+  isNodeOfType(node, "ImportSpecifier") ||
+  isNodeOfType(node, "ImportDefaultSpecifier") ||
+  isNodeOfType(node, "ImportNamespaceSpecifier");
+
 // An href/hash-named helper whose in-file definition sanitizes with
 // `CSS.escape` (the fix the rule recommends) or regex-validates its value
 // (`/^#[A-Za-z][\w-]*$/.test(...)` returning null on mismatch) — its output
-// shape is self-controlled.
+// shape is self-controlled. An IMPORTED helper of that name gets the same
+// benefit of the doubt: its body is invisible, and a cross-file
+// `hashToSelector` overwhelmingly exists to do exactly this sanitizing.
 const isSanitizedSelectorHelperCall = (node: EsTreeNode): boolean => {
   if (!isNodeOfType(node, "CallExpression")) return false;
   const callee = stripParenExpression(node.callee);
   if (!isNodeOfType(callee, "Identifier")) return false;
   const binding = findVariableInitializer(callee, callee.name);
-  return Boolean(
-    binding?.initializer &&
-    someNodeInSubtree(
-      binding.initializer,
-      (candidate) => isCssEscapeCall(candidate) || isRegexValidationCall(candidate),
-    ),
+  if (!binding?.initializer) return false;
+  if (isImportSpecifierNode(binding.initializer)) return true;
+  return someNodeInSubtree(
+    binding.initializer,
+    (candidate) => isCssEscapeCall(candidate) || isRegexValidationCall(candidate),
   );
 };
 

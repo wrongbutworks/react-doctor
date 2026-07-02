@@ -257,4 +257,16 @@ describe("no-nondeterministic-id-value-in-render-body", () => {
     );
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("does not flag a props-injected registry uniqueId method", () => {
+    const result = runRule(
+      noNondeterministicIdValueInRenderBody,
+      `const OutlineItem = ({ node, idRegistry }) => {
+        const anchorId = idRegistry.uniqueId(node.key);
+        return <a id={anchorId} href={"#" + anchorId}>{node.title}</a>;
+      };`,
+      { filename: "outline.tsx" },
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
 });

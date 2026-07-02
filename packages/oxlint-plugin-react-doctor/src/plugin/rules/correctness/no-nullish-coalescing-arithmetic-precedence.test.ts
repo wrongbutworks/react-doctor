@@ -195,4 +195,20 @@ describe("no-nullish-coalescing-arithmetic-precedence", () => {
     const result = runRule(noNullishCoalescingArithmeticPrecedence, `const r = x ?? 1 * y;`);
     expect(result.diagnostics).toHaveLength(1);
   });
+
+  it("does not flag the explicit -1 coefficient negation (-1 * gutter)", () => {
+    const result = runRule(
+      noNullishCoalescingArithmeticPrecedence,
+      `const offset = marginOverride ?? -1 * gutter;`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a parenthesized fraction inside an outer addition", () => {
+    const result = runRule(
+      noNullishCoalescingArithmeticPrecedence,
+      `const total = basePadding + (columnGap ?? 1 / columnCount);`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
 });

@@ -47,9 +47,11 @@ const PLAYBACK_SIBLING_METHOD_NAMES = new Set([
 ]);
 
 // Store hooks whose entire API is mutate-the-proxy: MobX observables,
-// SyncedStore/Yjs CRDT proxies, valtio proxies. Splicing them IS the
-// documented update mechanism — a spread copy would silently break sync.
-const MUTABLE_STORE_HOOK_PATTERN = /^use(?:LocalObservable|LocalStore|SyncedStore|Proxy)$/;
+// SyncedStore/Yjs CRDT proxies, valtio proxies — splicing them IS the
+// documented update mechanism, and a spread copy would silently break
+// sync. `useCreation` (ahooks) is a documented useRef replacement, so the
+// held instance is a deliberate mutable container like `.current`.
+const MUTABLE_STORE_HOOK_PATTERN = /^use(?:LocalObservable|LocalStore|SyncedStore|Proxy|Creation)$/;
 
 const ALIAS_RESOLUTION_DEPTH_LIMIT = 3;
 

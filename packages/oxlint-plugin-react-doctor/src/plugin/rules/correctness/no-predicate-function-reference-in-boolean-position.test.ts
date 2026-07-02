@@ -303,4 +303,50 @@ describe("no-predicate-function-reference-in-boolean-position", () => {
     );
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("does not flag a negated existence guard with the evaluation in the else branch", () => {
+    const result = runRule(
+      noPredicateFunctionReferenceInBooleanPosition,
+      `function isSessionValid() { return session.active; }
+      function render() {
+        if (!isSessionValid) {
+          return fallback();
+        } else if (isSessionValid()) {
+          return content();
+        }
+        return login();
+      }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag f && wrap(f) composition guards", () => {
+    const result = runRule(
+      noPredicateFunctionReferenceInBooleanPosition,
+      `function isEnabled() { return flags.enabled; }
+      const gate = isEnabled && withLogging(isEnabled);`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag an existence guard invoking via .call", () => {
+    const result = runRule(
+      noPredicateFunctionReferenceInBooleanPosition,
+      `function isReadyCheck() { return state.ready; }
+      if (isReadyCheck) { isReadyCheck.call(context); }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag an existence guard returning the reference", () => {
+    const result = runRule(
+      noPredicateFunctionReferenceInBooleanPosition,
+      `function isDefaultResolver() { return true; }
+      function pickResolver(custom) {
+        if (isDefaultResolver) return isDefaultResolver;
+        return custom;
+      }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
 });

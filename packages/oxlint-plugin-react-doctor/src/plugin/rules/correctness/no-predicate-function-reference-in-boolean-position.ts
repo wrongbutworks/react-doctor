@@ -213,11 +213,23 @@ const isExistenceGuardOverUsedReference = (identifier: EsTreeNodeOfType<"Identif
     break;
   }
   if (!parent) return false;
-  if (isNodeOfType(parent, "IfStatement") && parent.test === current) {
-    return containsReferenceOf(parent.consequent, identifier.name);
+  // A negated test (`if (!isX) { fallback } else { isX() }`,
+  // `!isX ? fallback : isX() ? a : b`) puts the evaluation/use in the
+  // ALTERNATE — credit both branches, matching the mention-not-polarity
+  // stance of the other guard checks.
+  if (isNodeOfType(parent, "UnaryExpression") && parent.operator === "!") {
+    current = parent;
+    parent = parent.parent ?? null;
+    if (!parent) return false;
   }
-  if (isNodeOfType(parent, "ConditionalExpression") && parent.test === current) {
-    return containsReferenceOf(parent.consequent, identifier.name);
+  if (
+    (isNodeOfType(parent, "IfStatement") || isNodeOfType(parent, "ConditionalExpression")) &&
+    parent.test === current
+  ) {
+    if (containsReferenceOf(parent.consequent, identifier.name)) return true;
+    return Boolean(
+      parent.alternate && containsReferenceOf(parent.alternate as EsTreeNode, identifier.name),
+    );
   }
   return false;
 };

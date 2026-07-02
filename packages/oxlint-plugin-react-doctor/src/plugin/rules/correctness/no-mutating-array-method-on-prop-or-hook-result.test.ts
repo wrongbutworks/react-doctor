@@ -570,4 +570,31 @@ describe("no-mutating-array-method-on-prop-or-hook-result", () => {
     );
     expect(result.diagnostics).toHaveLength(1);
   });
+
+  it("does not flag a registry PARAM spliced in effect cleanup after a push", () => {
+    const result = runRule(
+      noMutatingArrayMethodOnPropOrHookResult,
+      `function useScrollLock(locks, id) {
+        useEffect(() => {
+          locks.push(id);
+          return () => { locks.splice(locks.indexOf(id), 1); };
+        }, [locks, id]);
+      }`,
+      { filename: "use-lock.ts" },
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag splice on an ahooks useCreation stable container", () => {
+    const result = runRule(
+      noMutatingArrayMethodOnPropOrHookResult,
+      `function useQueue() {
+        const queue = useCreation(() => [], []);
+        const drop = (index) => { queue.splice(index, 1); };
+        return drop;
+      }`,
+      { filename: "use-queue.ts" },
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
 });

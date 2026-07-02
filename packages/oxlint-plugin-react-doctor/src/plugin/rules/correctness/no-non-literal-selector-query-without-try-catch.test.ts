@@ -380,4 +380,30 @@ describe("no-non-literal-selector-query-without-try-catch", () => {
     );
     expect(result.diagnostics).toHaveLength(1);
   });
+
+  it("does not flag an imported hash-named helper (cross-file sanitizer)", () => {
+    const result = runRule(
+      noNonLiteralSelectorQueryWithoutTryCatch,
+      `import { hashToSelector } from "./utils/hash-to-selector";
+      document.querySelector(hashToSelector(window.location.hash))?.scrollIntoView();`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a shared handler whose every call site passes a literal href", () => {
+    const result = runRule(
+      noNonLiteralSelectorQueryWithoutTryCatch,
+      `const scrollToSection = (href) => {
+        document.querySelector(href)?.scrollIntoView({ behavior: "smooth" });
+      };
+      export const Navbar = () => (
+        <nav>
+          <button onClick={() => scrollToSection("#features")}>Features</button>
+          <button onClick={() => scrollToSection("#pricing")}>Pricing</button>
+        </nav>
+      );`,
+      { filename: "navbar.tsx" },
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
 });

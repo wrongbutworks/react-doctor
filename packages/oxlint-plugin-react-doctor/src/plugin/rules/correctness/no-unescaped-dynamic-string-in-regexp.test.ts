@@ -300,4 +300,30 @@ describe("no-unescaped-dynamic-string-in-regexp", () => {
     );
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("does not flag an aliased escapeRegExp import", () => {
+    const result = runRule(
+      noUnescapedDynamicStringInRegexp,
+      `import { escapeRegExp as esc } from "lodash";
+      const matcher = new RegExp(esc(searchQuery), "i");`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a literal-returning source getter named with search", () => {
+    const result = runRule(
+      noUnescapedDynamicStringInRegexp,
+      `const getSearchFieldSource = () => "^field:";
+      const matcher = new RegExp(getSearchFieldSource() + "(\\w+)");`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag RegExp.escape applied per token in a map", () => {
+    const result = runRule(
+      noUnescapedDynamicStringInRegexp,
+      `const matcher = new RegExp(searchTokens.map((token) => RegExp.escape(token)).join("|"), "gi");`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
 });

@@ -94,12 +94,49 @@ const isElementWiseEscapingMap = (node: EsTreeNodeOfType<"CallExpression">): boo
 
 // A same-file helper whose body performs the escape (`const
 // escapeSpecialChars = (v) => v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")`)
-// sanitizes regardless of whether its name matches the helper pattern.
+// sanitizes regardless of whether its name matches the helper pattern; so
+// does an ALIASED escape import (`import { escapeRegExp as esc }`), whose
+// imported name carries the claim the local alias dropped.
 const calleeBindingBodyEscapes = (node: EsTreeNodeOfType<"CallExpression">): boolean => {
   const callee = stripParenExpression(node.callee);
   if (!isNodeOfType(callee, "Identifier")) return false;
   const binding = findVariableInitializer(callee, callee.name);
-  return Boolean(binding?.initializer && containsEscapingCall(binding.initializer));
+  if (!binding?.initializer) return false;
+  if (isNodeOfType(binding.initializer, "ImportSpecifier")) {
+    const imported = binding.initializer.imported;
+    return Boolean(
+      isNodeOfType(imported, "Identifier") && ESCAPE_HELPER_NAME_PATTERN.test(imported.name),
+    );
+  }
+  return containsEscapingCall(binding.initializer);
+};
+
+// `new RegExp(getSearchFieldSource())` where the getter's every return is
+// a literal — the "search" in the CALLEE name is a source-pattern getter,
+// not a user term.
+const isLiteralReturningGetterCall = (node: EsTreeNode): boolean => {
+  if (!isNodeOfType(node, "CallExpression")) return false;
+  const callee = stripParenExpression(node.callee);
+  if (!isNodeOfType(callee, "Identifier")) return false;
+  const binding = findVariableInitializer(callee, callee.name);
+  const helper = binding?.initializer ? stripParenExpression(binding.initializer) : null;
+  if (
+    !helper ||
+    (!isNodeOfType(helper, "ArrowFunctionExpression") &&
+      !isNodeOfType(helper, "FunctionExpression"))
+  ) {
+    return false;
+  }
+  if (!isNodeOfType(helper.body, "BlockStatement")) {
+    return isFullyLiteralPattern(helper.body as EsTreeNode);
+  }
+  const returnedValues: EsTreeNode[] = [];
+  walkAst(helper.body, (child: EsTreeNode) => {
+    if (isNodeOfType(child, "ReturnStatement") && child.argument) {
+      returnedValues.push(child.argument as EsTreeNode);
+    }
+  });
+  return returnedValues.length > 0 && returnedValues.every(isFullyLiteralPattern);
 };
 
 const isEscapingCall = (node: EsTreeNode): boolean => {
@@ -140,6 +177,7 @@ const collectRawSearchTermIdentifiers = (
   const rawSearchTermIdentifiers: EsTreeNodeOfType<"Identifier">[] = [];
   walkAst(argument, (child: EsTreeNode) => {
     if (isEscapingCall(child) || isRegexSourceAccess(child)) return false;
+    if (isLiteralReturningGetterCall(child)) return false;
     if (
       isNodeOfType(child, "Identifier") &&
       SEARCH_TERM_NAME_PATTERN.test(child.name) &&
