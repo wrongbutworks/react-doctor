@@ -9,6 +9,7 @@ import { isDebugFlagEnabled } from "./cli/utils/is-debug-flag.js";
 import { scrubSentryEvent } from "./cli/utils/scrub-sentry-event.js";
 import { scrubSentryMetric } from "./cli/utils/scrub-sentry-metric.js";
 import {
+  isEnvFlagEnabled,
   resolveSentryEnvironment,
   resolveSentryRelease,
   resolveTracesSampleRate,
@@ -34,9 +35,6 @@ const shouldEnableSentry = (): boolean => {
   if (process.env.VITEST || process.env.NODE_ENV === "test") return false;
   return true;
 };
-
-const isEnvFlagEnabled = (value: string | undefined): boolean =>
-  value === "1" || value?.toLowerCase() === "true";
 
 /**
  * Whether performance traces will actually be recorded — Sentry is live and the

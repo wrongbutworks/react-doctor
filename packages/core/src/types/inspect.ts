@@ -321,6 +321,7 @@ export interface JsonReportV1 {
   diagnostics: Diagnostic[];
   summary: JsonReportSummary;
   elapsedMilliseconds: number;
+  baselineDegraded?: boolean;
   error: JsonReportError | null;
 }
 

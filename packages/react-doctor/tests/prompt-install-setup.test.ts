@@ -6,12 +6,12 @@ import {
   AGENT_INSTALL_HINT_LINES,
   disableSetupPrompt,
   getSetupPromptConfigPath,
-  getSetupPromptProjectKey,
   hasDisabledSetupPrompt,
   printAgentInstallHint,
   resolveInstallSetupProjectRoot,
   shouldShowAgentInstallHint,
 } from "../src/cli/utils/prompt-install-setup.js";
+import { hashProjectRoot } from "../src/cli/utils/hash-project-root.js";
 
 interface PromptInstallSetupFixture {
   readonly configRoot: string;
@@ -144,7 +144,7 @@ describe("disableSetupPrompt", () => {
 
   it("migrates a legacy opt-out forward and preserves it when disabling another", () => {
     writePackageJson(fixture.projectRoot, { scripts: {} });
-    const otherProjectKey = getSetupPromptProjectKey("/other/project");
+    const otherProjectKey = hashProjectRoot("/other/project");
     // Seed a pre-v2, legacy-shaped opt-out (`setupPrompt: false`) for a
     // different project; opening the store should migrate it forward to a
     // setup-hint event without losing the opt-out.
@@ -165,7 +165,7 @@ describe("disableSetupPrompt", () => {
     expect(hasDisabledSetupPrompt("/other/project", { cwd: fixture.configRoot })).toBe(true);
     expect(hasDisabledSetupPrompt(fixture.projectRoot, { cwd: fixture.configRoot })).toBe(true);
 
-    const projectKey = getSetupPromptProjectKey(fixture.projectRoot);
+    const projectKey = hashProjectRoot(fixture.projectRoot);
     const projects = readSetupPromptConfig(fixture.configRoot).projects;
     expect(projects[otherProjectKey].rootDirectory).toBe("/other/project");
     expect(projects[otherProjectKey].events["setup-hint"].outcome).toBe("declined");

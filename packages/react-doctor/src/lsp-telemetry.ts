@@ -9,6 +9,7 @@ import { toCategoryKey } from "./cli/utils/to-category-key.js";
 import { scrubSentryEvent } from "./cli/utils/scrub-sentry-event.js";
 import { scrubSentryMetric } from "./cli/utils/scrub-sentry-metric.js";
 import {
+  isEnvFlagEnabled,
   resolveSentryEnvironment,
   resolveSentryRelease,
   resolveTracesSampleRate,
@@ -29,9 +30,6 @@ import {
  */
 
 let lspTracesSampleRate = 0;
-
-const isEnvFlagEnabled = (value: string | undefined): boolean =>
-  value === "1" || value?.toLowerCase() === "true";
 
 const nodeMajorVersion = (): number =>
   Number.parseInt(process.versions.node.split(".", 1)[0] ?? "", 10) || 0;

@@ -6,6 +6,7 @@ import type {
 } from "./types/index.js";
 import { DIAGNOSTIC_SURFACES, isDiagnosticSurface } from "./diagnostic-surface.js";
 import { DIAGNOSTIC_CATEGORY_BUCKETS } from "./constants.js";
+import { isRecord } from "./utils/is-record.js";
 import { warnConfigIssue } from "./utils/warn-config-issue.js";
 
 const VALID_RULE_SEVERITIES: ReadonlyArray<RuleSeverityOverride> = ["error", "warn", "off"];
@@ -71,12 +72,6 @@ const SEVERITY_FIELD_NAMES = ["rules", "categories"] as const satisfies Readonly
   keyof ReactDoctorConfig
 >;
 
-const isPlainObject = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
-
-const formatType = (value: unknown): string =>
-  typeof value === "string" ? `"${value}"` : typeof value;
-
 const isRuleSeverity = (value: unknown): value is RuleSeverityOverride =>
   typeof value === "string" && (VALID_RULE_SEVERITIES as ReadonlyArray<string>).includes(value);
 
@@ -123,7 +118,7 @@ const validateSurfaceControls = (
   surface: DiagnosticSurface,
   rawControls: unknown,
 ): SurfaceControls | undefined => {
-  if (!isPlainObject(rawControls)) {
+  if (!isRecord(rawControls)) {
     warnConfigIssue(
       `config field "surfaces.${surface}" must be an object (got ${typeof rawControls}); ignoring this surface.`,
     );
@@ -146,7 +141,7 @@ const validateSurfaceControls = (
 const validateSurfacesField = (
   rawSurfaces: unknown,
 ): Partial<Record<DiagnosticSurface, SurfaceControls>> | undefined => {
-  if (!isPlainObject(rawSurfaces)) {
+  if (!isRecord(rawSurfaces)) {
     warnConfigIssue(
       `config field "surfaces" must be an object (got ${typeof rawSurfaces}); ignoring this field.`,
     );
@@ -177,7 +172,7 @@ const validateSeverityMap = (
   rawMap: unknown,
   keysAreCategories = false,
 ): Record<string, RuleSeverityOverride> | undefined => {
-  if (!isPlainObject(rawMap)) {
+  if (!isRecord(rawMap)) {
     warnConfigIssue(
       `config field "${fieldName}" must be an object (got ${typeof rawMap}); ignoring this field.`,
     );
@@ -197,7 +192,7 @@ const validateSeverityMap = (
     }
     if (!isRuleSeverity(value)) {
       warnConfigIssue(
-        `config field "${fieldName}.${key}" must be one of: ${VALID_RULE_SEVERITIES.join(", ")} (got ${formatType(value)}); ignoring the entry.`,
+        `config field "${fieldName}.${key}" must be one of: ${VALID_RULE_SEVERITIES.join(", ")} (got ${typeof value === "string" ? `"${value}"` : typeof value}); ignoring the entry.`,
       );
       continue;
     }
@@ -206,10 +201,6 @@ const validateSeverityMap = (
   return validated;
 };
 
-// Applies a validator to one config field: undefined skips, an `undefined`
-// return strips the field, anything else replaces it. Keeps the main
-// loop free of the repeating "if (raw === undefined) continue; result =
-// validator(...); if (result === undefined) delete; else assign" dance.
 const applyFieldValidator = <Key extends keyof ReactDoctorConfig>(
   config: ReactDoctorConfig,
   validated: ReactDoctorConfig,
@@ -226,10 +217,6 @@ const applyFieldValidator = <Key extends keyof ReactDoctorConfig>(
   }
 };
 
-// Returns a config with boolean fields coerced from common JSON-typing
-// mistakes (string "true"/"false") and other invalid types stripped.
-// Non-validated fields pass through untouched — consumers still do their
-// own runtime checks for those.
 export const validateConfigTypes = (config: ReactDoctorConfig): ReactDoctorConfig => {
   const validated: ReactDoctorConfig = { ...config };
   for (const fieldName of BOOLEAN_FIELD_NAMES) {

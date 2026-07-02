@@ -16,6 +16,9 @@ import { VERSION } from "./version.js";
  */
 const isDevVersion = (version: string): boolean => version === "0.0.0" || version.includes("-");
 
+export const isEnvFlagEnabled = (value: string | undefined): boolean =>
+  value === "1" || value?.toLowerCase() === "true";
+
 /**
  * Sentry release identifier. `react-doctor@<version>` keeps it unique within
  * the org and — crucially — matches the value `scripts/sentry-sourcemaps.mjs`
