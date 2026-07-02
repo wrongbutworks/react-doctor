@@ -49,6 +49,47 @@ const isNextHeadersDynamicCall = (context: RuleContext, node: EsTreeNode): boole
   return false;
 };
 
+// The `next-async-request-api` codemod's escape hatch: casting the call to
+// `UnsafeUnwrappedCookies`/`UnsafeUnwrappedHeaders`/`UnsafeUnwrappedDraftMode`
+// opts into Next 15's temporary synchronous access — a deliberate, typed
+// assertion the rule must respect.
+const UNSAFE_UNWRAPPED_TYPE_PATTERN = /^UnsafeUnwrapped/;
+
+// `ParenthesizedExpression` is a real oxc runtime node absent from the
+// TSESTree union, so wrappers are matched via a string set.
+const CAST_CHAIN_WRAPPER_TYPES = new Set<string>([
+  "TSAsExpression",
+  "TSTypeAssertion",
+  "ParenthesizedExpression",
+  "TSNonNullExpression",
+]);
+const CAST_NODE_TYPES = new Set<string>(["TSAsExpression", "TSTypeAssertion"]);
+
+const castChainAssertsUnsafeUnwrapped = (expression: EsTreeNode): boolean => {
+  let cursor: EsTreeNode | null | undefined = expression;
+  while (cursor) {
+    const cursorRecord = cursor as unknown as Record<string, unknown>;
+    if (CAST_NODE_TYPES.has(cursor.type)) {
+      const typeAnnotation = cursorRecord.typeAnnotation as EsTreeNode | undefined;
+      const typeName =
+        typeAnnotation && (typeAnnotation as unknown as Record<string, unknown>).typeName;
+      if (
+        typeName &&
+        isNodeOfType(typeName as EsTreeNode, "Identifier") &&
+        UNSAFE_UNWRAPPED_TYPE_PATTERN.test((typeName as EsTreeNodeOfType<"Identifier">).name)
+      ) {
+        return true;
+      }
+    }
+    if (CAST_CHAIN_WRAPPER_TYPES.has(cursor.type)) {
+      cursor = cursorRecord.expression as EsTreeNode | undefined;
+      continue;
+    }
+    return false;
+  }
+  return false;
+};
+
 const isPromiseSettleAccess = (member: EsTreeNodeOfType<"MemberExpression">): boolean =>
   !member.computed &&
   isNodeOfType(member.property, "Identifier") &&
@@ -91,6 +132,7 @@ export const nextjsAsyncDynamicApiNotAwaited = defineRule({
       const object = stripParenExpression(node.object);
       if (!isNextHeadersDynamicCall(context, object)) return;
       if (isPromiseSettleAccess(node)) return;
+      if (castChainAssertsUnsafeUnwrapped(node.object)) return;
       context.report({ node: object, message: MESSAGE });
     },
     // Await-less assignment then member use (`const c = cookies(); c.get(...)`)
@@ -99,6 +141,7 @@ export const nextjsAsyncDynamicApiNotAwaited = defineRule({
       if (!node.init) return;
       const init = stripParenExpression(node.init);
       if (!isNextHeadersDynamicCall(context, init)) return;
+      if (castChainAssertsUnsafeUnwrapped(node.init)) return;
       if (isNodeOfType(node.id, "ObjectPattern")) {
         context.report({ node: init, message: MESSAGE });
         return;

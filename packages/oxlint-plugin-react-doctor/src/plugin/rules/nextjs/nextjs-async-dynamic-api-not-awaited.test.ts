@@ -195,4 +195,68 @@ describe("nextjs-async-dynamic-api-not-awaited", () => {
     );
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("does not flag the codemod escape hatch (UnsafeUnwrappedCookies cast)", () => {
+    const result = runRule(
+      nextjsAsyncDynamicApiNotAwaited,
+      `import { cookies, type UnsafeUnwrappedCookies } from "next/headers";
+      const cookieStore = (cookies() as unknown as UnsafeUnwrappedCookies);
+      export function getTheme() {
+        return cookieStore.get("theme")?.value;
+      }`,
+      { filename: "app/theme.ts" },
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag direct member access through an UnsafeUnwrappedHeaders cast", () => {
+    const result = runRule(
+      nextjsAsyncDynamicApiNotAwaited,
+      `import { headers, type UnsafeUnwrappedHeaders } from "next/headers";
+      const userAgent = (headers() as unknown as UnsafeUnwrappedHeaders).get("user-agent");`,
+      { filename: "app/ua.ts" },
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag awaiting through the binding", () => {
+    const result = runRule(
+      nextjsAsyncDynamicApiNotAwaited,
+      `import { cookies } from "next/headers";
+      export async function readTheme() {
+        const pending = cookies();
+        const store = await pending;
+        return store.get("theme");
+      }`,
+      { filename: "app/read.ts" },
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag destructuring an awaited draftMode()", () => {
+    const result = runRule(
+      nextjsAsyncDynamicApiNotAwaited,
+      `import { draftMode } from "next/headers";
+      export async function check() {
+        const { isEnabled } = await draftMode();
+        return isEnabled;
+      }`,
+      { filename: "app/draft.ts" },
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a Promise.all tuple await", () => {
+    const result = runRule(
+      nextjsAsyncDynamicApiNotAwaited,
+      `import { cookies, headers } from "next/headers";
+      export async function readAll() {
+        const [cookieStore, headerList] = await Promise.all([cookies(), headers()]);
+        return cookieStore.get("a") ?? headerList.get("b");
+      }`,
+      { filename: "app/all.ts" },
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
 });

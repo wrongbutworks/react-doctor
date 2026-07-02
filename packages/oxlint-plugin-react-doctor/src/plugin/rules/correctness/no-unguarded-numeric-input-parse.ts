@@ -2,6 +2,7 @@ import { defineRule } from "../../utils/define-rule.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
 import { findJsxAttribute } from "../../utils/find-jsx-attribute.js";
+import { findVariableInitializer } from "../../utils/find-variable-initializer.js";
 import { getJsxPropStringValue } from "../../utils/get-jsx-prop-string-value.js";
 import { isFunctionLike } from "../../utils/is-function-like.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
@@ -208,7 +209,14 @@ const getStaticInputType = (
   if (literalValue !== null) return literalValue;
   const attributeValue = typeAttribute.value;
   if (!attributeValue || !isNodeOfType(attributeValue, "JSXExpressionContainer")) return null;
-  const expression = attributeValue.expression;
+  let expression: EsTreeNode = attributeValue.expression;
+  // `type={AMOUNT_INPUT_TYPE}` — resolve a const binding one hop so a
+  // named literal type is as good as an inline one.
+  if (isNodeOfType(expression, "Identifier")) {
+    const binding = findVariableInitializer(expression, expression.name);
+    if (!binding?.initializer) return null;
+    expression = stripParenExpression(binding.initializer);
+  }
   if (isNodeOfType(expression, "Literal") && typeof expression.value === "string") {
     return expression.value;
   }

@@ -257,4 +257,39 @@ describe("no-unguarded-numeric-input-parse", () => {
     );
     expect(result.diagnostics).toHaveLength(1);
   });
+
+  it("does not flag when the type attribute resolves to a sanitized const", () => {
+    const result = runRule(
+      noUnguardedNumericInputParse,
+      `const AMOUNT_INPUT_TYPE = "number";
+      const AmountField = ({ onAmount }) => (
+        <input type={AMOUNT_INPUT_TYPE} onChange={(e) => onAmount(Number(e.target.value))} />
+      );`,
+      { filename: "amount.tsx" },
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a digit-strip replace before the parse", () => {
+    const result = runRule(
+      noUnguardedNumericInputParse,
+      `const QtyField = ({ setQty }) => (
+        <input type="text" onChange={(e) => setQty(Number(e.target.value.replace(/\\D/g, "")))} />
+      );`,
+      { filename: "qty.tsx" },
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag an || fallback short-circuit", () => {
+    const result = runRule(
+      noUnguardedNumericInputParse,
+      `const QtyField = ({ setQty }) => (
+        <input type="text" onChange={(e) => setQty(Number(e.target.value) || 1)} />
+      );`,
+      { filename: "qty.tsx" },
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
 });

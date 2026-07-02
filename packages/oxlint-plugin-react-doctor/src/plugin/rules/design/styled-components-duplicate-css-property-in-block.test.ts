@@ -106,4 +106,38 @@ describe("styled-components-duplicate-css-property-in-block", () => {
     );
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("does not flag the dvh-with-vh-fallback under one condition", () => {
+    const result = runRule(
+      styledComponentsDuplicateCssPropertyInBlock,
+      "const Modal = styled.div`\n" +
+        '  height: ${(p) => (p.$fullHeight ? "100vh" : "auto")};\n' +
+        '  height: ${(p) => (p.$fullHeight ? "100dvh" : "auto")};\n' +
+        "`;",
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a vendor-value fallback pair under one condition", () => {
+    const result = runRule(
+      styledComponentsDuplicateCssPropertyInBlock,
+      "const Row = styled.div`\n" +
+        '  width: ${(p) => (p.$stretch ? "-webkit-fill-available" : "auto")};\n' +
+        '  width: ${(p) => (p.$stretch ? "fill-available" : "auto")};\n' +
+        "`;",
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags duplicates with different conditions (lost value)", () => {
+    const result = runRule(
+      styledComponentsDuplicateCssPropertyInBlock,
+      "const Button = styled.button`\n" +
+        '  color: ${(p) => (p.$primary ? "blue" : "gray")};\n' +
+        '  color: ${(p) => (p.$danger ? "red" : "black")};\n' +
+        "`;",
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
 });
