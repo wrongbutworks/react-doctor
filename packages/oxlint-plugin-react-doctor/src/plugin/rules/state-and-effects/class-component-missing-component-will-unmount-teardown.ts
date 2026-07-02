@@ -128,12 +128,29 @@ const isMountHazard = (node: EsTreeNode, localReceiverNames: Set<string>): boole
     const callArguments = node.arguments ?? [];
     const isFunctionFactoryOnce = methodName === "once" && callArguments.length < 2;
     let receiverBase = node.callee.object;
-    while (isNodeOfType(receiverBase, "MemberExpression")) receiverBase = receiverBase.object;
+    let receiverIsRefOwnedNode = false;
+    while (isNodeOfType(receiverBase, "MemberExpression")) {
+      if (
+        !receiverBase.computed &&
+        isNodeOfType(receiverBase.property, "Identifier") &&
+        receiverBase.property.name === "current"
+      ) {
+        receiverIsRefOwnedNode = true;
+      }
+      receiverBase = receiverBase.object;
+    }
     const isLocalReceiver =
       isNodeOfType(receiverBase, "Identifier") && localReceiverNames.has(receiverBase.name);
     const isSelfRemovingListener =
       methodName === "addEventListener" && isOneShotListenerOptions(callArguments[2]);
-    return !isFunctionFactoryOnce && !isLocalReceiver && !isSelfRemovingListener;
+    // A listener on a ref-owned DOM node (`this.containerRef.current`) dies
+    // with the node when the component unmounts, so it needs no teardown.
+    return (
+      !isFunctionFactoryOnce &&
+      !isLocalReceiver &&
+      !isSelfRemovingListener &&
+      !receiverIsRefOwnedNode
+    );
   }
 
   const timerCalleeName = getTimerCalleeName(node);

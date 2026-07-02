@@ -233,6 +233,51 @@ describe("window-open-without-noopener", () => {
     expect(result.diagnostics).toHaveLength(1);
   });
 
+  it("does not flag a template led by a path-builder helper pinned to an app route (dtale export idiom)", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      "window.open(`${fullPath('/dtale/data-export', dataId)}?type=${exportType}`, '_blank');",
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a location.pathname-derived URL (open-in-new-tab idiom)", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      `window.open(getLocation().pathname?.replace('/iframe/', '/main/') ?? '', '_blank');`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a template led by window.location.origin", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      "window.open(`${window.location.origin}/${path}`, '_blank', 'width=700,height=450');",
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a helper fed getLocation().href (forward-URL idiom)", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      "window.open(buildForwardURL(getLocation().href, dataId), '_blank');",
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags an origin read off a non-location receiver (postMessage event)", () => {
+    const result = runRule(windowOpenWithoutNoopener, "window.open(event.origin, '_blank');");
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags a helper-built URL whose first argument is not a same-origin path", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      "window.open(buildUrl(externalHost, path), '_blank');",
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
   it("flags a member-expression URL from server data (upload-list download idiom)", () => {
     const result = runRule(
       windowOpenWithoutNoopener,

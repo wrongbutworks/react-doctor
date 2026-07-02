@@ -118,6 +118,32 @@ describe("no-arithmetic-on-optional-chained-operand", () => {
     expect(result.diagnostics).toHaveLength(0);
   });
 
+  it("does not flag a re-derefed chain after an early-return guard on its alias binding (extract-then-guard idiom)", () => {
+    const result = runRule(
+      noArithmeticOnOptionalChainedOperand,
+      `function Price({ item }) {
+        const price = item?.price;
+        if (!price) return null;
+        const total = item?.price * 2;
+        return <span>{total.toFixed(2)}</span>;
+      }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags a re-derefed chain when the alias points at a different property", () => {
+    const result = runRule(
+      noArithmeticOnOptionalChainedOperand,
+      `function Price({ item }) {
+        const label = item?.label;
+        if (!label) return null;
+        const total = item?.price * 2;
+        return <span>{total.toFixed(2)}</span>;
+      }`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
   it("does not flag after a preceding early-return guard on the chain root (real-world `if (!invoice) return null;` prelude)", () => {
     const result = runRule(
       noArithmeticOnOptionalChainedOperand,

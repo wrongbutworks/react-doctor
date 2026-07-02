@@ -7,6 +7,7 @@ import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
 import { findVariableInitializer } from "../../utils/find-variable-initializer.js";
 import { getCalleeName } from "../../utils/get-callee-name.js";
+import { isDomGuardIdentifierName } from "../../utils/is-dom-guard-identifier-name.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
 import { stripParenExpression } from "../../utils/strip-paren-expression.js";
 import { walkAst } from "../../utils/walk-ast.js";
@@ -33,20 +34,6 @@ const BROWSER_GLOBAL_NAMES = new Set([
 // component-body path.
 const RENDER_TIME_INITIALIZER_HOOKS = new Set(["useState", "useReducer"]);
 
-// Identifiers that, when present in a dominating condition, mark the
-// read as SSR-guarded (mounted-state / can-use-DOM feature checks).
-// Matched after `normalizeGuardName`, so `canUseDom`, `IS_BROWSER`,
-// and `isBrowserEnv` all count.
-const NORMALIZED_DOM_GUARD_NAMES = new Set([
-  "canusedom",
-  "ismounted",
-  "mounted",
-  "isbrowser",
-  "isbrowserenv",
-  "isclient",
-  "haswindow",
-]);
-
 // Interaction-driven visibility flags (`open` / `isVisible` / `showTooltip`)
 // that gate overlays: false during the initial server render, so a
 // flow-terminating `if (!open) return ...` before the read makes it
@@ -65,7 +52,32 @@ const normalizeGuardName = (name: string): string => name.toLowerCase().replace(
 const isVisibilityGateName = (name: string): boolean => {
   const normalizedName = normalizeGuardName(name);
   if (VISIBILITY_GATE_NAMES.has(normalizedName)) return true;
-  return normalizedName.startsWith("show") || normalizedName.startsWith("isshow");
+  if (normalizedName.startsWith("show") || normalizedName.startsWith("isshow")) return true;
+  // `navOpen`, `drawerOpened`, `tooltipVisible` — suffix-named flags that
+  // gate interaction-driven subtrees (false on the initial server render).
+  return (
+    normalizedName.endsWith("open") ||
+    normalizedName.endsWith("opened") ||
+    normalizedName.endsWith("visible")
+  );
+};
+
+// A dominating test that is a bare visibility-gate flag (`showConfetti &&
+// <Confetti width={window.innerWidth} />`, `open ? window.innerWidth : 0`).
+// These flags are false during the initial server render, so the gated
+// subtree never evaluates on the server — same trust the early-return
+// visibility gate already gets.
+const conditionIsVisibilityGate = (condition: EsTreeNode): boolean => {
+  const strippedCondition = stripParenExpression(condition);
+  if (isNodeOfType(strippedCondition, "Identifier")) {
+    return isVisibilityGateName(strippedCondition.name);
+  }
+  return (
+    isNodeOfType(strippedCondition, "MemberExpression") &&
+    !strippedCondition.computed &&
+    isNodeOfType(strippedCondition.property, "Identifier") &&
+    isVisibilityGateName(strippedCondition.property.name)
+  );
 };
 
 const isBrowserGlobalIdentifier = (node: EsTreeNode): node is EsTreeNodeOfType<"Identifier"> =>
@@ -123,7 +135,7 @@ const conditionContainsDomGuard = (condition: EsTreeNode): boolean => {
   walkAst(condition, (child) => {
     if (guarded) return false;
     if (!isNodeOfType(child, "Identifier")) return;
-    if (NORMALIZED_DOM_GUARD_NAMES.has(normalizeGuardName(child.name))) {
+    if (isDomGuardIdentifierName(child.name)) {
       guarded = true;
       return false;
     }
@@ -218,16 +230,22 @@ const isDominatedByDomGuard = (node: EsTreeNode): boolean => {
   let previous: EsTreeNode = node;
   let ancestor = node.parent;
   while (ancestor) {
-    if (isNodeOfType(ancestor, "IfStatement") && conditionContainsDomGuard(ancestor.test)) {
+    if (
+      isNodeOfType(ancestor, "IfStatement") &&
+      (conditionContainsDomGuard(ancestor.test) || conditionIsVisibilityGate(ancestor.test))
+    ) {
       return true;
     }
     if (
       isNodeOfType(ancestor, "ConditionalExpression") &&
-      conditionContainsDomGuard(ancestor.test)
+      (conditionContainsDomGuard(ancestor.test) || conditionIsVisibilityGate(ancestor.test))
     ) {
       return true;
     }
-    if (isNodeOfType(ancestor, "LogicalExpression") && conditionContainsDomGuard(ancestor.left)) {
+    if (
+      isNodeOfType(ancestor, "LogicalExpression") &&
+      (conditionContainsDomGuard(ancestor.left) || conditionIsVisibilityGate(ancestor.left))
+    ) {
       return true;
     }
     if (isNodeOfType(ancestor, "TryStatement") && ancestor.handler && ancestor.block === previous) {

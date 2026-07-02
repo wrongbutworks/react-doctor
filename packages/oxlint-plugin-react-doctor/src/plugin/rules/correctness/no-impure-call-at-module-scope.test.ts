@@ -112,6 +112,15 @@ describe("no-impure-call-at-module-scope", () => {
     expect(result.diagnostics).toHaveLength(0);
   });
 
+  it("does not flag init/module-load per-process names (INIT_TIMESTAMP/moduleLoadTime)", () => {
+    expect(
+      runRule(noImpureCallAtModuleScope, `const INIT_TIMESTAMP = Date.now();`).diagnostics,
+    ).toHaveLength(0);
+    expect(
+      runRule(noImpureCallAtModuleScope, `const moduleLoadTime = performance.now();`).diagnostics,
+    ).toHaveLength(0);
+  });
+
   it("does not flag camelCase per-process uptime names (startTime/appBootTime/serverStartedAt)", () => {
     expect(
       runRule(noImpureCallAtModuleScope, `const startTime = Date.now();`).diagnostics,

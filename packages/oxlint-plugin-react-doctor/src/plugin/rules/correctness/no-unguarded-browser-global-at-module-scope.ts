@@ -2,6 +2,7 @@ import { collectPatternNames } from "../../utils/collect-pattern-names.js";
 import { defineRule } from "../../utils/define-rule.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
+import { isDomGuardIdentifierName } from "../../utils/is-dom-guard-identifier-name.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
 import { isTestlikeFilename } from "../../utils/is-testlike-filename.js";
 import { stripParenExpression } from "../../utils/strip-paren-expression.js";
@@ -79,7 +80,14 @@ const subtreeHasBrowserEnvironmentGuard = (
         return false;
       }
     }
-    if (isNodeOfType(child, "Identifier") && guardAliasNames.has(child.name)) {
+    // Same-file aliases resolved from their initializer, plus guard-named
+    // identifiers (`canUseDOM`, `IS_BROWSER`, …) that may be imported from a
+    // shared browser-utils module — the initializer is out of reach there,
+    // but the name is an unambiguous environment check.
+    if (
+      isNodeOfType(child, "Identifier") &&
+      (guardAliasNames.has(child.name) || isDomGuardIdentifierName(child.name))
+    ) {
       found = true;
       return false;
     }

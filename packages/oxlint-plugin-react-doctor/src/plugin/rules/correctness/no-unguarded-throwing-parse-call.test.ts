@@ -3,6 +3,18 @@ import { runRule } from "../../../test-utils/run-rule.js";
 import { noUnguardedThrowingParseCall } from "./no-unguarded-throwing-parse-call.js";
 
 describe("no-unguarded-throwing-parse-call", () => {
+  it("does not flag new URL of a template pinned to window.location.origin", () => {
+    const result = runRule(
+      noUnguardedThrowingParseCall,
+      `function Sidebar({ match }) {
+        const url = new URL(\`\${window.location.origin}/user/conversations/\${match.params.conversationId}\`);
+        return <a href={url.href}>Open</a>;
+      }`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
   it("flags decodeURIComponent of a useParams path in a component body", () => {
     const result = runRule(
       noUnguardedThrowingParseCall,

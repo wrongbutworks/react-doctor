@@ -14,14 +14,22 @@ import { walkOwnFunctionScope } from "../../utils/walk-own-function-scope.js";
 
 // Callees that legitimately take an inline JSX-returning function and either
 // preserve hooks analysis (useCallback/useMemo/forwardRef/memo) or are not
-// HOCs at all (styled, and common lowercase iteration/conditional helpers). React.* member forms are covered structurally:
-// this rule only matches bare-Identifier / curried callees, never a
-// MemberExpression callee, so `React.memo(...)` / `lodash.map(...)` never fire.
+// HOCs at all (styled, and common lowercase iteration/conditional helpers).
+// `observer` is the canonical MobX component form — the MobX docs recommend
+// `const Timer = observer(() => ...)` as the primary API, so flagging it
+// would fire on effectively every mobx-react-lite component. React.* member
+// forms are covered structurally: this rule only matches bare-Identifier /
+// curried callees, never a MemberExpression callee, so `React.memo(...)` /
+// `lodash.map(...)` never fire.
 const WHITELISTED_CALLEE_NAMES = new Set([
   "useCallback",
   "useMemo",
   "forwardRef",
   "memo",
+  "observer",
+  // react-tracking's canonical form is `track()(props => ...)` — the curried
+  // resolver reads the inner callee name, so the bare name covers both.
+  "track",
   "styled",
   "map",
   "filter",
@@ -29,6 +37,12 @@ const WHITELISTED_CALLEE_NAMES = new Set([
   "times",
   "when",
 ]);
+
+// Relay's container creators (`createFragmentContainer`, `createRefetchContainer`,
+// `createPaginationContainer`) take the component implementation inline as their
+// documented API shape — the same category as Mantine's `factory`.
+const isRelayContainerCreatorName = (calleeName: string): boolean =>
+  /^create[A-Z].*Container$/.test(calleeName);
 
 // Wrappers that pass their first argument through unchanged for the purpose
 // of "does this produce a component binding": `memo(withTheme(fn))` still
@@ -194,7 +208,8 @@ export const noInlineHocOnComponent = defineRule({
       if (
         calleeName === null ||
         WHITELISTED_CALLEE_NAMES.has(calleeName) ||
-        isComponentFactoryName(calleeName)
+        isComponentFactoryName(calleeName) ||
+        isRelayContainerCreatorName(calleeName)
       ) {
         return;
       }

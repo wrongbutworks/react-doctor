@@ -3,6 +3,30 @@ import { runRule } from "../../../test-utils/run-rule.js";
 import { noUnguardedBrowserGlobalInRenderOrHookInit } from "./no-unguarded-browser-global-in-render-or-hook-init.js";
 
 describe("no-unguarded-browser-global-in-render-or-hook-init", () => {
+  it("does not flag a window read inside JSX gated by a show* state flag (confetti idiom)", () => {
+    const result = runRule(
+      noUnguardedBrowserGlobalInRenderOrHookInit,
+      `function Modal() {
+        const [showConfetti, setShowConfetti] = useState(false);
+        return <div>{showConfetti && <Confetti width={window.innerWidth} height={window.innerHeight} />}</div>;
+      }`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a window read on the right of an open-suffixed visibility flag", () => {
+    const result = runRule(
+      noUnguardedBrowserGlobalInRenderOrHookInit,
+      `function Layout() {
+        const [navOpen, setNavOpen] = useState(false);
+        const isDrawer = navOpen && window.matchMedia('(max-width: 768px)').matches;
+        return <nav data-drawer={isDrawer} />;
+      }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
   it("flags navigator.onLine as a useState argument in a custom hook", () => {
     const result = runRule(
       noUnguardedBrowserGlobalInRenderOrHookInit,

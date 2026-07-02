@@ -17,7 +17,7 @@ const IMPURE_MEMBER_CALLS = new Map<string, ReadonlySet<string>>([
 ]);
 
 // Bindings whose name advertises an intentional per-process value
-// (instance/boot/startup ids, uptime timestamps). Applied from the
+// (instance/boot/startup/init ids, module-load timestamps). Applied from the
 // revision to spare those correct-by-design constants.
 const PER_PROCESS_NAME_KEYWORDS = new Set([
   "instance",
@@ -25,6 +25,10 @@ const PER_PROCESS_NAME_KEYWORDS = new Set([
   "startup",
   "start",
   "started",
+  "init",
+  "load",
+  "loaded",
+  "module",
   "process",
   "server",
   "build",

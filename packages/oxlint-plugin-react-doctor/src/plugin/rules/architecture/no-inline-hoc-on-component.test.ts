@@ -3,10 +3,10 @@ import { runRule } from "../../../test-utils/run-rule.js";
 import { noInlineHocOnComponent } from "./no-inline-hoc-on-component.js";
 
 describe("no-inline-hoc-on-component", () => {
-  it("flags an inline hook-calling arrow passed to observer", () => {
+  it("flags an inline hook-calling arrow passed to a tracking HOC", () => {
     const result = runRule(
       noInlineHocOnComponent,
-      `const Header = observer((props) => {
+      `const Header = withTracking((props) => {
         const [open, setOpen] = useState(false);
         return <h1 onClick={() => setOpen(!open)}>{props.store.title}</h1>;
       });`,
@@ -50,7 +50,7 @@ describe("no-inline-hoc-on-component", () => {
   it("flags a hook-calling inline component exported as default", () => {
     const result = runRule(
       noInlineHocOnComponent,
-      `export default observer((props) => {
+      `export default withTheme((props) => {
         const [count] = useState(0);
         return <h1>{props.store.title}{count}</h1>;
       });`,
@@ -101,7 +101,7 @@ describe("no-inline-hoc-on-component", () => {
   it("flags an inline HOC component cast inside the call parentheses", () => {
     const result = runRule(
       noInlineHocOnComponent,
-      `const Header = observer(((props) => <h1>{useTitle(props)}</h1>) as React.FC<Props>);`,
+      `const Header = withTheme(((props) => <h1>{useTitle(props)}</h1>) as React.FC<Props>);`,
     );
     expect(result.diagnostics).toHaveLength(1);
   });
@@ -109,12 +109,34 @@ describe("no-inline-hoc-on-component", () => {
   it("still flags a real HOC whose name merely contains but does not end in factory", () => {
     const result = runRule(
       noInlineHocOnComponent,
-      `export const Container = createRefetchContainer((props) => {
+      `export const Container = createFactoryBackedHoc((props) => {
         const data = useFragmentData(props);
         return <section>{data.children}</section>;
       });`,
     );
     expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("does not flag Relay container creators (createRefetchContainer API shape)", () => {
+    const result = runRule(
+      noInlineHocOnComponent,
+      `export const Container = createRefetchContainer((props) => {
+        const data = useFragmentData(props);
+        return <section>{data.children}</section>;
+      }, fragmentSpec, query);`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag react-tracking's curried track()(Component) form", () => {
+    const result = runRule(
+      noInlineHocOnComponent,
+      `export const NavBar = track()((props) => {
+        const [open, setOpen] = useState(false);
+        return <nav onClick={() => setOpen(!open)}>{props.title}</nav>;
+      });`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
   });
 
   it("does not flag a hook-free inline function passed to a classic HOC (react-sortable-hoc idiom)", () => {
@@ -131,6 +153,18 @@ describe("no-inline-hoc-on-component", () => {
       `const CurrentRefinements = connectCurrentRefinements(({ items, refine }) => (
         <ul>{items.map((item) => <li key={item.label} onClick={() => refine(item.value)}>{item.label}</li>)}</ul>
       ));`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a hook-calling anonymous arrow passed to observer (canonical mobx-react-lite component form)", () => {
+    const result = runRule(
+      noInlineHocOnComponent,
+      `const Timer = observer(() => {
+        const [tick, setTick] = useState(0);
+        useEffect(() => { const id = setInterval(() => setTick((t) => t + 1), 1000); return () => clearInterval(id); }, []);
+        return <div>{tick}</div>;
+      });`,
     );
     expect(result.diagnostics).toHaveLength(0);
   });

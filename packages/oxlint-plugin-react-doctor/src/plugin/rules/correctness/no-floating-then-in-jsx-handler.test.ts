@@ -3,6 +3,17 @@ import { runRule } from "../../../test-utils/run-rule.js";
 import { noFloatingThenInJsxHandler } from "./no-floating-then-in-jsx-handler.js";
 
 describe("no-floating-then-in-jsx-handler", () => {
+  it("does not flag the Promise.resolve().then(...) microtask-scheduling idiom", () => {
+    const result = runRule(
+      noFloatingThenInJsxHandler,
+      `const x = <button onMouseLeave={() => {
+        Promise.resolve().then(() => { ref.current.dataset.suppress = "false"; });
+      }} />;`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
   it("flags a concise-arrow floating then", () => {
     const result = runRule(
       noFloatingThenInJsxHandler,

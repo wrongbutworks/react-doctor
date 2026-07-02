@@ -71,6 +71,33 @@ const isTrustedStaticDestination = (urlArgument: EsTreeNode | null | undefined):
 
 const MAX_BINDING_RESOLUTION_DEPTH = 4;
 
+// `.pathname` values are path strings, which `window.open` resolves against
+// the current origin. `.origin`/`.href` are only same-origin when read off a
+// location-shaped receiver (`location`, `window.location`, `getLocation()`)
+// — an arbitrary `.origin` (e.g. a postMessage event's) is attacker data.
+const isLocationShapedReceiver = (receiver: EsTreeNode): boolean => {
+  if (isNodeOfType(receiver, "Identifier")) return receiver.name === "location";
+  if (isNodeOfType(receiver, "MemberExpression") && !receiver.computed) {
+    return isNodeOfType(receiver.property, "Identifier") && receiver.property.name === "location";
+  }
+  if (isNodeOfType(receiver, "CallExpression")) {
+    const callee = receiver.callee as EsTreeNode;
+    if (isNodeOfType(callee, "Identifier")) return /location/i.test(callee.name);
+    if (isNodeOfType(callee, "MemberExpression") && isNodeOfType(callee.property, "Identifier")) {
+      return /location/i.test(callee.property.name);
+    }
+  }
+  return false;
+};
+
+const isSameOriginLocationRead = (node: EsTreeNode): boolean => {
+  if (!isNodeOfType(node, "MemberExpression") || node.computed) return false;
+  if (!isNodeOfType(node.property, "Identifier")) return false;
+  if (node.property.name === "pathname") return true;
+  if (node.property.name !== "origin" && node.property.name !== "href") return false;
+  return isLocationShapedReceiver(node.object as EsTreeNode);
+};
+
 // A nullish URL (`window.open(null)`, `cond ? url : null`) is harmless:
 // it opens about:blank, which the opener fully controls.
 const isNullishExpression = (node: EsTreeNode | null | undefined): boolean => {
@@ -133,6 +160,52 @@ const isTrustedDestination = (
     const constInitializer = resolveConstInitializer(urlArgument);
     if (constInitializer == null) return false;
     return isTrustedOrNullishDestination(constInitializer, depth + 1);
+  }
+  if (isNodeOfType(urlArgument, "ChainExpression")) {
+    return isTrustedDestination(urlArgument.expression as EsTreeNode, depth + 1);
+  }
+  // A template that LEADS with an interpolation is trusted when that
+  // interpolation itself is (`` `${fullPath('/export', id)}?type=csv` `` —
+  // the rest of the template lands in the path/query of the same URL).
+  if (isNodeOfType(urlArgument, "TemplateLiteral")) {
+    const firstQuasiText = (urlArgument.quasis?.[0]?.value?.raw ?? "").trimStart();
+    const firstExpression = urlArgument.expressions?.[0];
+    if (firstQuasiText.length === 0 && firstExpression) {
+      return isTrustedDestination(firstExpression as EsTreeNode, depth + 1);
+    }
+    return false;
+  }
+  // `location.pathname` / `location.origin` / `getLocation().href` reads
+  // are same-origin values by construction (the dtale "open in new tab"
+  // idiom re-opens the current page under a different route).
+  if (isSameOriginLocationRead(urlArgument)) return true;
+  if (isNodeOfType(urlArgument, "CallExpression")) {
+    // A path-builder helper whose first argument is itself a trusted
+    // same-origin destination (`fullPath('/dtale/data-export', dataId)`,
+    // `buildURL(fullPath('/data', id), params)`,
+    // `menuFuncs.fullPath('/dtale/popup/describe', dataId)`) returns a URL
+    // for that app route.
+    const firstArgument = urlArgument.arguments?.[0];
+    if (firstArgument) {
+      if (isStringLiteral(firstArgument as EsTreeNode)) {
+        if (
+          startsSameOriginPath(
+            (firstArgument as EsTreeNodeOfType<"Literal"> & { value: string }).value,
+          )
+        ) {
+          return true;
+        }
+      } else if (isTrustedDestination(firstArgument as EsTreeNode, depth + 1)) {
+        return true;
+      }
+    }
+    // A string method on a trusted same-origin base keeps the leading `/`
+    // (`getLocation().pathname.replace('/iframe/', '/main/')`).
+    const callee = urlArgument.callee as EsTreeNode;
+    if (isNodeOfType(callee, "MemberExpression")) {
+      return isTrustedDestination(callee.object as EsTreeNode, depth + 1);
+    }
+    return false;
   }
   return false;
 };

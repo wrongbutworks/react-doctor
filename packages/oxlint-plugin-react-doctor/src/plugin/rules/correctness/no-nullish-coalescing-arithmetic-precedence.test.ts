@@ -3,6 +3,20 @@ import { runRule } from "../../../test-utils/run-rule.js";
 import { noNullishCoalescingArithmeticPrecedence } from "./no-nullish-coalescing-arithmetic-precedence.js";
 
 describe("no-nullish-coalescing-arithmetic-precedence", () => {
+  it("does not flag the `?? 0 - fn()` negation-fallback idiom (timezone-offset shape)", () => {
+    const result = runRule(
+      noNullishCoalescingArithmeticPrecedence,
+      `const offset = offsetInMinutes ?? 0 - new Date(isoDate).getTimezoneOffset();`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags `?? 0 - y + z` (multi-term arithmetic swallowing the fallback)", () => {
+    const result = runRule(noNullishCoalescingArithmeticPrecedence, `const r = x ?? 0 - y + z;`);
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
   it("flags x ?? 0 / y", () => {
     const result = runRule(noNullishCoalescingArithmeticPrecedence, `const r = x ?? 0 / y;`);
     expect(result.parseErrors).toEqual([]);

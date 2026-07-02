@@ -270,6 +270,25 @@ describe("class-component-missing-component-will-unmount-teardown", () => {
     expect(result.diagnostics).toHaveLength(0);
   });
 
+  it("does not flag a listener on a ref-owned DOM node (dies with the component)", () => {
+    const result = runRule(
+      classComponentMissingComponentWillUnmountTeardown,
+      `
+      class Chart extends React.Component {
+        containerRef = React.createRef();
+        componentDidMount() {
+          this.containerRef.current.addEventListener("wheel", this.handleWheel);
+        }
+        handleWheel = () => {};
+        render() {
+          return <div ref={this.containerRef} />;
+        }
+      }
+      `,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
   it("does not flag a plain (non-React) class that registers a listener", () => {
     const result = runRule(
       classComponentMissingComponentWillUnmountTeardown,

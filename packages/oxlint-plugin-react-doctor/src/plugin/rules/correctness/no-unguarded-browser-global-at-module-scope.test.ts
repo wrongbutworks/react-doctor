@@ -158,6 +158,27 @@ describe("no-unguarded-browser-global-at-module-scope", () => {
     expect(result.diagnostics).toHaveLength(0);
   });
 
+  it("does not flag a read guarded by a canUseDOM constant imported from a shared module", () => {
+    const result = runRule(
+      noUnguardedBrowserGlobalAtModuleScope,
+      `import { canUseDOM } from "@shared/utils/browser";
+       const initialWidth = canUseDOM ? window.innerWidth : 0;`,
+      prod,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a read guarded by an imported IS_BROWSER flag in an if block", () => {
+    const result = runRule(
+      noUnguardedBrowserGlobalAtModuleScope,
+      `import { IS_BROWSER } from "./env";
+       if (IS_BROWSER) { window.addEventListener('resize', () => {}); }`,
+      prod,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
   it("does not flag a read guarded by an exported guard alias in an if block", () => {
     const result = runRule(
       noUnguardedBrowserGlobalAtModuleScope,

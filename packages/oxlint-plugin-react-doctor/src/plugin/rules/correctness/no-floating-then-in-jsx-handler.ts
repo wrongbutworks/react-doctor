@@ -46,6 +46,41 @@ const chainHasRejectionHandler = (node: EsTreeNode): boolean => {
   return false;
 };
 
+// The `Promise.resolve().then(...)` microtask-scheduling idiom never
+// rejects on its own, so a missing `.catch` is not a floating rejection
+// (mirrors the Promise.resolve exemption in
+// no-promise-then-side-effect-in-effect-without-catch).
+const chainRootIsPromiseResolve = (thenCall: EsTreeNodeOfType<"CallExpression">): boolean => {
+  let cursor: EsTreeNode | null | undefined = thenCall;
+  while (cursor) {
+    if (isNodeOfType(cursor, "ChainExpression")) {
+      cursor = cursor.expression as EsTreeNode;
+      continue;
+    }
+    if (isNodeOfType(cursor, "CallExpression")) {
+      const callee = cursor.callee as EsTreeNode;
+      if (
+        isNodeOfType(callee, "MemberExpression") &&
+        isNodeOfType(callee.object, "Identifier") &&
+        callee.object.name === "Promise" &&
+        !callee.computed &&
+        isNodeOfType(callee.property, "Identifier") &&
+        callee.property.name === "resolve"
+      ) {
+        return true;
+      }
+      cursor = callee;
+      continue;
+    }
+    if (isNodeOfType(cursor, "MemberExpression")) {
+      cursor = cursor.object as EsTreeNode;
+      continue;
+    }
+    break;
+  }
+  return false;
+};
+
 // Returns the last `.then(...)` call when `expression` is a `.then`-ended
 // chain (optionally followed by `.finally` calls, which re-throw
 // rejections) with no rejection handler, else null. Keyed purely off the
@@ -64,6 +99,7 @@ const floatingThenCall = (expression: EsTreeNode): EsTreeNodeOfType<"CallExpress
   if (!isNodeOfType(terminal, "CallExpression")) return null;
   if (getCallMethodName(terminal.callee as EsTreeNode) !== "then") return null;
   if (chainHasRejectionHandler(terminal)) return null;
+  if (chainRootIsPromiseResolve(terminal)) return null;
   return terminal;
 };
 

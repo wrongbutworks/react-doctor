@@ -82,10 +82,62 @@ const optionalChainRootName = (memberExpression: EsTreeNode): string | null => {
   return null;
 };
 
+// Serializes `a?.b.c` to "a.b.c" (non-computed members only) so two chain
+// expressions can be compared for identity.
+const chainMemberPath = (memberExpression: EsTreeNode): string | null => {
+  const propertyNames: string[] = [];
+  let current: EsTreeNode = memberExpression;
+  while (true) {
+    const stripped = stripKeepingChain(current);
+    if (isNodeOfType(stripped, "ChainExpression")) {
+      current = stripped.expression as EsTreeNode;
+      continue;
+    }
+    if (isNodeOfType(stripped, "MemberExpression")) {
+      if (stripped.computed || !isNodeOfType(stripped.property, "Identifier")) return null;
+      propertyNames.unshift(stripped.property.name);
+      current = stripped.object;
+      continue;
+    }
+    if (isNodeOfType(stripped, "Identifier")) {
+      propertyNames.unshift(stripped.name);
+      return propertyNames.join(".");
+    }
+    return null;
+  }
+};
+
+// Same-scope bindings that alias the exact chain being multiplied
+// (`const price = item?.price;` before `item?.price * 2`) — a guard on the
+// alias narrows the chain just as soundly as a guard on the root.
+const collectSameChainAliasNames = (operandMember: EsTreeNode): string[] => {
+  const operandPath = chainMemberPath(operandMember);
+  if (!operandPath) return [];
+  const scopeOwner = findScopeOwner(operandMember);
+  if (!scopeOwner) return [];
+  const aliasNames: string[] = [];
+  walkAst(scopeOwner, (child: EsTreeNode) => {
+    if (
+      !isNodeOfType(child, "VariableDeclarator") ||
+      !isNodeOfType(child.id, "Identifier") ||
+      !child.init
+    ) {
+      return;
+    }
+    const initializerMember = asDirectOptionalChainMember(child.init);
+    if (initializerMember && chainMemberPath(initializerMember) === operandPath) {
+      aliasNames.push(child.id.name);
+    }
+  });
+  return aliasNames;
+};
+
 // The names a guard may test to prove the operand can never be undefined:
 // the chain root, plus the alias binding itself when the operand is an
 // identifier bound to a chain (`const size = a?.b` — guarding `size` is just
-// as sound as guarding `a`). A `??`/`||` fallback on the binding makes its
+// as sound as guarding `a`), plus same-scope aliases of the identical chain
+// when the operand re-derefs it (`const price = item?.price; if (!price)
+// return; item?.price * 2`). A `??`/`||` fallback on the binding makes its
 // initializer a LogicalExpression, so it naturally fails the chain check and
 // is not treated as unguarded. Returns null when the operand is not an
 // optional-chain value at all.
@@ -93,7 +145,7 @@ const resolveOptionalChainOperandGuardNames = (operand: EsTreeNode): string[] | 
   const direct = asDirectOptionalChainMember(operand);
   if (direct) {
     const rootName = optionalChainRootName(direct);
-    return rootName ? [rootName] : null;
+    return rootName ? [rootName, ...collectSameChainAliasNames(direct)] : null;
   }
 
   const stripped = stripKeepingChain(operand);

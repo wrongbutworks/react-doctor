@@ -3,7 +3,9 @@ import {
   getImportedNameFromModule,
   isNamespaceImportFromModule,
 } from "../../utils/find-import-source-for-name.js";
+import { isFunctionLike } from "../../utils/is-function-like.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
+import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
 import type { RuleContext } from "../../utils/rule-context.js";
 
@@ -40,6 +42,19 @@ const resolveLeakingSubscriptionName = (
   return null;
 };
 
+// A bare subscription at module scope runs once at import time and lives for
+// the whole process by construction — there is no teardown moment at which
+// the disposer could ever be called, so discarding it is the intended shape
+// of app-lifetime store wiring.
+const isEvaluatedAtModuleScope = (node: EsTreeNode): boolean => {
+  let ancestor = node.parent;
+  while (ancestor) {
+    if (isFunctionLike(ancestor) || isNodeOfType(ancestor, "StaticBlock")) return false;
+    ancestor = ancestor.parent ?? null;
+  }
+  return true;
+};
+
 const mayCarryAbortSignal = (optionsArgument: unknown): boolean => {
   if (!optionsArgument) return false;
   if (!isNodeOfType(optionsArgument, "ObjectExpression")) return true;
@@ -69,6 +84,8 @@ export const mobxReactionDisposerDiscarded = defineRule({
       // `const d = reaction(...)`, `this.x = reaction(...)`, and
       // `disposeOnUnmount(this, reaction(...))` all have non-statement parents.
       if (!isNodeOfType(node.parent, "ExpressionStatement")) return;
+
+      if (isEvaluatedAtModuleScope(node)) return;
 
       // A `signal` option is MobX's documented alternative disposal mechanism,
       // so discarding the disposer is correct there; opaque (non-literal)

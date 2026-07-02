@@ -3,6 +3,24 @@ import { runRule } from "../../../test-utils/run-rule.js";
 import { noSpreadAccumulatorInReduce } from "./no-spread-accumulator-in-reduce.js";
 
 describe("no-spread-accumulator-in-reduce", () => {
+  it("does not flag a reduce over a fixed-length Array.from(Array(4)) construction", () => {
+    const result = runRule(
+      noSpreadAccumulatorInReduce,
+      `const prepareImageURLs = (imageURLs) =>
+        Array.from(Array(4)).reduce((acc, _, i) => [...acc, imageURLs[i] ?? null], []);`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a reduce over Array(3).fill(null)", () => {
+    const result = runRule(
+      noSpreadAccumulatorInReduce,
+      `const slots = Array(3).fill(null).reduce((acc, _, i) => [...acc, i], []);`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
   it("does not flag a single-spread keyed-lookup build ({ ...acc, [key]: value })", () => {
     const result = runRule(
       noSpreadAccumulatorInReduce,

@@ -64,14 +64,54 @@ const isBoundedArrayInitializer = (initializer: EsTreeNode): boolean => {
   );
 };
 
+// `Array(4)` / `new Array(4)` with a numeric-literal length — the
+// `Array.from(Array(4)).reduce(...)` fixed-slot idiom is bounded by the
+// literal, not by data.
+const isFixedLengthArrayConstruction = (expression: EsTreeNode): boolean => {
+  const stripped = stripParenExpression(expression);
+  if (!isNodeOfType(stripped, "CallExpression") && !isNodeOfType(stripped, "NewExpression")) {
+    return false;
+  }
+  const callee = stripParenExpression(stripped.callee);
+  if (!isNodeOfType(callee, "Identifier") || callee.name !== "Array") return false;
+  const lengthArgument = stripped.arguments?.[0];
+  return (
+    isAstNode(lengthArgument) &&
+    isNodeOfType(lengthArgument, "Literal") &&
+    typeof lengthArgument.value === "number"
+  );
+};
+
+// `Array(4).fill(x)` / `Array.from(Array(4))` — fixed-length constructions
+// reached through a bounded chain.
+const isFixedLengthArrayExpression = (expression: EsTreeNode): boolean => {
+  const stripped = stripParenExpression(expression);
+  if (isFixedLengthArrayConstruction(stripped)) return true;
+  if (!isNodeOfType(stripped, "CallExpression")) return false;
+  const callee = stripParenExpression(stripped.callee);
+  if (!isNodeOfType(callee, "MemberExpression")) return false;
+  if (
+    isNodeOfType(callee.object, "Identifier") &&
+    callee.object.name === "Array" &&
+    isNodeOfType(callee.property, "Identifier") &&
+    callee.property.name === "from"
+  ) {
+    const sourceArgument = stripped.arguments?.[0];
+    return isAstNode(sourceArgument) && isFixedLengthArrayConstruction(sourceArgument);
+  }
+  return isFixedLengthArrayConstruction(callee.object);
+};
+
 // The empirical false-positive pattern is spreading the accumulator over a
 // statically bounded collection — a rest parameter (bounded by call-site
-// arity), an array literal, or the keys/entries of a locally constructed
-// object literal — where n is tiny and fixed, so the O(n²) copy cost is
-// unobservable and the immutable idiom is deliberate.
+// arity), an array literal, a fixed-length `Array(n)` construction, or the
+// keys/entries of a locally constructed object literal — where n is tiny and
+// fixed, so the O(n²) copy cost is unobservable and the immutable idiom is
+// deliberate.
 const isStaticallyBoundedReduceSource = (source: EsTreeNode): boolean => {
   const stripped = stripParenExpression(source);
   if (isSpreadFreeArrayLiteral(stripped, false)) return true;
+  if (isFixedLengthArrayExpression(stripped)) return true;
   if (isNodeOfType(stripped, "Identifier")) {
     const binding = findVariableInitializer(stripped, stripped.name);
     if (!binding) return false;

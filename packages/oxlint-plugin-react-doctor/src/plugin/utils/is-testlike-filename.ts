@@ -78,6 +78,7 @@ const NON_PRODUCTION_FILENAME_SUFFIXES: ReadonlyArray<string> = [
   ".integration-spec.",
   ".int-spec.",
   ".mock.",
+  ".mocks.",
   ".fixture.",
 ];
 

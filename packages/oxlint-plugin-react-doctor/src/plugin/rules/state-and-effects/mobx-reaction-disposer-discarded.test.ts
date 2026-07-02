@@ -39,10 +39,39 @@ describe("mobx-reaction-disposer-discarded", () => {
       mobxReactionDisposerDiscarded,
       `
       import { reaction as react } from "mobx";
-      react(() => this.value, () => {});
+      class Store {
+        start() {
+          react(() => this.value, () => {});
+        }
+      }
       `,
     );
     expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("does not flag a bare module-scope reaction (app-lifetime wiring has no teardown moment)", () => {
+    const result = runRule(
+      mobxReactionDisposerDiscarded,
+      `
+      import { reaction } from "mobx";
+      import { store } from "./store";
+      reaction(() => store.value, (value) => persist(value));
+      `,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a bare module-scope autorun inside an if block", () => {
+    const result = runRule(
+      mobxReactionDisposerDiscarded,
+      `
+      import { autorun } from "mobx";
+      if (import.meta.env.DEV) {
+        autorun(() => console.debug(store.state));
+      }
+      `,
+    );
+    expect(result.diagnostics).toHaveLength(0);
   });
 
   it("flags a namespace-import mobx.autorun() whose disposer is discarded", () => {

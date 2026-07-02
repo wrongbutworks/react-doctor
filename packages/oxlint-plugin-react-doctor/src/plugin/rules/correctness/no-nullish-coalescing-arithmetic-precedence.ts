@@ -28,6 +28,19 @@ const leftmostLeafIsNumericLiteral = (node: EsTreeNode): boolean => {
   return isNumericLiteralLeaf(current);
 };
 
+// `x ?? 0 - someCall()` is the negation-fallback idiom: `0 - fn()` is a
+// deliberate spelling of `-fn()` (observed as
+// `offset ?? 0 - date.getTimezoneOffset()` in production timezone math), so
+// the as-parsed grouping is what the author wants. Kept narrow: only a
+// CallExpression subtrahend is exempt — `a ?? 0 - b` and the
+// `b.at ?? 0 - (a.at ?? 0)` sort-comparator swallow keep firing.
+const isZeroMinusNegationIdiom = (node: EsTreeNodeOfType<"BinaryExpression">): boolean => {
+  if (node.operator !== "-") return false;
+  if (!isNodeOfType(node.left, "Literal") || node.left.value !== 0) return false;
+  const subtrahend = node.right as EsTreeNode;
+  return isNodeOfType(subtrahend, "CallExpression");
+};
+
 // A fully-constant fallback (`x ?? 100 * 1024 * 1024`, `x ?? 60 * 1000`)
 // evaluates to a fixed value regardless of precedence — the swallowed-fallback
 // bug needs an identifier/member operand in the arithmetic.
@@ -58,6 +71,7 @@ export const noNullishCoalescingArithmeticPrecedence = defineRule({
       if (!ARITHMETIC_OPERATORS.has(right.operator)) return;
       if (!leftmostLeafIsNumericLiteral(right)) return;
       if (!hasNonNumericLiteralLeaf(right)) return;
+      if (isZeroMinusNegationIdiom(right)) return;
 
       context.report({
         node,

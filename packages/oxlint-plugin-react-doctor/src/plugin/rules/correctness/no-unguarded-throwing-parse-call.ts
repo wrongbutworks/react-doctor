@@ -81,6 +81,30 @@ const hasEnclosingFunction = (node: EsTreeNode): boolean => {
 const isProcessEnvMember = (node: EsTreeNode): boolean =>
   isNodeOfType(node, "MemberExpression") && getRootIdentifierName(node) === "process";
 
+// `location.origin` / `window.location.origin` is always a syntactically
+// valid scheme+host, so a template that leads with it (`new URL(
+// `${window.location.origin}/user/${id}`)`) cannot make `new URL` throw —
+// the remainder after a valid origin is percent-encoded, never rejected.
+const isLocationOriginRead = (node: EsTreeNode): boolean => {
+  const stripped = stripParenExpression(node);
+  if (
+    !isNodeOfType(stripped, "MemberExpression") ||
+    stripped.computed ||
+    !isNodeOfType(stripped.property, "Identifier") ||
+    stripped.property.name !== "origin"
+  ) {
+    return false;
+  }
+  const locationObject = stripParenExpression(stripped.object);
+  if (isNodeOfType(locationObject, "Identifier")) return locationObject.name === "location";
+  return (
+    isNodeOfType(locationObject, "MemberExpression") &&
+    !locationObject.computed &&
+    isNodeOfType(locationObject.property, "Identifier") &&
+    locationObject.property.name === "location"
+  );
+};
+
 // True when the argument is a literal, a template with a hardcoded absolute
 // origin prefix, a `process.env.*` read, or an identifier bound to a
 // module-scope `const` literal/env value — none are runtime-malformed input,
@@ -91,7 +115,15 @@ const isCompileTimeOrModuleConst = (argument: EsTreeNode): boolean => {
   if (isNodeOfType(inner, "TemplateLiteral")) {
     if (inner.expressions.length === 0) return true;
     const firstQuasi = inner.quasis[0];
-    return Boolean(firstQuasi && ABSOLUTE_ORIGIN_PREFIX_PATTERN.test(firstQuasi.value.raw));
+    if (firstQuasi && ABSOLUTE_ORIGIN_PREFIX_PATTERN.test(firstQuasi.value.raw)) return true;
+    // `${window.location.origin}/path` — the leading interpolation IS the
+    // origin, so the template is origin-pinned the same way.
+    return Boolean(
+      firstQuasi &&
+      firstQuasi.value.raw === "" &&
+      inner.expressions[0] &&
+      isLocationOriginRead(inner.expressions[0] as EsTreeNode),
+    );
   }
   if (isProcessEnvMember(inner)) return true;
   if (isNodeOfType(inner, "Identifier")) {
