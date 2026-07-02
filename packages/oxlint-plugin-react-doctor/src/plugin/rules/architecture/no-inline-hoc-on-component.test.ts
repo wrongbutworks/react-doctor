@@ -326,4 +326,59 @@ describe("no-inline-hoc-on-component", () => {
     );
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("does not treat a markdown-it .use(plugin) chain as a hook call inside a hook-free classic HOC", () => {
+    const result = runRule(
+      noInlineHocOnComponent,
+      `const SortableItem = sortableElement((props) => {
+        const renderer = markdownIt().use(taskLists).use(anchors);
+        return <li dangerouslySetInnerHTML={{ __html: renderer.render(props.text) }} />;
+      });`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not treat a unified().use() pipeline as hook calls inside a hook-free withRouter component", () => {
+    const result = runRule(
+      noInlineHocOnComponent,
+      `const Article = withRouter((props) => {
+        const html = unified().use(remarkParse).use(remarkHtml).processSync(props.body);
+        return <article dangerouslySetInnerHTML={{ __html: String(html) }} />;
+      });`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still counts React.useState namespace calls as hooks inside an inline HOC component", () => {
+    const result = runRule(
+      noInlineHocOnComponent,
+      `const Panel = withTracking((props) => {
+        const [open, setOpen] = React.useState(false);
+        return <div onClick={() => setOpen(!open)}>{props.title}</div>;
+      });`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("does not flag a typed polymorphic forwardRef wrapper taking the implementation inline", () => {
+    const result = runRule(
+      noInlineHocOnComponent,
+      `const AnimateEmojiProvider = polymorphicForwardRef((props, ref) => {
+        const [hovered, setHovered] = useState(false);
+        return <div ref={ref} onMouseEnter={() => setHovered(true)}>{props.children}</div>;
+      });`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a typedMemo wrapper taking the implementation inline", () => {
+    const result = runRule(
+      noInlineHocOnComponent,
+      `const Row = typedMemo((props) => {
+        const formatted = useFormatted(props.value);
+        return <td>{formatted}</td>;
+      });`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
 });

@@ -70,13 +70,16 @@ const climbTransparentParents = (node: EsTreeNode): EsTreeNode => {
   return current;
 };
 
-// Component *factory primitives* — Mantine's `factory` / `polymorphicFactory`
-// and any `createXFactory` — take the component implementation inline and wire
-// up refs + a stable display name themselves (the same category as the
-// whitelisted `forwardRef` / `memo` / `styled`), rather than wrapping a
-// pre-existing component. Match them structurally by name so the whitelist
-// doesn't have to grow one framework helper at a time.
-const isComponentFactoryName = (calleeName: string): boolean => /factory$/i.test(calleeName);
+// Component *factory primitives* — Mantine's `factory` / `polymorphicFactory`,
+// any `createXFactory`, and codebase-local typed wrappers around the React
+// primitives (`polymorphicForwardRef`, `typedMemo`, `genericForwardRef`) —
+// take the component implementation inline and wire up refs + a stable
+// display name themselves (the same category as the whitelisted `forwardRef`
+// / `memo` / `styled`), rather than wrapping a pre-existing component. Match
+// them structurally by name so the whitelist doesn't have to grow one
+// framework helper at a time.
+const isComponentFactoryName = (calleeName: string): boolean =>
+  /(?:factory|forwardref|memo)$/i.test(calleeName);
 
 // Resolves the wrapper name of the CallExpression the inline function is
 // handed to. A bare `hoc(fn)` callee is the Identifier name; a curried
@@ -136,6 +139,25 @@ const functionReturnValueIsJsx = (functionNode: EsTreeNode): boolean => {
   return returnsJsx;
 };
 
+// A hook call is a bare `useX(...)` / `use(...)` identifier or the
+// `React.useX(...)` namespace form. Property names on other receivers are
+// NOT hooks: chainable `.use(plugin)` pipelines (markdown-it, unified/remark,
+// postcss, i18next) would otherwise defeat the hook-free classic-HOC
+// exemption below via the React 19 bare-`use` special case.
+const isReactHookInvocation = (node: EsTreeNode): boolean => {
+  if (!isNodeOfType(node, "CallExpression")) return false;
+  if (isNodeOfType(node.callee, "Identifier")) return isReactHookName(node.callee.name);
+  if (
+    isNodeOfType(node.callee, "MemberExpression") &&
+    isNodeOfType(node.callee.object, "Identifier") &&
+    node.callee.object.name === "React" &&
+    isNodeOfType(node.callee.property, "Identifier")
+  ) {
+    return isReactHookName(node.callee.property.name);
+  }
+  return false;
+};
+
 // The headline harm — rules-of-hooks / exhaustive-deps no longer analyzing
 // the component — only exists when the inline function actually calls a hook.
 // Hook-free inline wrappers are the documented idiom of classic pre-hooks
@@ -145,8 +167,7 @@ const callsHookInOwnScope = (functionNode: EsTreeNode): boolean => {
   let didCallHook = false;
   walkOwnFunctionScope(functionNode, (child: EsTreeNode) => {
     if (didCallHook) return false;
-    const calleeName = getCalleeName(child);
-    if (calleeName !== null && isReactHookName(calleeName)) {
+    if (isReactHookInvocation(child)) {
       didCallHook = true;
       return false;
     }
