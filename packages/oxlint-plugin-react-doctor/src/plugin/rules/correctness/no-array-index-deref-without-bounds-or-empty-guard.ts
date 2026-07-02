@@ -2,9 +2,12 @@ import { defineRule } from "../../utils/define-rule.js";
 import { findEnclosingFunction } from "../../utils/find-enclosing-function.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
+import { findVariableInitializer } from "../../utils/find-variable-initializer.js";
+import { isEarlyExitStatement } from "../../utils/is-early-exit-statement.js";
 import { isFunctionLike } from "../../utils/is-function-like.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
 import { stripParenExpression } from "../../utils/strip-paren-expression.js";
+import { unwrapNegativeGuardForm } from "../../utils/unwrap-negative-guard-form.js";
 import { walkAst } from "../../utils/walk-ast.js";
 import type { RuleContext } from "../../utils/rule-context.js";
 import type { RuleVisitors } from "../../utils/rule-visitors.js";
@@ -135,18 +138,22 @@ const areGuardExpressionsEqual = (
 };
 
 // Conditions that dominate the deref within the nearest enclosing function:
-// tests of if/ternary consequents the deref sits in, and left operands of
-// `&&` chains it sits on the right of.
+// tests of if/ternary consequents the deref sits in, left operands of `&&`
+// chains it sits on the right of, negated tests of if/ternary ALTERNATES
+// (`m === null ? fallback : m[1].trim()`), and negated tests of early-exit
+// guards preceding the deref in the same block chain
+// (`if (!raw.includes(':')) return; … raw.split(':')[1].trim()`).
 const collectDominatingConditionTests = (node: EsTreeNode): EsTreeNode[] => {
   const dominatingTests: EsTreeNode[] = [];
   let cursor: EsTreeNode = node;
   let parent = cursor.parent ?? null;
   while (parent && !isFunctionLike(parent)) {
-    if (isNodeOfType(parent, "IfStatement") && parent.consequent === cursor) {
-      dominatingTests.push(parent.test);
-    }
-    if (isNodeOfType(parent, "ConditionalExpression") && parent.consequent === cursor) {
-      dominatingTests.push(parent.test);
+    if (isNodeOfType(parent, "IfStatement") || isNodeOfType(parent, "ConditionalExpression")) {
+      if (parent.consequent === cursor) dominatingTests.push(parent.test);
+      if (parent.alternate === cursor) {
+        const positiveGuard = unwrapNegativeGuardForm(parent.test);
+        if (positiveGuard) dominatingTests.push(positiveGuard);
+      }
     }
     if (
       isNodeOfType(parent, "LogicalExpression") &&
@@ -155,19 +162,56 @@ const collectDominatingConditionTests = (node: EsTreeNode): EsTreeNode[] => {
     ) {
       dominatingTests.push(parent.left);
     }
+    if (isNodeOfType(parent, "BlockStatement")) {
+      for (const statement of parent.body) {
+        if (statement === cursor) break;
+        if (
+          isNodeOfType(statement, "IfStatement") &&
+          !statement.alternate &&
+          isEarlyExitStatement(statement.consequent)
+        ) {
+          const positiveGuard = unwrapNegativeGuardForm(statement.test);
+          if (positiveGuard) dominatingTests.push(positiveGuard);
+        }
+      }
+    }
     cursor = parent;
     parent = parent.parent ?? null;
   }
   return dominatingTests;
 };
 
+// A dominating test hoisted into a descriptively named boolean
+// (`const hasScheme = url.includes('://')`) guards through the binding —
+// resolve a bare identifier test to its declaration-time initializer.
+const resolveTestExpression = (test: EsTreeNode): EsTreeNode => {
+  const expression = stripParenExpression(test);
+  if (isNodeOfType(expression, "Identifier")) {
+    const binding = findVariableInitializer(expression, expression.name);
+    if (binding?.initializer) return binding.initializer;
+  }
+  return expression;
+};
+
+const COERCION_CALLEE_NAMES = new Set(["String", "Number", "Boolean"]);
+
 // Walks a value expression down to the identifier it reads from:
-// `value.toString()` -> `value`, `currentUser.address` -> `currentUser`.
+// `value.toString()` -> `value`, `currentUser.address` -> `currentUser`,
+// `String(value)` -> `value`.
 const findValueBaseIdentifier = (node: EsTreeNode): EsTreeNodeOfType<"Identifier"> | null => {
   let cursor = stripParenExpression(node);
   while (!isNodeOfType(cursor, "Identifier")) {
     if (isNodeOfType(cursor, "CallExpression") && isNodeOfType(cursor.callee, "MemberExpression")) {
       cursor = stripParenExpression(cursor.callee.object);
+      continue;
+    }
+    if (
+      isNodeOfType(cursor, "CallExpression") &&
+      isNodeOfType(cursor.callee, "Identifier") &&
+      COERCION_CALLEE_NAMES.has(cursor.callee.name) &&
+      cursor.arguments[0]
+    ) {
+      cursor = stripParenExpression(cursor.arguments[0] as EsTreeNode);
       continue;
     }
     if (isNodeOfType(cursor, "MemberExpression")) {
@@ -180,17 +224,20 @@ const findValueBaseIdentifier = (node: EsTreeNode): EsTreeNodeOfType<"Identifier
 };
 
 // A same-file predicate helper invoked over the dereferenced value
-// (`isNumber(value)` dominating `value.toString().split('.')[1]`) —
-// its body is invisible to intra-procedural analysis, so treat it as a
-// guard the rule cannot refute.
-const isPredicateCallOverBaseIdentifier = (
+// (`isNumber(value)` dominating `value.toString().split('.')[1]`, or over
+// the member read itself — `isVersioned(props.value)`) — its body is
+// invisible to intra-procedural analysis, so treat it as a guard the rule
+// cannot refute.
+const isPredicateCallOverValue = (
   call: EsTreeNodeOfType<"CallExpression">,
+  valueExpression: EsTreeNode | null,
   baseIdentifier: EsTreeNodeOfType<"Identifier"> | null,
 ): boolean =>
-  Boolean(baseIdentifier) &&
-  call.arguments.some((argument) =>
-    areGuardExpressionsEqual(stripParenExpression(argument), baseIdentifier),
-  );
+  call.arguments.some((argument) => {
+    const strippedArgument = stripParenExpression(argument as EsTreeNode);
+    if (baseIdentifier && areGuardExpressionsEqual(strippedArgument, baseIdentifier)) return true;
+    return Boolean(valueExpression) && areGuardExpressionsEqual(strippedArgument, valueExpression);
+  });
 
 const someDominatingTestHasCall = (
   node: EsTreeNode,
@@ -198,7 +245,7 @@ const someDominatingTestHasCall = (
 ): boolean =>
   collectDominatingConditionTests(node).some((test) => {
     let didFindGuardCall = false;
-    walkAst(test, (child: EsTreeNode) => {
+    walkAst(resolveTestExpression(test), (child: EsTreeNode) => {
       if (didFindGuardCall) return false;
       if (isNodeOfType(child, "CallExpression") && isGuardCall(child)) {
         didFindGuardCall = true;
@@ -227,7 +274,32 @@ const isRegexResultDerefGuarded = (node: EsTreeNode, regexResultCall: EsTreeNode
     node,
     (call) =>
       areGuardExpressionsEqual(call, regexResultCall) ||
-      isPredicateCallOverBaseIdentifier(call, matchedValueIdentifier),
+      isPredicateCallOverValue(call, null, matchedValueIdentifier),
+  );
+};
+
+// Regex literals that match at every position (`/^\s*/`, `/.*/`) — a
+// single star-quantified atom, optionally anchored — always produce a
+// non-null result with `[0]` present.
+const ALWAYS_MATCH_REGEX_PATTERN = /^\^?(?:\\[a-zA-Z]|\.|\[[^\]]*\])\*$/;
+
+const isAlwaysMatchRegexResult = (regexResultCall: EsTreeNode, partIndex: number): boolean => {
+  if (partIndex !== 0) return false;
+  if (!isNodeOfType(regexResultCall, "CallExpression")) return false;
+  if (!isNodeOfType(regexResultCall.callee, "MemberExpression")) return false;
+  if (!isNodeOfType(regexResultCall.callee.property, "Identifier")) return false;
+  const regexOperand =
+    regexResultCall.callee.property.name === "exec"
+      ? stripParenExpression(regexResultCall.callee.object)
+      : regexResultCall.arguments[0]
+        ? stripParenExpression(regexResultCall.arguments[0] as EsTreeNode)
+        : null;
+  if (!regexOperand || !isNodeOfType(regexOperand, "Literal") || !("regex" in regexOperand)) {
+    return false;
+  }
+  return (
+    typeof regexOperand.regex?.pattern === "string" &&
+    ALWAYS_MATCH_REGEX_PATTERN.test(regexOperand.regex.pattern)
   );
 };
 
@@ -258,7 +330,8 @@ const isSplitPartDerefGuarded = (node: EsTreeNode, splitCall: EsTreeNode): boole
   const splitDelimiter = splitCall.arguments[0] ?? null;
   const splitValueIdentifier = findValueBaseIdentifier(splitReceiver);
   return someDominatingTestHasCall(node, (call) => {
-    if (isPredicateCallOverBaseIdentifier(call, splitValueIdentifier)) return true;
+    if (areGuardExpressionsEqual(call, splitCall)) return true;
+    if (isPredicateCallOverValue(call, splitReceiver, splitValueIdentifier)) return true;
     if (!isNodeOfType(call.callee, "MemberExpression") || call.callee.computed) return false;
     if (!isNodeOfType(call.callee.property, "Identifier")) return false;
     const guardMethodName = call.callee.property.name;
@@ -272,7 +345,7 @@ const isSplitPartDerefGuarded = (node: EsTreeNode, splitCall: EsTreeNode): boole
         areGuardExpressionsEqual(testedValueIdentifier, splitValueIdentifier)
       );
     }
-    if (guardMethodName !== "includes") return false;
+    if (guardMethodName !== "includes" && guardMethodName !== "indexOf") return false;
     const guardArgument = call.arguments[0] ?? null;
     return (
       areGuardExpressionsEqual(stripParenExpression(call.callee.object), splitReceiver) &&
@@ -280,6 +353,113 @@ const isSplitPartDerefGuarded = (node: EsTreeNode, splitCall: EsTreeNode): boole
     );
   });
 };
+
+// Producers with a statically known shape: `toISOString()` always contains
+// `T`, `.`, `:` and `-` at fixed positions, and an http(s) document's
+// `location.pathname` always starts with `/` (so `split('/')[1]` exists).
+const isKnownFormatSplitPart = (splitCall: EsTreeNode, partIndex: number): boolean => {
+  if (!isNodeOfType(splitCall, "CallExpression")) return false;
+  if (!isNodeOfType(splitCall.callee, "MemberExpression")) return false;
+  const receiver = stripParenExpression(splitCall.callee.object);
+  const delimiter = splitCall.arguments[0];
+  const delimiterValue =
+    delimiter && isNodeOfType(delimiter, "Literal") && typeof delimiter.value === "string"
+      ? delimiter.value
+      : null;
+  if (delimiterValue === null) return false;
+  if (
+    isNodeOfType(receiver, "CallExpression") &&
+    isNodeOfType(receiver.callee, "MemberExpression") &&
+    isNodeOfType(receiver.callee.property, "Identifier") &&
+    receiver.callee.property.name === "toISOString"
+  ) {
+    if ((delimiterValue === "T" || delimiterValue === ".") && partIndex <= 1) return true;
+    if ((delimiterValue === ":" || delimiterValue === "-") && partIndex <= 2) return true;
+  }
+  if (
+    isNodeOfType(receiver, "MemberExpression") &&
+    !receiver.computed &&
+    isNodeOfType(receiver.property, "Identifier") &&
+    receiver.property.name === "pathname" &&
+    delimiterValue === "/" &&
+    partIndex === 1
+  ) {
+    return true;
+  }
+  return false;
+};
+
+// `lines.filter(l => l.includes(':')).map(l => l.split(':')[1].trim())` —
+// the deref sits in an iteration callback over a `.filter(...)`ed chain, so
+// every element already passed the (opaque to us) filter predicate.
+const ITERATION_CALLBACK_METHOD_NAMES = new Set(["map", "forEach", "flatMap"]);
+
+const isInsideFilteredIterationCallback = (node: EsTreeNode, splitCall: EsTreeNode): boolean => {
+  if (!isNodeOfType(splitCall, "CallExpression")) return false;
+  if (!isNodeOfType(splitCall.callee, "MemberExpression")) return false;
+  const splitValueIdentifier = findValueBaseIdentifier(
+    stripParenExpression(splitCall.callee.object),
+  );
+  if (!splitValueIdentifier) return false;
+  const callback = nearestEnclosingFunction(node);
+  if (
+    !callback ||
+    (!isNodeOfType(callback, "ArrowFunctionExpression") &&
+      !isNodeOfType(callback, "FunctionExpression"))
+  ) {
+    return false;
+  }
+  const firstParameter = callback.params?.[0];
+  if (
+    !firstParameter ||
+    !isNodeOfType(firstParameter, "Identifier") ||
+    firstParameter.name !== splitValueIdentifier.name
+  ) {
+    return false;
+  }
+  const iterationCall = callback.parent;
+  if (
+    !iterationCall ||
+    !isNodeOfType(iterationCall, "CallExpression") ||
+    !isNodeOfType(iterationCall.callee, "MemberExpression") ||
+    !isNodeOfType(iterationCall.callee.property, "Identifier") ||
+    !ITERATION_CALLBACK_METHOD_NAMES.has(iterationCall.callee.property.name)
+  ) {
+    return false;
+  }
+  let receiver: EsTreeNode = stripParenExpression(iterationCall.callee.object);
+  while (
+    isNodeOfType(receiver, "CallExpression") &&
+    isNodeOfType(receiver.callee, "MemberExpression")
+  ) {
+    if (
+      isNodeOfType(receiver.callee.property, "Identifier") &&
+      receiver.callee.property.name === "filter"
+    ) {
+      return true;
+    }
+    receiver = stripParenExpression(receiver.callee.object);
+  }
+  return false;
+};
+
+// `e.touches.length` (or any read off the same TouchList) in a dominating
+// condition proves the list non-empty on this branch.
+const isTouchDerefGuarded = (node: EsTreeNode, touchListAccess: EsTreeNode): boolean =>
+  collectDominatingConditionTests(node).some((test) => {
+    let didFindTouchListRead = false;
+    walkAst(resolveTestExpression(test), (child: EsTreeNode) => {
+      if (didFindTouchListRead) return false;
+      if (
+        isNodeOfType(child, "MemberExpression") &&
+        areGuardExpressionsEqual(stripParenExpression(child.object as EsTreeNode), touchListAccess)
+      ) {
+        didFindTouchListRead = true;
+        return false;
+      }
+    });
+    return didFindTouchListRead;
+  });
 
 // Flags an immediate deref (`.foo`, `.foo()`, further `[k]`) on the
 // result of an empty-prone numeric bracket read with no dominating
@@ -315,6 +495,12 @@ export const noArrayIndexDerefWithoutBoundsOrEmptyGuard = defineRule({
 
         // (a) regex exec/match result indexed then dereferenced.
         if (isRegexResultCall(base)) {
+          if (
+            isNumericLiteral(index) &&
+            isAlwaysMatchRegexResult(base, Number((index as EsTreeNodeOfType<"Literal">).value))
+          ) {
+            return;
+          }
           if (isRegexResultDerefGuarded(node, base)) return;
           context.report({ node, message: MESSAGE });
           return;
@@ -328,13 +514,19 @@ export const noArrayIndexDerefWithoutBoundsOrEmptyGuard = defineRule({
         ) {
           const partIndex = Number((index as EsTreeNodeOfType<"Literal">).value);
           if (isStaticallyPresentSplitPart(base, partIndex)) return;
+          if (isKnownFormatSplitPart(base, partIndex)) return;
           if (isSplitPartDerefGuarded(node, base)) return;
+          if (isInsideFilteredIterationCallback(node, base)) return;
           context.report({ node, message: MESSAGE });
           return;
         }
 
-        // (b) `touches[0]` / `targetTouches[0]` inside touchend/touchcancel.
+        // (b) `touches[0]` / `targetTouches[0]` inside touchend/touchcancel —
+        // unless a dominating condition reads the same TouchList
+        // (`e.touches.length`, a repeated `e.touches[0]` check), which is the
+        // message's own remediation.
         if (isTouchListAccess(base) && isInsideTouchEndHandler(node)) {
+          if (isTouchDerefGuarded(node, base)) return;
           context.report({ node, message: MESSAGE });
         }
       },

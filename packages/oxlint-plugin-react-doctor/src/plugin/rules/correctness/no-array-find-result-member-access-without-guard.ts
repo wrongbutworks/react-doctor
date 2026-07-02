@@ -1,8 +1,10 @@
 import { defineRule } from "../../utils/define-rule.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
+import { isEarlyExitStatement } from "../../utils/is-early-exit-statement.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
 import { stripParenExpression } from "../../utils/strip-paren-expression.js";
+import { unwrapNegativeGuardForm } from "../../utils/unwrap-negative-guard-form.js";
 import type { RuleContext } from "../../utils/rule-context.js";
 import { walkAst } from "../../utils/walk-ast.js";
 
@@ -53,6 +55,47 @@ const hasArrayCallbackFirstArgument = (node: EsTreeNodeOfType<"CallExpression">)
   );
 };
 
+// `_.chain(users).filter(...).find(cb)` returns a LodashWrapper (unwrapped
+// later by `.value()`), never `undefined` — a `.find` whose receiver chain
+// roots in a `chain(...)` call is not Array.prototype.find.
+const receiverChainContainsChainCall = (receiver: EsTreeNode): boolean => {
+  let current = stripParenExpression(receiver);
+  while (isNodeOfType(current, "CallExpression")) {
+    const callee = stripParenExpression(current.callee as EsTreeNode);
+    if (isNodeOfType(callee, "Identifier") && callee.name === "chain") return true;
+    if (!isNodeOfType(callee, "MemberExpression")) return false;
+    if (isNodeOfType(callee.property, "Identifier") && callee.property.name === "chain") {
+      return true;
+    }
+    current = stripParenExpression(callee.object as EsTreeNode);
+  }
+  return false;
+};
+
+// `[override, stored, "ltr"].find(Boolean)` over an array literal with a
+// guaranteed-truthy literal element can never miss.
+const isTruthyLiteralElement = (element: EsTreeNode | null): boolean => {
+  if (!element) return false;
+  const expression = stripParenExpression(element);
+  if (isNodeOfType(expression, "Literal")) return Boolean(expression.value);
+  if (isNodeOfType(expression, "TemplateLiteral")) {
+    return expression.expressions.length === 0 && (expression.quasis[0]?.value?.raw ?? "") !== "";
+  }
+  return false;
+};
+
+const isBooleanFindOverTruthyArrayLiteral = (node: EsTreeNodeOfType<"CallExpression">): boolean => {
+  const callee = node.callee;
+  if (!isNodeOfType(callee, "MemberExpression")) return false;
+  const receiver = stripParenExpression(callee.object as EsTreeNode);
+  if (!isNodeOfType(receiver, "ArrayExpression")) return false;
+  const predicate = node.arguments?.[0];
+  if (!predicate || !isNodeOfType(predicate, "Identifier") || predicate.name !== "Boolean") {
+    return false;
+  }
+  return receiver.elements.some((element) => isTruthyLiteralElement(element as EsTreeNode | null));
+};
+
 const isArrayFindCall = (node: EsTreeNodeOfType<"CallExpression">): boolean => {
   const callee = node.callee;
   if (!isNodeOfType(callee, "MemberExpression") || callee.computed) return false;
@@ -64,6 +107,7 @@ const isArrayFindCall = (node: EsTreeNodeOfType<"CallExpression">): boolean => {
   if (isNodeOfType(receiver, "Identifier") && PASCAL_CASE_IDENTIFIER_PATTERN.test(receiver.name)) {
     return false;
   }
+  if (receiverChainContainsChainCall(receiver)) return false;
   return hasArrayCallbackFirstArgument(node);
 };
 
@@ -106,38 +150,80 @@ const subtreeContainsMatch = (
   return found;
 };
 
+// `some(pred)` / `findIndex(pred)` over the same receiver with a structurally
+// identical predicate proves a synchronous `find(pred)` cannot miss.
+const EQUIVALENT_GUARD_METHOD_NAMES = new Set(["some", "findIndex"]);
+
+// An inline function whose value sits directly in JSX (an event handler
+// under a conditional render) only runs after that render committed, so a
+// guard dominating the JSX position also dominates the closure body.
+const isInlineJsxFunction = (functionNode: EsTreeNode): boolean => {
+  let cursor = functionNode.parent ?? null;
+  while (cursor && GROUPING_EXPRESSION_TYPES.has(cursor.type)) cursor = cursor.parent ?? null;
+  return Boolean(
+    cursor &&
+    (isNodeOfType(cursor, "JSXExpressionContainer") || isNodeOfType(cursor, "JSXAttribute")),
+  );
+};
+
 // `items.find(f) && items.find(f).x` / `items.find(f) ? items.find(f).x : y`
 // / `if (items.find(f)) items.find(f).x` — the pre-ES2020 repeat-the-call
-// guard idiom: an identical find expression is truthiness-tested before the
-// dereference, so the access cannot throw.
+// guard idiom — plus every negated spelling of the same idiom (early
+// return, else branch, ternary alternate after `!x` / `=== undefined`) and
+// the `some(pred)`-before-`find(pred)` equivalence: the find expression is
+// proven non-undefined before the dereference, so the access cannot throw.
 const isGuardedByRepeatedFindTest = (findCall: EsTreeNodeOfType<"CallExpression">): boolean => {
+  const findCallee = findCall.callee as EsTreeNodeOfType<"MemberExpression">;
   const isIdenticalFindCall = (candidate: EsTreeNode): boolean =>
     isNodeOfType(candidate, "CallExpression") && areNodesStructurallyIdentical(candidate, findCall);
+  const isEquivalentPredicateGuard = (candidate: EsTreeNode): boolean => {
+    if (!isNodeOfType(candidate, "CallExpression")) return false;
+    const callee = candidate.callee;
+    if (!isNodeOfType(callee, "MemberExpression") || callee.computed) return false;
+    if (!isNodeOfType(callee.property, "Identifier")) return false;
+    if (!EQUIVALENT_GUARD_METHOD_NAMES.has(callee.property.name)) return false;
+    return (
+      areNodesStructurallyIdentical(callee.object, findCallee.object) &&
+      areNodesStructurallyIdentical(candidate.arguments?.[0], findCall.arguments?.[0])
+    );
+  };
+  const provesFind = (test: EsTreeNode): boolean =>
+    subtreeContainsMatch(
+      test,
+      (candidate) => isIdenticalFindCall(candidate) || isEquivalentPredicateGuard(candidate),
+    );
+
   let child: EsTreeNode = findCall;
   let ancestor: EsTreeNode | null = findCall.parent ?? null;
   while (ancestor) {
-    if (FUNCTION_NODE_TYPES.has(ancestor.type)) return false;
+    if (FUNCTION_NODE_TYPES.has(ancestor.type) && !isInlineJsxFunction(ancestor)) return false;
     if (
       isNodeOfType(ancestor, "LogicalExpression") &&
       ancestor.operator === "&&" &&
       ancestor.right === child &&
-      subtreeContainsMatch(ancestor.left, isIdenticalFindCall)
+      provesFind(ancestor.left)
     ) {
       return true;
     }
-    if (
-      isNodeOfType(ancestor, "ConditionalExpression") &&
-      ancestor.consequent === child &&
-      subtreeContainsMatch(ancestor.test, isIdenticalFindCall)
-    ) {
-      return true;
+    if (isNodeOfType(ancestor, "ConditionalExpression") || isNodeOfType(ancestor, "IfStatement")) {
+      if (ancestor.consequent === child && provesFind(ancestor.test)) return true;
+      if (ancestor.alternate === child) {
+        const positiveGuard = unwrapNegativeGuardForm(ancestor.test);
+        if (positiveGuard && provesFind(positiveGuard)) return true;
+      }
     }
-    if (
-      isNodeOfType(ancestor, "IfStatement") &&
-      ancestor.consequent === child &&
-      subtreeContainsMatch(ancestor.test, isIdenticalFindCall)
-    ) {
-      return true;
+    if (isNodeOfType(ancestor, "BlockStatement")) {
+      for (const statement of ancestor.body) {
+        if (statement === child) break;
+        if (
+          isNodeOfType(statement, "IfStatement") &&
+          !statement.alternate &&
+          isEarlyExitStatement(statement.consequent)
+        ) {
+          const positiveGuard = unwrapNegativeGuardForm(statement.test);
+          if (positiveGuard && provesFind(positiveGuard)) return true;
+        }
+      }
     }
     child = ancestor;
     ancestor = ancestor.parent ?? null;
@@ -166,9 +252,14 @@ const singleExpressionPredicateBody = (
   return stripParenExpression(body);
 };
 
+// The `.map(...)` sibling may live in the same component OR in a same-file
+// helper the component calls (`options={toOptionLabels(items)}`), so search
+// the whole module when a Program root is reachable. Matches the map
+// receiver either structurally (`props.items.map` / `this.props.options.map`)
+// or by trailing identifier name (a helper's parameter re-names the array).
 const enclosingScopeMapsOverReceiver = (
   findCall: EsTreeNodeOfType<"CallExpression">,
-  receiverName: string,
+  findReceiver: EsTreeNode,
 ): boolean => {
   let outermostFunction: EsTreeNode | null = null;
   let programRoot: EsTreeNode | null = null;
@@ -178,8 +269,15 @@ const enclosingScopeMapsOverReceiver = (
     if (isNodeOfType(current, "Program")) programRoot = current;
     current = current.parent ?? null;
   }
-  const searchRoot = outermostFunction ?? programRoot;
+  const searchRoot = programRoot ?? outermostFunction;
   if (!searchRoot) return false;
+  const receiverTrailingName = isNodeOfType(findReceiver, "Identifier")
+    ? findReceiver.name
+    : isNodeOfType(findReceiver, "MemberExpression") &&
+        !findReceiver.computed &&
+        isNodeOfType(findReceiver.property, "Identifier")
+      ? findReceiver.property.name
+      : null;
   return subtreeContainsMatch(searchRoot, (node) => {
     if (!isNodeOfType(node, "CallExpression")) return false;
     const callee = node.callee;
@@ -189,7 +287,12 @@ const enclosingScopeMapsOverReceiver = (
     }
     if ((node.arguments?.length ?? 0) === 0) return false;
     const mapReceiver = stripParenExpression(callee.object as EsTreeNode);
-    return isNodeOfType(mapReceiver, "Identifier") && mapReceiver.name === receiverName;
+    if (areNodesStructurallyIdentical(mapReceiver, findReceiver)) return true;
+    return (
+      receiverTrailingName !== null &&
+      isNodeOfType(mapReceiver, "Identifier") &&
+      mapReceiver.name === receiverTrailingName
+    );
   });
 };
 
@@ -204,7 +307,9 @@ const isSelfDerivedEqualityLookup = (findCall: EsTreeNodeOfType<"CallExpression"
   const callee = findCall.callee;
   if (!isNodeOfType(callee, "MemberExpression")) return false;
   const receiver = stripParenExpression(callee.object as EsTreeNode);
-  if (!isNodeOfType(receiver, "Identifier")) return false;
+  if (!isNodeOfType(receiver, "Identifier") && !isNodeOfType(receiver, "MemberExpression")) {
+    return false;
+  }
   const predicate = findCall.arguments?.[0];
   if (
     !isNodeOfType(predicate, "ArrowFunctionExpression") &&
@@ -228,15 +333,24 @@ const isSelfDerivedEqualityLookup = (findCall: EsTreeNodeOfType<"CallExpression"
     [leftSide, rightSide],
     [rightSide, leftSide],
   ];
-  const isEqualityLookupShape = sidePairs.some(
-    ([elementKeyRead, comparedValue]) =>
-      isNodeOfType(elementKeyRead, "MemberExpression") &&
-      memberExpressionRootName(elementKeyRead) === parameter.name &&
-      isNodeOfType(comparedValue, "Identifier") &&
-      comparedValue.name !== parameter.name,
-  );
+  // The compared value may be a bare binding (`value`) or a member read
+  // (`event.target.value`) — anything whose root is not the predicate's own
+  // element parameter.
+  const isEqualityLookupShape = sidePairs.some(([elementKeyRead, comparedValue]) => {
+    if (
+      !isNodeOfType(elementKeyRead, "MemberExpression") ||
+      memberExpressionRootName(elementKeyRead) !== parameter.name
+    ) {
+      return false;
+    }
+    if (isNodeOfType(comparedValue, "Identifier")) return comparedValue.name !== parameter.name;
+    return (
+      isNodeOfType(comparedValue, "MemberExpression") &&
+      memberExpressionRootName(comparedValue) !== parameter.name
+    );
+  });
   if (!isEqualityLookupShape) return false;
-  return enclosingScopeMapsOverReceiver(findCall, receiver.name);
+  return enclosingScopeMapsOverReceiver(findCall, receiver);
 };
 
 export const noArrayFindResultMemberAccessWithoutGuard = defineRule({
@@ -270,6 +384,7 @@ export const noArrayFindResultMemberAccessWithoutGuard = defineRule({
         consumer.callee === consumed &&
         !consumer.optional;
       if (!isUnguardedMemberRead && !isUnguardedCall) return;
+      if (isBooleanFindOverTruthyArrayLiteral(node)) return;
       if (isGuardedByRepeatedFindTest(node)) return;
       if (isSelfDerivedEqualityLookup(node)) return;
       context.report({ node, message: MESSAGE });

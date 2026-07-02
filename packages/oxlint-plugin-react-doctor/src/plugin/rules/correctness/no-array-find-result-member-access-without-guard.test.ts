@@ -233,4 +233,193 @@ describe("no-array-find-result-member-access-without-guard", () => {
     );
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("stays quiet on a select onChange lookup compared to event.target.value with a sibling map", () => {
+    const result = runRule(
+      noArrayFindResultMemberAccessWithoutGuard,
+      `const CurrencySelect = ({ options, onChange }) => (
+         <select
+           onChange={(event) =>
+             onChange(options.find((option) => option.code === event.target.value).id)
+           }
+         >
+           {options.map((option) => (
+             <option key={option.id} value={option.code}>
+               {option.label}
+             </option>
+           ))}
+         </select>
+       );`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet on a self-derived lookup with a props.items receiver", () => {
+    const result = runRule(
+      noArrayFindResultMemberAccessWithoutGuard,
+      `const Dropdown = (props) => (
+         <Select
+           options={props.items.map((item) => item.label)}
+           onSelect={(value) => props.onPick(props.items.find((item) => item.label === value).value)}
+         />
+       );`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet on a class component this.props receiver with the sibling map", () => {
+    const result = runRule(
+      noArrayFindResultMemberAccessWithoutGuard,
+      `class Picker extends React.Component {
+         render() {
+           return (
+             <Select
+               options={this.props.options.map((option) => option.code)}
+               onSelect={(code) =>
+                 this.props.onPick(this.props.options.find((option) => option.code === code).label)
+               }
+             />
+           );
+         }
+       }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet when the options-building map is extracted into a same-file helper", () => {
+    const result = runRule(
+      noArrayFindResultMemberAccessWithoutGuard,
+      `const toOptionLabels = (items) => items.map((item) => item.label);
+       const Dropdown = ({ items, onPick }) => (
+         <Select
+           options={toOptionLabels(items)}
+           onSelect={(value) => onPick(items.find((item) => item.label === value).value)}
+         />
+       );`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet after an early-return negated repeated-find guard", () => {
+    const result = runRule(
+      noArrayFindResultMemberAccessWithoutGuard,
+      `function label(items, id) {
+         if (!items.find((item) => item.id === id)) return null;
+         return items.find((item) => item.id === id).label;
+       }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet in the else branch of a negated repeated-find test", () => {
+    const result = runRule(
+      noArrayFindResultMemberAccessWithoutGuard,
+      `function label(items, id) {
+         if (!items.find((item) => item.id === id)) {
+           return null;
+         } else {
+           return items.find((item) => item.id === id).label;
+         }
+       }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet in the ternary alternate after an explicit === undefined test", () => {
+    const result = runRule(
+      noArrayFindResultMemberAccessWithoutGuard,
+      `const label = items.find((item) => item.id === id) === undefined
+         ? 'none'
+         : items.find((item) => item.id === id).label;`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet in the alternate of a negated ternary with a fallback consequent", () => {
+    const result = runRule(
+      noArrayFindResultMemberAccessWithoutGuard,
+      `const label = !items.find((item) => item.id === id)
+         ? 'none'
+         : items.find((item) => item.id === id).label;`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet when a some() guard with the identical predicate precedes the find", () => {
+    const result = runRule(
+      noArrayFindResultMemberAccessWithoutGuard,
+      `function label(items, id) {
+         if (items.some((item) => item.id === id)) {
+           return items.find((item) => item.id === id).label;
+         }
+         return null;
+       }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet when the deref sits in an inline handler under a conditional-render guard", () => {
+    const result = runRule(
+      noArrayFindResultMemberAccessWithoutGuard,
+      `const Toolbar = ({ items, selectedId, onSave }) => (
+         <div>
+           {items.find((item) => item.id === selectedId) && (
+             <button onClick={() => onSave(items.find((item) => item.id === selectedId).name)}>
+               Save
+             </button>
+           )}
+         </div>
+       );`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet on a lodash chain find unwrapped with .value()", () => {
+    const result = runRule(
+      noArrayFindResultMemberAccessWithoutGuard,
+      `const admin = _.chain(users)
+         .filter((user) => user.enabled)
+         .find((user) => user.role === "admin")
+         .value();`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet on find(Boolean) over an array literal ending in a truthy literal", () => {
+    const result = runRule(
+      noArrayFindResultMemberAccessWithoutGuard,
+      `const direction = [override, stored, "ltr"].find(Boolean).toUpperCase();`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags find(Boolean) over an array literal with no truthy literal element", () => {
+    const result = runRule(
+      noArrayFindResultMemberAccessWithoutGuard,
+      `const direction = [override, stored].find(Boolean).toUpperCase();`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags a deref in a non-JSX callback defined after the guard", () => {
+    const result = runRule(
+      noArrayFindResultMemberAccessWithoutGuard,
+      `function setup(items, id) {
+         if (!items.find((item) => item.id === id)) return null;
+         return () => items.find((item) => item.id === id).label;
+       }`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags an early-return guard over a different predicate", () => {
+    const result = runRule(
+      noArrayFindResultMemberAccessWithoutGuard,
+      `function label(items, id, other) {
+         if (!items.find((item) => item.id === other)) return null;
+         return items.find((item) => item.id === id).label;
+       }`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
 });

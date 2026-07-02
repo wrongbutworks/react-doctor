@@ -313,4 +313,180 @@ describe("no-array-index-deref-without-bounds-or-empty-guard", () => {
     );
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("stays quiet when touches[0] is guarded by touches.length in a touchend handler", () => {
+    const result = runRule(
+      noArrayIndexDerefWithoutBoundsOrEmptyGuard,
+      `element.addEventListener('touchend', (event) => {
+         if (event.touches.length > 0) {
+           setLastY(event.touches[0].clientY);
+         }
+       });`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet when a repeated-split length check guards the part read", () => {
+    const result = runRule(
+      noArrayIndexDerefWithoutBoundsOrEmptyGuard,
+      `const ext = fileName.split('.').length > 1 ? fileName.split('.')[1].toUpperCase() : '';`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet when indexOf(delimiter) !== -1 guards the split", () => {
+    const result = runRule(
+      noArrayIndexDerefWithoutBoundsOrEmptyGuard,
+      `const read = (line) => {
+         if (line.indexOf(':') !== -1) {
+           return line.split(':')[1].trim();
+         }
+         return '';
+       };`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet after an early-return includes guard inside useMemo", () => {
+    const result = runRule(
+      noArrayIndexDerefWithoutBoundsOrEmptyGuard,
+      `function useLabel(raw) {
+         return useMemo(() => {
+           if (!raw.includes(':')) return '';
+           return raw.split(':')[1].trim();
+         }, [raw]);
+       }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet after a throw-on-missing-delimiter validation guard", () => {
+    const result = runRule(
+      noArrayIndexDerefWithoutBoundsOrEmptyGuard,
+      `function getDomain(email) {
+         if (!email.includes('@')) throw new Error('invalid email address');
+         return email.split('@')[1].toLowerCase();
+       }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet after an early-return negated match guard with the double-call idiom", () => {
+    const result = runRule(
+      noArrayIndexDerefWithoutBoundsOrEmptyGuard,
+      `function extractVersion(input) {
+         if (!input.match(/v(\\d+)/)) return null;
+         return input.match(/v(\\d+)/)[1].trim();
+       }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet in the ternary alternate after an explicit === null test", () => {
+    const result = runRule(
+      noArrayIndexDerefWithoutBoundsOrEmptyGuard,
+      `const tag = header.match(/^(\\w+):/) === null ? 'none' : header.match(/^(\\w+):/)[1].toLowerCase();`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet when the deref sits in a map callback over a filtered chain", () => {
+    const result = runRule(
+      noArrayIndexDerefWithoutBoundsOrEmptyGuard,
+      `function EnvList({ lines }) {
+         return lines
+           .filter((line) => line.includes('='))
+           .map((line) => <li key={line}>{line.split('=')[1].trim()}</li>);
+       }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet when the guard is hoisted into a named boolean", () => {
+    const result = runRule(
+      noArrayIndexDerefWithoutBoundsOrEmptyGuard,
+      `const readHost = (url) => {
+         const hasScheme = url.includes('://');
+         const host = hasScheme ? url.split('://')[1].split('/')[0] : url;
+         return host;
+       };`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet on toISOString().split('T')[1] — the producer guarantees the delimiter", () => {
+    const result = runRule(
+      noArrayIndexDerefWithoutBoundsOrEmptyGuard,
+      `const time = new Date().toISOString().split('T')[1].replace('Z', '');`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet on window.location.pathname.split('/')[1]", () => {
+    const result = runRule(
+      noArrayIndexDerefWithoutBoundsOrEmptyGuard,
+      `const section = window.location.pathname.split('/')[1].toLowerCase();`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet on an always-matching regex like /^\\s*/ read at [0]", () => {
+    const result = runRule(
+      noArrayIndexDerefWithoutBoundsOrEmptyGuard,
+      `const indentWidth = line.match(/^\\s*/)[0].length;`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet on String(value) under the same opaque predicate trusted for .toString()", () => {
+    const result = runRule(
+      noArrayIndexDerefWithoutBoundsOrEmptyGuard,
+      `const decimalPlaces = hasFraction(value) ? String(value).split('.')[1].length : 0;`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet on an opaque predicate over a props member value before split", () => {
+    const result = runRule(
+      noArrayIndexDerefWithoutBoundsOrEmptyGuard,
+      `function Minutes(props) {
+         if (isTimeString(props.value)) {
+           return <span>{props.value.split(':')[1].padStart(2, '0')}</span>;
+         }
+         return null;
+       }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags an unguarded split deref after an unrelated early-return guard", () => {
+    const result = runRule(
+      noArrayIndexDerefWithoutBoundsOrEmptyGuard,
+      `function readValue(line, other) {
+         if (!other.includes(':')) return '';
+         return line.split(':')[1].trim();
+       }`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags touches[0] in touchend when the length check reads a different list", () => {
+    const result = runRule(
+      noArrayIndexDerefWithoutBoundsOrEmptyGuard,
+      `element.addEventListener('touchend', (event) => {
+         if (event.changedTouches.length > 0) {
+           setLastY(event.touches[0].clientY);
+         }
+       });`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags a non-anchored specific regex read at [0] without a guard", () => {
+    const result = runRule(
+      noArrayIndexDerefWithoutBoundsOrEmptyGuard,
+      `const version = line.match(/v\\d+/)[0].slice(1);`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
 });
