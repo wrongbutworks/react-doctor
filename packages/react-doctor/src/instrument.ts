@@ -6,10 +6,10 @@ import {
   SENTRY_FLUSH_TIMEOUT_MS,
 } from "./cli/utils/constants.js";
 import { isDebugFlagEnabled } from "./cli/utils/is-debug-flag.js";
+import { isEnvFlagEnabled } from "./cli/utils/is-env-flag-enabled.js";
 import { scrubSentryEvent } from "./cli/utils/scrub-sentry-event.js";
 import { scrubSentryMetric } from "./cli/utils/scrub-sentry-metric.js";
 import {
-  isEnvFlagEnabled,
   resolveSentryEnvironment,
   resolveSentryRelease,
   resolveTracesSampleRate,

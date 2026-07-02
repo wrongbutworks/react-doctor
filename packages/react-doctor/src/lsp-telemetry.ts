@@ -6,10 +6,10 @@ import type {
 } from "@react-doctor/language-server";
 import { SENTRY_DSN, SENTRY_FLUSH_TIMEOUT_MS, METRIC } from "./cli/utils/constants.js";
 import { toCategoryKey } from "./cli/utils/to-category-key.js";
+import { isEnvFlagEnabled } from "./cli/utils/is-env-flag-enabled.js";
 import { scrubSentryEvent } from "./cli/utils/scrub-sentry-event.js";
 import { scrubSentryMetric } from "./cli/utils/scrub-sentry-metric.js";
 import {
-  isEnvFlagEnabled,
   resolveSentryEnvironment,
   resolveSentryRelease,
   resolveTracesSampleRate,

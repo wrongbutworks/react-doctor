@@ -12,6 +12,7 @@ import type {
 } from "@react-doctor/core";
 import { buildRuleBlastRadii } from "./diagnostic-grouping.js";
 import { ACTION_INPUT_ENVIRONMENT_VARIABLES, detectRunnerOs } from "./is-ci-environment.js";
+import { isEnvFlagEnabled } from "./is-env-flag-enabled.js";
 import { summarizeRuleFirings } from "./record-scan-metrics.js";
 import { isValidBlockingLevel } from "./resolve-blocking-level.js";
 import { shouldBlockCi } from "./should-block-ci.js";
@@ -108,7 +109,7 @@ export interface RunEventInput {
 const readEnvBoolean = (name: string): boolean | null => {
   const value = process.env[name];
   if (value === undefined) return null;
-  return value.toLowerCase() === "true" || value === "1";
+  return isEnvFlagEnabled(value);
 };
 
 // How the official action's `version` input was pinned, derived from the

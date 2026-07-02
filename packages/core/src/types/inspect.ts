@@ -333,7 +333,7 @@ export interface JsonReportV1 {
  * are the *introduced* findings only; `summary.score` is still the head
  * scan's project-health score. New consumers branch on `schemaVersion === 2`.
  */
-export interface JsonReportV2 extends Omit<JsonReportV1, "schemaVersion"> {
+export interface JsonReportV2 extends Omit<JsonReportV1, "schemaVersion" | "baselineDegraded"> {
   schemaVersion: 2;
   baseline: JsonReportBaselineInfo;
 }
