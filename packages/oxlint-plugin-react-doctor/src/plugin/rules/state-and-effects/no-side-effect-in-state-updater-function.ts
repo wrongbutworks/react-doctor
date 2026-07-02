@@ -2,6 +2,7 @@ import { defineRule } from "../../utils/define-rule.js";
 import { getCalleeName } from "../../utils/get-callee-name.js";
 import { isFunctionLike } from "../../utils/is-function-like.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
+import { findVariableInitializer } from "../../utils/find-variable-initializer.js";
 import { isSetterIdentifier } from "../../utils/is-setter-identifier.js";
 import { stripParenExpression } from "../../utils/strip-paren-expression.js";
 import { walkAst } from "../../utils/walk-ast.js";
@@ -46,14 +47,45 @@ const isReactStateUpdaterCall = (node: EsTreeNodeOfType<"CallExpression">): bool
   if (!isNodeOfType(node.callee, "Identifier")) return false;
   const name = node.callee.name;
   if (TIMER_SETTER_NAMES.has(name)) return false;
-  return isSetterIdentifier(name);
+  if (!isSetterIdentifier(name)) return false;
+  // A resolvable same-file binding that is NOT the index-1 slot of a
+  // useState/useReducer destructure is not a replayable React updater:
+  // react-router's setSearchParams (eager, exactly-once), vanilla
+  // external-store setters, zustand-style eager setters. Unresolvable
+  // names (prop setters) keep the conservative React assumption.
+  const binding = findVariableInitializer(node.callee, name);
+  if (!binding) return true;
+  const declarator = binding.bindingIdentifier.parent;
+  let arrayPattern: EsTreeNode | null | undefined = binding.bindingIdentifier.parent;
+  while (arrayPattern && !isNodeOfType(arrayPattern, "VariableDeclarator")) {
+    arrayPattern = arrayPattern.parent;
+  }
+  if (
+    arrayPattern &&
+    isNodeOfType(arrayPattern, "VariableDeclarator") &&
+    isNodeOfType(arrayPattern.id, "ArrayPattern") &&
+    isNodeOfType(arrayPattern.init, "CallExpression") &&
+    isNodeOfType(arrayPattern.init.callee, "Identifier") &&
+    (arrayPattern.init.callee.name === "useState" ||
+      arrayPattern.init.callee.name === "useReducer") &&
+    (arrayPattern.id.elements ?? [])[1] === binding.bindingIdentifier
+  ) {
+    return true;
+  }
+  // Direct function bindings (`const setTheme = (mode) => ...`) and
+  // destructures from other hooks are eager setters.
+  void declarator;
+  return false;
 };
 
 // An impure effectful call: an optional consumer callback `x?.(...)`, an
 // `on*` / `*Callback` / `callback` named call, or an analytics/persistence
 // verb. Never a React setter (a nested setter is a different concern) and
 // never a pure array/set/map builtin.
-const isImpureSideEffectCall = (call: EsTreeNodeOfType<"CallExpression">): boolean => {
+const isImpureSideEffectCall = (
+  call: EsTreeNodeOfType<"CallExpression">,
+  updaterLocalNames: Set<string>,
+): boolean => {
   const calleeName = getCalleeName(call);
   if (calleeName) {
     if (PURE_BUILTIN_METHOD_NAMES.has(calleeName)) return false;
@@ -61,12 +93,30 @@ const isImpureSideEffectCall = (call: EsTreeNodeOfType<"CallExpression">): boole
   }
   if (call.optional) return true;
   if (!calleeName) return false;
-  return (
-    CONSUMER_CALLBACK_NAME_PATTERN.test(calleeName) ||
+  if (CONSUMER_CALLBACK_NAME_PATTERN.test(calleeName)) return true;
+  // console.log/warn/... is diagnostics, not the analytics/persistence
+  // hazard the verb pattern names.
+  if (
+    isNodeOfType(call.callee, "MemberExpression") &&
+    isNodeOfType(call.callee.object, "Identifier") &&
+    call.callee.object.name === "console"
+  ) {
+    return false;
+  }
+  const matchesVerbHeuristic =
     CALLBACK_NAME_PATTERN.test(calleeName) ||
     calleeName.endsWith("Callback") ||
-    SIDE_EFFECT_VERB_PATTERN.test(calleeName)
-  );
+    SIDE_EFFECT_VERB_PATTERN.test(calleeName);
+  if (!matchesVerbHeuristic) return false;
+  // `capturePiece(next, move.to)` / `logMove(next, move)` — a verb-named
+  // helper handed the updater's own local draft is clone-then-mutate, not
+  // an external side effect.
+  const touchesUpdaterLocal = (call.arguments ?? []).some((argument) => {
+    let cursor: EsTreeNode = stripParenExpression(argument as EsTreeNode);
+    while (isNodeOfType(cursor, "MemberExpression")) cursor = cursor.object as EsTreeNode;
+    return isNodeOfType(cursor, "Identifier") && updaterLocalNames.has(cursor.name);
+  });
+  return !touchesUpdaterLocal;
 };
 
 const isImmediateStateUpdaterCall = (node: EsTreeNode): boolean =>
@@ -100,15 +150,46 @@ const findNearestEnclosingFunction = (
   return null;
 };
 
+// Iteration methods that INVOKE their function argument synchronously.
+// Storage (`next.set(k, fn)`, `next.push(fn)`), factories
+// (`createToast(id, fn)`), and wrapper HOFs (`debounce(fn, 300)`) only
+// CARRY the function — it runs later on user interaction, never during a
+// replay.
+const SYNCHRONOUS_ITERATION_METHOD_NAMES = new Set([
+  "map",
+  "filter",
+  "forEach",
+  "flatMap",
+  "reduce",
+  "reduceRight",
+  "some",
+  "every",
+  "find",
+  "findIndex",
+  "findLast",
+  "sort",
+  "toSorted",
+]);
+
 // A nested function executes during the updater only when it is handed
-// directly to a call (`prev.map(fn)`, an IIFE); a function value merely
-// constructed and stored in the next state (a toast `dismiss` handler, a
-// column sorter) runs later on user interaction, never during a replay.
+// to a synchronous iteration method (`prev.map(fn)`) or is an IIFE; a
+// function value merely constructed and stored in the next state (a toast
+// `dismiss` handler, a column sorter) runs later on user interaction,
+// never during a replay.
 const isDirectCallParticipant = (functionNode: EsTreeNode): boolean => {
   const parent = functionNode.parent;
   if (!parent || !isNodeOfType(parent, "CallExpression")) return false;
   if (parent.callee === functionNode) return true;
-  return parent.arguments?.some((argumentNode) => argumentNode === functionNode) === true;
+  if (parent.arguments?.some((argumentNode) => argumentNode === functionNode) !== true) {
+    return false;
+  }
+  const callee = parent.callee;
+  return (
+    isNodeOfType(callee, "MemberExpression") &&
+    !callee.computed &&
+    isNodeOfType(callee.property, "Identifier") &&
+    SYNCHRONOUS_ITERATION_METHOD_NAMES.has(callee.property.name)
+  );
 };
 
 // Collects the statement's effectful calls, peeling awaits, TS wrappers,
@@ -157,6 +238,13 @@ export const noSideEffectInStateUpdaterFunction = defineRule({
 
       const walkBoundary = updater.parent ?? updater;
 
+      const updaterLocalNames = new Set<string>();
+      walkAst(updater, (child: EsTreeNode) => {
+        if (isNodeOfType(child, "VariableDeclarator") && isNodeOfType(child.id, "Identifier")) {
+          updaterLocalNames.add(child.id.name);
+        }
+      });
+
       // Collect the functions that run synchronously during the updater —
       // the updater itself plus nested functions handed directly to a call
       // (`.map(...)`, an IIFE), transitively. Functions merely stored in
@@ -204,7 +292,7 @@ export const noSideEffectInStateUpdaterFunction = defineRule({
         if (!owner || !executedDuringUpdater.has(owner)) return;
         if (!hasValueReturningExecutedContext(owner)) return;
         for (const call of statementCalls) {
-          if (!isImpureSideEffectCall(call)) continue;
+          if (!isImpureSideEffectCall(call, updaterLocalNames)) continue;
           context.report({
             node: call,
             message:
