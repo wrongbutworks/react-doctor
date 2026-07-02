@@ -361,4 +361,271 @@ describe("no-loading-flag-reset-outside-finally", () => {
     );
     expect(result.diagnostics).toHaveLength(1);
   });
+
+  it("stays quiet: Cancelled-flag effect fetch with `if (cancelled) return` guards in catch", () => {
+    const result = runRule(
+      noLoadingFlagResetOutsideFinally,
+      `const Profile = ({ url }) => {
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      setLoading(true);
+      try {
+        const response = await fetch(url);
+        const data = await response.json();
+        if (cancelled) return;
+        setData(data);
+      } catch (error) {
+        if (cancelled) return;
+        setError(error);
+      }
+      setLoading(false);
+    };
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, [url]);
+};`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: AbortController effect with AbortError early-return in catch", () => {
+    const result = runRule(
+      noLoadingFlagResetOutsideFinally,
+      `const Results = ({ query }) => {
+  useEffect(() => {
+    const controller = new AbortController();
+    const run = async () => {
+      setFetching(true);
+      try {
+        const response = await fetch("/api/search?q=" + query, { signal: controller.signal });
+        const payload = await response.json();
+        setResults(payload.items);
+      } catch (error) {
+        if (error.name === "AbortError") return;
+        setError(error);
+      }
+      setFetching(false);
+    };
+    run();
+    return () => controller.abort();
+  }, [query]);
+};`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Pure-delay cooldown await (resolve-only Promise executor)", () => {
+    const result = runRule(
+      noLoadingFlagResetOutsideFinally,
+      `const ResendCodeButton = ({ onResend }) => {
+  const handleResend = async () => {
+    setResendDisabled(true);
+    onResend();
+    await new Promise((resolve) => setTimeout(resolve, 30000));
+    setResendDisabled(false);
+  };
+  return <button disabled={resendDisabled} onClick={handleResend}>Resend</button>;
+};`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: In-file sleep() helper between set and reset", () => {
+    const result = runRule(
+      noLoadingFlagResetOutsideFinally,
+      `const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const DemoForm = () => {
+  const submit = async () => {
+    setSubmitting(true);
+    await sleep(800);
+    setSubmitting(false);
+    setDone(true);
+  };
+};`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: In-file never-rejecting safe-fetch helper (errors folded to null)", () => {
+    const result = runRule(
+      noLoadingFlagResetOutsideFinally,
+      `const fetchItemsSafely = async () => {
+  try {
+    const response = await fetch("/api/items");
+    return await response.json();
+  } catch {
+    return null;
+  }
+};
+
+const ItemList = () => {
+  const load = async () => {
+    setLoading(true);
+    const items = await fetchItemsSafely();
+    setItems(items ?? []);
+    setLoading(false);
+  };
+};`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Go-style [error, data] tuple via in-file to() wrapper (await-to-js idiom)", () => {
+    const result = runRule(
+      noLoadingFlagResetOutsideFinally,
+      `const to = (promise) => promise.then((data) => [null, data]).catch((error) => [error, null]);
+
+const SaveButton = () => {
+  const handleSave = async () => {
+    setSaving(true);
+    const [error, saved] = await to(persistDraft(draft));
+    if (error) {
+      setErrorMessage(error.message);
+    } else {
+      onSaved(saved);
+    }
+    setSaving(false);
+  };
+};`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Redux Toolkit createAsyncThunk dispatch checked via .match()", () => {
+    const result = runRule(
+      noLoadingFlagResetOutsideFinally,
+      `const UsersPanel = () => {
+  const loadUsers = async (searchTerm) => {
+    setLoading(true);
+    const action = await dispatch(fetchUsers(searchTerm));
+    if (fetchUsers.fulfilled.match(action)) {
+      setUsers(action.payload);
+    } else {
+      setLoadError(action.error);
+    }
+    setLoading(false);
+  };
+};`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Supabase { error } result consumed via ternary instead of an if statement", () => {
+    const result = runRule(
+      noLoadingFlagResetOutsideFinally,
+      `const ProfileForm = () => {
+  const handleSave = async () => {
+    setSaving(true);
+    const { error } = await supabase.from("profiles").update({ displayName }).eq("id", userId);
+    setStatusMessage(error ? error.message : "Saved");
+    setSaving(false);
+  };
+};`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Switch-case mutually exclusive branches (start sets, cancel resets)", () => {
+    const result = runRule(
+      noLoadingFlagResetOutsideFinally,
+      `const handleAction = async (action) => {
+  switch (action) {
+    case "start":
+      setProcessing(true);
+      await beginJob();
+      break;
+    case "cancel":
+      await cancelJob();
+      setProcessing(false);
+      break;
+  }
+};`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Redux ActionResult checked via result?.data with else branch (mattermost wild-hit shape)", () => {
+    const result = runRule(
+      noLoadingFlagResetOutsideFinally,
+      `const TestModal = () => {
+  const fetchUsersPage = async (term) => {
+    setLoading(true);
+    const result = await dispatch(searchUsers(term));
+    if (result?.data) {
+      setUsers(result.data.users);
+    } else {
+      setUsers([]);
+    }
+    setLoading(false);
+  };
+};`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Promise.all results checked per-element with for...of instead of .filter", () => {
+    const result = runRule(
+      noLoadingFlagResetOutsideFinally,
+      `const handleBulkDelete = async () => {
+  setDeleting(true);
+  const results = await Promise.all(selectedIds.map((id) => removeItem(id)));
+  const failures = [];
+  for (const entry of results) {
+    if (!entry.success) failures.push(entry.error);
+  }
+  setDeleting(false);
+  if (failures.length > 0) toast.error(failures[0]);
+};`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags a reset after an unguarded rejectable await", () => {
+    const result = runRule(
+      noLoadingFlagResetOutsideFinally,
+      `const Save = () => {
+         const [saving, setSaving] = useState(false);
+         const submit = async () => {
+           setSaving(true);
+           await api.post("/save");
+           setSaving(false);
+         };
+       };`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags when the catch rethrows unconditionally before the reset", () => {
+    const result = runRule(
+      noLoadingFlagResetOutsideFinally,
+      `const Save = () => {
+         const [saving, setSaving] = useState(false);
+         const submit = async () => {
+           setSaving(true);
+           try {
+             await api.post("/save");
+           } catch (error) {
+             throw error;
+           }
+           setSaving(false);
+         };
+       };`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
 });

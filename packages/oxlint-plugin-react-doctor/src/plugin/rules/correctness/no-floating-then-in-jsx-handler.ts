@@ -1,15 +1,15 @@
 import { defineRule } from "../../utils/define-rule.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
-import { findVariableInitializer } from "../../utils/find-variable-initializer.js";
 import { getCallMethodName } from "../../utils/get-call-method-name.js";
+import {
+  isNeverRejectingHelperCall,
+  isNonRejectingPromiseConstruction,
+  isPromiseResolveCall,
+} from "../../utils/is-never-rejecting-expression.js";
 import { getJsxAttributeName } from "../../utils/get-jsx-attribute-name.js";
-import { isFunctionLike } from "../../utils/is-function-like.js";
-import { isInsideTryStatement } from "../../utils/is-inside-try-statement.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
 import { stripParenExpression } from "../../utils/strip-paren-expression.js";
-import { walkAst } from "../../utils/walk-ast.js";
-import { walkOwnFunctionScope } from "../../utils/walk-own-function-scope.js";
 import type { RuleContext } from "../../utils/rule-context.js";
 
 const HANDLER_PROP_PATTERN = /^on[A-Z]/;
@@ -78,121 +78,6 @@ const chainRootExpression = (thenCall: EsTreeNode): EsTreeNode => {
     }
     return cursor;
   }
-};
-
-const subtreeContainsThrow = (root: EsTreeNode): boolean => {
-  let found = false;
-  walkAst(root, (child: EsTreeNode) => {
-    if (found) return false;
-    if (isNodeOfType(child, "ThrowStatement")) {
-      found = true;
-      return false;
-    }
-  });
-  return found;
-};
-
-// `new Promise((resolve) => { ...sync work...; resolve(v) })` used as a
-// sequencing/microtask wrapper: the executor declares no reject parameter
-// and contains no throw, so the promise structurally cannot reject and a
-// `.catch` on the chain would be dead code.
-const isNonRejectingPromiseConstruction = (root: EsTreeNode): boolean => {
-  if (!isNodeOfType(root, "NewExpression")) return false;
-  if (!isNodeOfType(root.callee, "Identifier") || root.callee.name !== "Promise") return false;
-  const executor = root.arguments?.[0]
-    ? stripParenExpression(root.arguments[0] as EsTreeNode)
-    : null;
-  if (
-    !executor ||
-    (!isNodeOfType(executor, "ArrowFunctionExpression") &&
-      !isNodeOfType(executor, "FunctionExpression"))
-  ) {
-    return false;
-  }
-  if ((executor.params?.length ?? 0) >= 2) return false;
-  return !subtreeContainsThrow(executor);
-};
-
-const isPromiseResolveCall = (node: EsTreeNode): boolean =>
-  isNodeOfType(node, "CallExpression") &&
-  isNodeOfType(node.callee, "MemberExpression") &&
-  !node.callee.computed &&
-  isNodeOfType(node.callee.object, "Identifier") &&
-  node.callee.object.name === "Promise" &&
-  isNodeOfType(node.callee.property, "Identifier") &&
-  node.callee.property.name === "resolve";
-
-// A node is rejection-proof inside `fn` when it sits in a try BLOCK whose
-// catch handler exists and does not rethrow.
-const isInsideNonRethrowingTry = (node: EsTreeNode, functionBoundary: EsTreeNode): boolean => {
-  let child: EsTreeNode = node;
-  let ancestor: EsTreeNode | null | undefined = node.parent;
-  while (ancestor && ancestor !== functionBoundary) {
-    if (
-      isNodeOfType(ancestor, "TryStatement") &&
-      ancestor.block === child &&
-      ancestor.handler &&
-      !subtreeContainsThrow(ancestor.handler as EsTreeNode)
-    ) {
-      return true;
-    }
-    child = ancestor;
-    ancestor = ancestor.parent ?? null;
-  }
-  return false;
-};
-
-// A same-file helper whose returned promise structurally cannot reject:
-// an async function whose every await (and throw) is inside a try with a
-// non-rethrowing catch, or a sync function whose every return is a chain
-// carrying its own rejection handler / a `Promise.resolve(...)`. NextChat's
-// `upload` (fetch chain ending in .catch) is the corpus shape.
-const isNeverRejectingHelperCall = (root: EsTreeNode): boolean => {
-  if (!isNodeOfType(root, "CallExpression")) return false;
-  const callee = stripParenExpression(root.callee as EsTreeNode);
-  if (!isNodeOfType(callee, "Identifier")) return false;
-  const binding = findVariableInitializer(callee, callee.name);
-  const helper = binding?.initializer;
-  if (!helper || !isFunctionLike(helper)) return false;
-
-  if (helper.async) {
-    let isRejectionProof = true;
-    let sawSuspension = false;
-    walkOwnFunctionScope(helper, (child: EsTreeNode) => {
-      if (!isRejectionProof) return false;
-      if (isNodeOfType(child, "AwaitExpression")) {
-        sawSuspension = true;
-        if (!isInsideNonRethrowingTry(child, helper)) isRejectionProof = false;
-      }
-      if (
-        isNodeOfType(child, "ThrowStatement") &&
-        !isInsideTryStatement(child, { region: "block", boundary: helper })
-      ) {
-        isRejectionProof = false;
-      }
-    });
-    return isRejectionProof && sawSuspension;
-  }
-
-  const returnedExpressions: EsTreeNode[] = [];
-  if (
-    isNodeOfType(helper, "ArrowFunctionExpression") &&
-    !isNodeOfType(helper.body, "BlockStatement")
-  ) {
-    returnedExpressions.push(stripParenExpression(helper.body as EsTreeNode));
-  } else {
-    walkOwnFunctionScope(helper, (child: EsTreeNode) => {
-      if (isNodeOfType(child, "ReturnStatement") && child.argument) {
-        returnedExpressions.push(stripParenExpression(child.argument as EsTreeNode));
-      }
-    });
-  }
-  return (
-    returnedExpressions.length > 0 &&
-    returnedExpressions.every(
-      (returned) => chainHasRejectionHandler(returned) || isPromiseResolveCall(returned),
-    )
-  );
 };
 
 // Returns the last `.then(...)` call when `expression` is a `.then`-ended

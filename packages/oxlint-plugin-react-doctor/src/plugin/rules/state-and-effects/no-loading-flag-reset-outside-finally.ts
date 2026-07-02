@@ -1,4 +1,9 @@
 import { defineRule } from "../../utils/define-rule.js";
+import {
+  isNeverRejectingHelperCall,
+  isNonRejectingPromiseConstruction,
+  isPromiseResolveCall,
+} from "../../utils/is-never-rejecting-expression.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
 import { isFunctionLike } from "../../utils/is-function-like.js";
@@ -17,7 +22,7 @@ const LOADING_FLAG_SETTER_PATTERN =
 // Property names that mark the awaited call as a never-rejecting result-object
 // wrapper (`const result = await f(); if (result.success) ...`) — errors are
 // folded into the resolved value, so the await cannot skip the trailing reset.
-const RESULT_SHAPE_PROPERTY_NAMES = new Set(["success", "error", "ok"]);
+const RESULT_SHAPE_PROPERTY_NAMES = new Set(["success", "error", "ok", "data"]);
 
 // Array methods whose callback receives each element of the awaited result,
 // so `<results>.filter((entry) => !entry.success)` is a per-element result-shape
@@ -79,7 +84,11 @@ const isNeverRejectingAwaitedExpression = (
   awaitNode: EsTreeNodeOfType<"AwaitExpression">,
 ): boolean => {
   const awaited = unwrapChainExpression(awaitNode.argument);
+  if (!awaited) return false;
+  if (isNonRejectingPromiseConstruction(awaited)) return true;
   if (!isNodeOfType(awaited, "CallExpression")) return false;
+  if (isPromiseResolveCall(awaited)) return true;
+  if (isNeverRejectingHelperCall(awaited)) return true;
   const callee = unwrapChainExpression(awaited.callee);
   if (!isNodeOfType(callee, "MemberExpression") || callee.computed) return false;
   if (!isNodeOfType(callee.property, "Identifier")) return false;
@@ -96,11 +105,30 @@ const isWithinIfTest = (node: EsTreeNode, functionNode: EsTreeNode): boolean => 
   let cursor: EsTreeNode | null | undefined = node.parent;
   while (cursor && cursor !== functionNode) {
     if (isNodeOfType(cursor, "IfStatement")) return cursor.test === child;
+    // `setStatus(error ? error.message : "Saved")` — a ternary test checks
+    // the result exactly like an if test.
+    if (isNodeOfType(cursor, "ConditionalExpression") && cursor.test === child) return true;
+    if (isNodeOfType(cursor, "ConditionalExpression")) return false;
     if (isFunctionLike(cursor)) return false;
     child = cursor;
     cursor = cursor.parent ?? null;
   }
   return false;
+};
+
+// `fetchUsers.fulfilled.match(action)` — the RTK result check reads the
+// awaited binding as a call argument, not through a test position.
+const isMatchCallArgument = (node: EsTreeNode): boolean => {
+  const parent = node.parent;
+  return Boolean(
+    parent &&
+    isNodeOfType(parent, "CallExpression") &&
+    (parent.arguments ?? []).includes(node as never) &&
+    isNodeOfType(parent.callee, "MemberExpression") &&
+    !parent.callee.computed &&
+    isNodeOfType(parent.callee.property, "Identifier") &&
+    parent.callee.property.name === "match",
+  );
 };
 
 // `const result = await f(...)` where the binding (or a destructured
@@ -127,14 +155,53 @@ const isResultObjectCheckedAwait = (
   return false;
 };
 
+const CANCELLATION_GUARD_TEST_PATTERN = /cancel|abort|unmount|mounted|stale|ignore|dispos/i;
+
+// `if (cancelled) return` / `if (error.name === 'AbortError') return` inside
+// the catch only skips the reset on the teardown path, where the component
+// is gone anyway — the live-path reset still runs.
+const isCancellationGuardTest = (test: EsTreeNode): boolean => {
+  let matches = false;
+  walkAst(test, (child: EsTreeNode) => {
+    if (matches) return false;
+    if (isNodeOfType(child, "Identifier") && CANCELLATION_GUARD_TEST_PATTERN.test(child.name)) {
+      matches = true;
+      return false;
+    }
+    if (
+      isNodeOfType(child, "Literal") &&
+      typeof child.value === "string" &&
+      child.value === "AbortError"
+    ) {
+      matches = true;
+      return false;
+    }
+  });
+  return matches;
+};
+
 // A `throw` or `return` in the catch handler's own scope skips the statements
-// after the try, so the handler does not guarantee the trailing reset runs.
+// after the try, so the handler does not guarantee the trailing reset runs —
+// unless the escape is behind a cancellation guard (teardown path only).
 const catchHandlerEscapes = (handler: EsTreeNode): boolean => {
   let didFindEscape = false;
   walkAst(handler, (child: EsTreeNode) => {
+    if (didFindEscape) return false;
     if (child !== handler && isFunctionLike(child)) return false;
     if (isNodeOfType(child, "ThrowStatement") || isNodeOfType(child, "ReturnStatement")) {
-      didFindEscape = true;
+      let cursor: EsTreeNode | null | undefined = child.parent;
+      let isCancellationGuarded = false;
+      while (cursor && cursor !== handler) {
+        if (
+          isNodeOfType(cursor, "IfStatement") &&
+          isCancellationGuardTest(cursor.test as EsTreeNode)
+        ) {
+          isCancellationGuarded = true;
+          break;
+        }
+        cursor = cursor.parent ?? null;
+      }
+      if (!isCancellationGuarded) didFindEscape = true;
     }
   });
   return didFindEscape;
@@ -183,17 +250,37 @@ const collectIfBranches = (
 
 // Source-offset ordering merges mutually exclusive if/else branches; two nodes
 // on opposite branches of the same `if` never execute on the same call.
+const enclosingSwitchCase = (node: EsTreeNode, functionNode: EsTreeNode): EsTreeNode | null => {
+  let cursor: EsTreeNode | null | undefined = node.parent;
+  while (cursor && cursor !== functionNode) {
+    if (isNodeOfType(cursor, "SwitchCase")) return cursor;
+    if (isFunctionLike(cursor)) return null;
+    cursor = cursor.parent ?? null;
+  }
+  return null;
+};
+
 const areOnExclusiveBranches = (
   first: EsTreeNode,
   second: EsTreeNode,
   functionNode: EsTreeNode,
 ): boolean => {
   const firstBranches = collectIfBranches(first, functionNode);
-  if (firstBranches.size === 0) return false;
   const secondBranches = collectIfBranches(second, functionNode);
   for (const [ifNode, branch] of firstBranches) {
     const otherBranch = secondBranches.get(ifNode);
     if (otherBranch && otherBranch !== branch) return true;
+  }
+  // Different cases of the same switch never run on the same dispatch.
+  const firstCase = enclosingSwitchCase(first, functionNode);
+  const secondCase = enclosingSwitchCase(second, functionNode);
+  if (
+    firstCase &&
+    secondCase &&
+    firstCase !== secondCase &&
+    firstCase.parent === secondCase.parent
+  ) {
+    return true;
   }
   return false;
 };
@@ -215,11 +302,55 @@ const recordCheckedResultName = (
   }
   if (
     isNodeOfType(parent, "IfStatement") ||
+    isNodeOfType(parent, "ConditionalExpression") ||
     (isNodeOfType(parent, "UnaryExpression") && parent.operator === "!") ||
     isNodeOfType(parent, "LogicalExpression")
   ) {
     checkedResultNames.add(identifier.name);
+    return;
   }
+  // `fetchUsers.fulfilled.match(action)` — Redux Toolkit's result check.
+  if (
+    isNodeOfType(parent, "CallExpression") &&
+    (parent.arguments ?? []).includes(identifier as never) &&
+    isNodeOfType(parent.callee, "MemberExpression") &&
+    !parent.callee.computed &&
+    isNodeOfType(parent.callee.property, "Identifier") &&
+    parent.callee.property.name === "match"
+  ) {
+    checkedResultNames.add(identifier.name);
+  }
+};
+
+// `for (const entry of results) { if (!entry.success) ... }` — per-element
+// result-shape checks mark the iterated binding as a checked result.
+const recordForOfResultCheck = (
+  forOfNode: EsTreeNodeOfType<"ForOfStatement">,
+  checkedResultNames: Set<string>,
+): void => {
+  const right = unwrapChainExpression(forOfNode.right as EsTreeNode);
+  if (!isNodeOfType(right, "Identifier")) return;
+  const left = forOfNode.left;
+  if (!isNodeOfType(left, "VariableDeclaration")) return;
+  const declarator = left.declarations?.[0];
+  if (!declarator || !isNodeOfType(declarator.id, "Identifier")) return;
+  const elementName = declarator.id.name;
+  let checksResultShape = false;
+  walkAst(forOfNode.body as EsTreeNode, (child: EsTreeNode) => {
+    if (checksResultShape) return false;
+    if (
+      isNodeOfType(child, "MemberExpression") &&
+      !child.computed &&
+      isNodeOfType(child.object, "Identifier") &&
+      child.object.name === elementName &&
+      isNodeOfType(child.property, "Identifier") &&
+      RESULT_SHAPE_PROPERTY_NAMES.has(child.property.name)
+    ) {
+      checksResultShape = true;
+      return false;
+    }
+  });
+  if (checksResultShape) checkedResultNames.add(right.name);
 };
 
 // `<results>.filter((entry) => !entry.success)`-style calls: a result-shape
@@ -280,7 +411,13 @@ const analyzeFunction = (functionNode: EsTreeNode, context: RuleContext): void =
       return;
     }
     if (isNodeOfType(node, "Identifier")) {
-      if (isWithinIfTest(node, functionNode)) recordCheckedResultName(node, checkedResultNames);
+      if (isWithinIfTest(node, functionNode) || isMatchCallArgument(node)) {
+        recordCheckedResultName(node, checkedResultNames);
+      }
+      return;
+    }
+    if (isNodeOfType(node, "ForOfStatement")) {
+      recordForOfResultCheck(node, checkedResultNames);
       return;
     }
     if (!isNodeOfType(node, "CallExpression")) return;
