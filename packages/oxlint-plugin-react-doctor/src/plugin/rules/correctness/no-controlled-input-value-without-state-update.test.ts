@@ -141,4 +141,88 @@ const C = () => <input value="" onChange={(e) => setQuery(e.currentTarget.value)
     expect(result.parseErrors).toEqual([]);
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("stays quiet on the idle branch of a draft/commit row with a state-driven twin", () => {
+    const result = runRule(
+      noControlledInputValueWithoutStateUpdate,
+      `const NewOptionRow = ({ onCreate }) => {
+         const [draft, setDraft] = useState(null);
+         if (draft !== null) {
+           return (
+             <input
+               value={draft}
+               autoFocus
+               onChange={(event) => setDraft(event.target.value)}
+               onBlur={() => {
+                 if (draft.trim() !== "") onCreate(draft.trim());
+                 setDraft(null);
+               }}
+             />
+           );
+         }
+         return (
+           <input value="" placeholder="Add option" onChange={(event) => setDraft(event.target.value)} />
+         );
+       };`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet on a visually-hidden typing-capture proxy input", () => {
+    const result = runRule(
+      noControlledInputValueWithoutStateUpdate,
+      `const TypingCapture = ({ onCharacterTyped, onBackspace }) => (
+         <input
+           className="sr-only"
+           autoFocus
+           autoComplete="off"
+           aria-label="Typing area"
+           value=""
+           onKeyDown={(event) => {
+             if (event.key === "Backspace") onBackspace();
+           }}
+           onChange={(event) => onCharacterTyped(event.target.value)}
+         />
+       );`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet on a honeypot decoy field pinned to the empty string", () => {
+    const result = runRule(
+      noControlledInputValueWithoutStateUpdate,
+      `const ContactForm = ({ onSubmit }) => {
+         const [isLikelyBot, setIsLikelyBot] = useState(false);
+         return (
+           <form onSubmit={(event) => { event.preventDefault(); if (!isLikelyBot) onSubmit(); }}>
+             <input
+               type="text"
+               name="company_website"
+               tabIndex={-1}
+               autoComplete="off"
+               aria-hidden="true"
+               style={{ position: "absolute", left: "-10000px" }}
+               value=""
+               onChange={() => setIsLikelyBot(true)}
+             />
+             <button type="submit">Send</button>
+           </form>
+         );
+       };`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags a lone frozen input even when the component renders another literal-value input", () => {
+    const result = runRule(
+      noControlledInputValueWithoutStateUpdate,
+      `const Search = ({ onSubmit }) => (
+         <div>
+           <input value="" onChange={(event) => onSubmit(event.target.value)} />
+           <input value="fixed" onChange={() => {}} />
+         </div>
+       );`,
+    );
+    expect(result.diagnostics).toHaveLength(2);
+  });
 });

@@ -3,9 +3,11 @@ import { findJsxAttribute } from "../../utils/find-jsx-attribute.js";
 import { hasJsxSpreadAttribute } from "../../utils/has-jsx-spread-attribute.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
+import { isFunctionLike } from "../../utils/is-function-like.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
 import { stripParenExpression } from "../../utils/strip-paren-expression.js";
 import type { RuleContext } from "../../utils/rule-context.js";
+import { walkAst } from "../../utils/walk-ast.js";
 
 const CONTROLLED_INPUT_TAGS = new Set(["input", "textarea"]);
 
@@ -52,6 +54,69 @@ const getStaticStringAttributeValue = (
   return null;
 };
 
+const HIDDEN_CLASS_PATTERN = /sr-only|visually-hidden|offscreen/i;
+
+// Deliberately-empty controlled inputs are invisible or unfocusable by
+// design: honeypot decoys (`tabIndex={-1}` + `aria-hidden`), and hidden
+// typing-capture proxies (`className="sr-only"`) reset to "" after every
+// change so each onChange delivers exactly the new character. Typing "doing
+// nothing" is their contract, not a bug.
+const hasHiddenOrDecoySignal = (attributes: EsTreeNode[]): boolean => {
+  const ariaHidden = findJsxAttribute(attributes, "aria-hidden");
+  if (ariaHidden) {
+    const staticValue = getStaticStringAttributeValue(ariaHidden);
+    if (ariaHidden.value === null || staticValue === "true") return true;
+  }
+  const tabIndex = findJsxAttribute(attributes, "tabIndex");
+  if (tabIndex?.value && isNodeOfType(tabIndex.value, "JSXExpressionContainer")) {
+    const expression = stripParenExpression(tabIndex.value.expression);
+    if (
+      isNodeOfType(expression, "UnaryExpression") &&
+      expression.operator === "-" &&
+      isNodeOfType(expression.argument, "Literal") &&
+      expression.argument.value === 1
+    ) {
+      return true;
+    }
+  }
+  const className = findJsxAttribute(attributes, "className");
+  if (className) {
+    const staticValue = getStaticStringAttributeValue(className);
+    if (staticValue !== null && HIDDEN_CLASS_PATTERN.test(staticValue)) return true;
+  }
+  return false;
+};
+
+// A draft/commit branch pair renders a state-driven twin of the flagged
+// element at the same tree position (`draft !== null ? <input value={draft}>
+// : <input value="">`): the empty-literal branch is the idle state whose
+// onChange swaps in the live branch, so typing works. Exempt the literal
+// input when a sibling input/textarea in the same component reads its value
+// from a non-literal expression.
+const componentRendersStateDrivenSibling = (
+  flaggedElement: EsTreeNodeOfType<"JSXOpeningElement">,
+): boolean => {
+  let enclosingFunction: EsTreeNode | null = flaggedElement.parent ?? null;
+  while (enclosingFunction && !isFunctionLike(enclosingFunction)) {
+    enclosingFunction = enclosingFunction.parent ?? null;
+  }
+  if (!enclosingFunction) return false;
+  let foundSibling = false;
+  walkAst(enclosingFunction, (child) => {
+    if (foundSibling) return false;
+    if (child === flaggedElement || !isNodeOfType(child, "JSXOpeningElement")) return;
+    if (!isNodeOfType(child.name, "JSXIdentifier") || !CONTROLLED_INPUT_TAGS.has(child.name.name)) {
+      return;
+    }
+    const siblingValue = findJsxAttribute(child.attributes ?? [], "value");
+    if (siblingValue && !isLiteralValueAttribute(siblingValue)) {
+      foundSibling = true;
+      return false;
+    }
+  });
+  return foundSibling;
+};
+
 export const noControlledInputValueWithoutStateUpdate = defineRule({
   id: "no-controlled-input-value-without-state-update",
   title: "Controlled input value is a fixed literal",
@@ -82,6 +147,9 @@ export const noControlledInputValueWithoutStateUpdate = defineRule({
           if (inputType === null || VALUE_BYPASS_INPUT_TYPES.has(inputType)) return;
         }
       }
+
+      if (hasHiddenOrDecoySignal(attributes)) return;
+      if (componentRendersStateDrivenSibling(node)) return;
 
       context.report({
         node,
