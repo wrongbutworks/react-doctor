@@ -500,4 +500,146 @@ describe("no-set-state-after-await-in-effect", () => {
     );
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("stays quiet on a module-level in-flight mutex set before the await (medusa shape)", () => {
+    const result = runRule(
+      noSetStateAfterAwaitInEffect,
+      `let IS_REQUEST_RUNNING = false;
+       const ClaimCreate = ({ preview, createClaim }) => {
+         const [activeClaimId, setActiveClaimId] = useState(null);
+         useEffect(() => {
+           async function run() {
+             if (IS_REQUEST_RUNNING || !preview) return;
+             IS_REQUEST_RUNNING = true;
+             try {
+               const claim = await createClaim({ order_id: preview.id });
+               setActiveClaimId(claim.id);
+             } finally {
+               IS_REQUEST_RUNNING = false;
+             }
+           }
+           run();
+         }, [preview, createClaim]);
+       };`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet on a useState in-flight latch toggled around the await (outline shape)", () => {
+    const result = runRule(
+      noSetStateAfterAwaitInEffect,
+      `const DefaultCollectionSelect = ({ collections }) => {
+         const [fetching, setFetching] = useState(false);
+         const [fetchError, setFetchError] = useState(null);
+         useEffect(() => {
+           async function load() {
+             if (fetching || fetchError) return;
+             setFetching(true);
+             try {
+               await collections.fetchAll();
+             } catch (error) {
+               setFetchError(error);
+             } finally {
+               setFetching(false);
+             }
+           }
+           load();
+         }, [fetching, fetchError, collections]);
+       };`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet when a run-once ref guard sits in the effect callback prologue (memos shape)", () => {
+    const result = runRule(
+      noSetStateAfterAwaitInEffect,
+      `const AuthCallback = ({ searchParams }) => {
+         const handledRef = useRef(false);
+         const [message, setMessage] = useState("");
+         useEffect(() => {
+           if (handledRef.current) return;
+           handledRef.current = true;
+           (async () => {
+             const result = await exchangeToken(searchParams);
+             setMessage(result.status);
+           })();
+         }, [searchParams]);
+       };`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet on a merge-shaped functional updater keyed by a closed-over dep (mastodon shape)", () => {
+    const result = runRule(
+      noSetStateAfterAwaitInEffect,
+      `const LocaleLoader = ({ currentLocale }) => {
+         const [messages, setMessages] = useState({});
+         useEffect(() => {
+           async function loadLocale() {
+             const localeFile = await import(\`./locales/\${currentLocale}.json\`);
+             setMessages((prev) => ({ ...prev, [currentLocale]: localeFile }));
+           }
+           loadLocale();
+         }, [currentLocale]);
+       };`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet when deps are only stable-result hooks like useNavigate (NextChat shape)", () => {
+    const result = runRule(
+      noSetStateAfterAwaitInEffect,
+      `const McpMarket = () => {
+         const navigate = useNavigate();
+         const [enabled, setEnabled] = useState(false);
+         useEffect(() => {
+           const checkMcp = async () => {
+             const config = await getServerConfig();
+             if (!config.enableMcp) {
+               navigate("/home");
+               return;
+             }
+             setEnabled(true);
+           };
+           checkMcp();
+         }, [navigate]);
+       };`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags a replace-shaped functional updater after await", () => {
+    const result = runRule(
+      noSetStateAfterAwaitInEffect,
+      `const Profile = ({ userId }) => {
+         const [profile, setProfile] = useState(null);
+         useEffect(() => {
+           async function load() {
+             const fetched = await fetchProfile(userId);
+             setProfile(() => fetched);
+           }
+           load();
+         }, [userId]);
+       };`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags a pre-await early return that is narrowing, not a latch", () => {
+    const result = runRule(
+      noSetStateAfterAwaitInEffect,
+      `const Note = ({ note }) => {
+         const [body, setBody] = useState(null);
+         useEffect(() => {
+           async function load() {
+             if (!note) return;
+             const data = await fetchBody(note.id);
+             setBody(data);
+           }
+           load();
+         }, [note]);
+       };`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
 });
