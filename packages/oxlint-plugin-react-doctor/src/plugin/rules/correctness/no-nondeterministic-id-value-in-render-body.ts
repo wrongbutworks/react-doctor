@@ -73,9 +73,13 @@ const isImpureIdGeneratorCall = (node: EsTreeNode): boolean => {
       isUnshadowedLibraryReference(callee.object)
     );
   }
-  // `_.uniqueId()` / `lodash.uniqueId()` — the distinctive method name
-  // is enough; the object is a lodash-shaped namespace.
-  if (propertyName === "uniqueId") return true;
+  // `_.uniqueId()` / `lodash.uniqueId()` — but only when the object is a
+  // library namespace (unresolved global or import binding). A local
+  // binding (`const fieldIds = useFieldIds(); fieldIds.uniqueId("email")`)
+  // is a same-file factory whose determinism the name does not decide.
+  if (propertyName === "uniqueId") {
+    return isNodeOfType(callee.object, "Identifier") && isUnshadowedLibraryReference(callee.object);
+  }
   // `shortid.generate()`
   if (propertyName === "generate") {
     return isNodeOfType(callee.object, "Identifier") && callee.object.name === "shortid";
@@ -198,6 +202,24 @@ const subtreeReferencesBinding = (
   return found;
 };
 
+// JSX handed to `renderToStaticMarkup`/`renderToString` inside a handler
+// is serialized atomically per call and never mounted — the id and its
+// `url(#...)` reference are always emitted from the same value, so
+// per-render drift cannot split them.
+const isInsideMarkupSerializationCall = (node: EsTreeNode, boundary: EsTreeNode): boolean => {
+  let ancestor: EsTreeNode | null | undefined = node.parent;
+  while (ancestor && ancestor !== boundary) {
+    if (
+      isNodeOfType(ancestor, "CallExpression") &&
+      /^renderTo(?:StaticMarkup|String)$/.test(getCalleeName(ancestor) ?? "")
+    ) {
+      return true;
+    }
+    ancestor = ancestor.parent ?? null;
+  }
+  return false;
+};
+
 // True when the binding is threaded into an identity-reference JSX
 // attribute (`id` / `htmlFor` / `aria-*` / an SVG `clip-path` /
 // `url(#...)` paint) anywhere inside the component/hook body.
@@ -213,6 +235,7 @@ const bindingFlowsIntoIdentityReferenceSink = (
     const isSink =
       IDENTITY_SINK_ATTRIBUTE_NAMES.has(attributeName) || attributeName.startsWith("aria-");
     if (!isSink) return;
+    if (isInsideMarkupSerializationCall(child, functionNode)) return;
     const value = isNodeOfType(child, "JSXAttribute") ? (child.value as EsTreeNode | null) : null;
     if (value && subtreeReferencesBinding(value, bindingIdentifier)) {
       flows = true;

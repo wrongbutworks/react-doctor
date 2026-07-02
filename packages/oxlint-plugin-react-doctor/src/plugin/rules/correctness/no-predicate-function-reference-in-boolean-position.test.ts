@@ -277,4 +277,30 @@ describe("no-predicate-function-reference-in-boolean-position", () => {
     );
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("does not flag an existence guard whose branch registers the reference", () => {
+    const result = runRule(
+      noPredicateFunctionReferenceInBooleanPosition,
+      `function isSessionValid() { return Date.now() < session.expiresAt; }
+      const guards = [];
+      if (isSessionValid) {
+        guards.push(isSessionValid);
+      }
+      export { guards };`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag ternary value-selection passing the reference through", () => {
+    const result = runRule(
+      noPredicateFunctionReferenceInBooleanPosition,
+      `function isRowSelectable() { return !table.locked; }
+      export function Grid(props) {
+        return <DataGrid rows={props.rows} isRowSelectable={isRowSelectable ? isRowSelectable : undefined} />;
+      }`,
+      { filename: "grid.tsx" },
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
 });

@@ -449,4 +449,125 @@ describe("no-mutating-array-method-on-prop-or-hook-result", () => {
     );
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("does not flag WAAPI Animation.reverse() held in state", () => {
+    const result = runRule(
+      noMutatingArrayMethodOnPropOrHookResult,
+      `function AccordionSection({ label, children }) {
+        const contentRef = useRef(null);
+        const [animation, setAnimation] = useState(null);
+        useEffect(() => {
+          const instance = contentRef.current.animate([{ height: "0px" }, { height: "auto" }], { duration: 180 });
+          instance.pause();
+          setAnimation(instance);
+          return () => instance.cancel();
+        }, []);
+        const handleCollapse = () => { animation?.reverse(); };
+        return <button onClick={handleCollapse}>{label}</button>;
+      }`,
+      { filename: "accordion.tsx" },
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a GSAP timeline prop with play/reverse controls", () => {
+    const result = runRule(
+      noMutatingArrayMethodOnPropOrHookResult,
+      `function TimelineControls({ timeline }) {
+        return (
+          <div>
+            <button onClick={() => timeline.play()}>Play</button>
+            <button onClick={() => timeline.reverse()}>Reverse</button>
+          </div>
+        );
+      }`,
+      { filename: "controls.tsx" },
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag splice on a MobX useLocalObservable store", () => {
+    const result = runRule(
+      noMutatingArrayMethodOnPropOrHookResult,
+      `const TodoList = observer(() => {
+        const store = useLocalObservable(() => ({ todos: [] }));
+        const removeTodo = (index) => { store.todos.splice(index, 1); };
+        return <button onClick={() => removeTodo(0)}>remove</button>;
+      });`,
+      { filename: "todos.tsx" },
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag splice on a SyncedStore CRDT proxy", () => {
+    const result = runRule(
+      noMutatingArrayMethodOnPropOrHookResult,
+      `function TodoList() {
+        const state = useSyncedStore(globalStore);
+        const removeTodo = (index) => { state.todos.splice(index, 1); };
+        return null;
+      }`,
+      { filename: "todos.tsx" },
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag the subscribe/unsubscribe registry splice in effect cleanup", () => {
+    const result = runRule(
+      noMutatingArrayMethodOnPropOrHookResult,
+      `function useScrollLock(id) {
+        const locks = useContext(ScrollLockContext);
+        useEffect(() => {
+          locks.push(id);
+          return () => {
+            locks.splice(locks.indexOf(id), 1);
+          };
+        }, [locks, id]);
+      }`,
+      { filename: "use-scroll-lock.ts" },
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag sort on props in a file importing Immutable.js", () => {
+    const result = runRule(
+      noMutatingArrayMethodOnPropOrHookResult,
+      `import { List } from "immutable";
+      function Tags({ items }) {
+        const sorted = items.sort();
+        return <div>{sorted.join(", ")}</div>;
+      }`,
+      { filename: "tags.tsx" },
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a sort-strategy object sorting rows passed as data", () => {
+    const result = runRule(
+      noMutatingArrayMethodOnPropOrHookResult,
+      `function DataTable({ rows, sortStrategy }) {
+        const sortedRows = sortStrategy.sort(rows);
+        return <ul>{sortedRows.map((row) => <li key={row.id}>{row.label}</li>)}</ul>;
+      }`,
+      { filename: "table.tsx" },
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags splice inside effect cleanup with no paired registration", () => {
+    const result = runRule(
+      noMutatingArrayMethodOnPropOrHookResult,
+      `function useTrim(items) {
+        const rows = useContext(RowsContext);
+        useEffect(() => {
+          return () => {
+            rows.splice(0, 1);
+          };
+        }, [rows]);
+      }`,
+      { filename: "use-trim.ts" },
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
 });

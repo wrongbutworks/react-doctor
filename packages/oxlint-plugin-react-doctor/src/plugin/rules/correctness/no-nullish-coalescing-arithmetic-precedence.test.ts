@@ -118,4 +118,81 @@ describe("no-nullish-coalescing-arithmetic-precedence", () => {
     const result = runRule(noNullishCoalescingArithmeticPrecedence, `const r = a ?? -1 * 60;`);
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("does not flag a literal coefficient times a unit constant (5 * MINUTE_MS)", () => {
+    const result = runRule(
+      noNullishCoalescingArithmeticPrecedence,
+      `import { MINUTE_MS } from "./constants"; const staleTime = options.staleTimeMs ?? 5 * MINUTE_MS;`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a literal coefficient times a namespaced unit (30 * Day.seconds)", () => {
+    const result = runRule(
+      noNullishCoalescingArithmeticPrecedence,
+      `const refreshTokenLifetime = toOptionalNumber(env.REFRESH_TOKEN_LIFETIME) ?? 30 * Day.seconds;`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag an inner-parenthesized equal-share percent ((1 / n) * 100)", () => {
+    const result = runRule(
+      noNullishCoalescingArithmeticPrecedence,
+      `const widthPercent = columnWidthPercent ?? (1 / columnCount) * 100;`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag an equal-share fraction default (1 / n)", () => {
+    const result = runRule(
+      noNullishCoalescingArithmeticPrecedence,
+      `nextSizes.push(sizeList[idx] ?? 1 / node.children.length);`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a months-to-year scaling of a call result (12 * fn())", () => {
+    const result = runRule(
+      noNullishCoalescingArithmeticPrecedence,
+      `const annualPrice = annualProduct?.price ?? 12 * minimumTransactionAmount(currency);`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag the full-circle canvas default (2 * Math.PI)", () => {
+    const result = runRule(
+      noNullishCoalescingArithmeticPrecedence,
+      `context.arc(centerX, centerY, radius, 0, endAngle ?? 2 * Math.PI);`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a computed percent fallback (100 * loaded / total)", () => {
+    const result = runRule(
+      noNullishCoalescingArithmeticPrecedence,
+      `const percent = props.value ?? 100 * bytesLoaded / bytesTotal;`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag an exponential-backoff fallback (2 ** attempt * base)", () => {
+    const result = runRule(
+      noNullishCoalescingArithmeticPrecedence,
+      `const delayMs = retryAfterMs ?? 2 ** attempt * BASE_RETRY_DELAY_MS;`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a complement-percent fallback (100 - successRate)", () => {
+    const result = runRule(
+      noNullishCoalescingArithmeticPrecedence,
+      `const errorRate = Math.max(0, Math.min(100, workflow.errorPropagation?.errorRate ?? 100 - successRate));`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags a swallowed identity coefficient (1 * y)", () => {
+    const result = runRule(noNullishCoalescingArithmeticPrecedence, `const r = x ?? 1 * y;`);
+    expect(result.diagnostics).toHaveLength(1);
+  });
 });

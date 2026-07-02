@@ -216,4 +216,45 @@ describe("no-nondeterministic-id-value-in-render-body", () => {
     );
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("does not flag a useId-derived factory whose method is named uniqueId", () => {
+    const result = runRule(
+      noNondeterministicIdValueInRenderBody,
+      `const useFieldIds = () => {
+        const baseId = useId();
+        return useMemo(() => ({ uniqueId: (fieldName) => baseId + "-" + fieldName }), [baseId]);
+      };
+      const SignupForm = () => {
+        const fieldIds = useFieldIds();
+        const emailFieldId = fieldIds.uniqueId("email");
+        return (<><label htmlFor={emailFieldId}>Email</label><input id={emailFieldId} type="email" /></>);
+      };`,
+      { filename: "signup.tsx" },
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag an id used only inside handler-serialized static markup", () => {
+    const result = runRule(
+      noNondeterministicIdValueInRenderBody,
+      `import { nanoid } from "nanoid";
+      import { renderToStaticMarkup } from "react-dom/server";
+      const ChartExportButton = ({ points }) => {
+        const exportGradientId = \`export-grad-\${nanoid()}\`;
+        const handleDownload = () => {
+          const svgMarkup = renderToStaticMarkup(
+            <svg viewBox="0 0 100 40">
+              <defs><linearGradient id={exportGradientId}><stop offset="0" stopColor="#09f" /></linearGradient></defs>
+              <polyline fill={\`url(#\${exportGradientId})\`} points={points} />
+            </svg>,
+          );
+          download(svgMarkup);
+        };
+        return <button onClick={handleDownload}>Export</button>;
+      };`,
+      { filename: "chart-export.tsx" },
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
 });

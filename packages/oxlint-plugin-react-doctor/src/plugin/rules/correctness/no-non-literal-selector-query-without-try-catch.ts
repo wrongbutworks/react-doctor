@@ -264,9 +264,9 @@ const isShapeValidatingCall = (
 
 // The root `expect(...)` call of an assertion chain (`expect(hash).toBe(…)`),
 // or null when the chain roots elsewhere or carries no chained assertion.
-const getExpectChainRootCall = (node: EsTreeNode): EsTreeNode | null => {
+const getExpectChainRootCall = (node: EsTreeNode): EsTreeNodeOfType<"CallExpression"> | null => {
   if (!isNodeOfType(node, "CallExpression")) return null;
-  let root: EsTreeNode = node;
+  let root: EsTreeNodeOfType<"CallExpression"> = node;
   while (true) {
     const callee: EsTreeNode = stripParenExpression(root.callee as EsTreeNode);
     if (isNodeOfType(callee, "MemberExpression")) {
@@ -291,7 +291,7 @@ const isTaintPinningAssertion = (
 ): boolean => {
   const rootCall = getExpectChainRootCall(node);
   if (!rootCall) return false;
-  return (rootCall.arguments ?? []).some((argument) =>
+  return (rootCall.arguments ?? []).some((argument: EsTreeNode) =>
     someNodeInSubtree(argument, referencesTaintedValue),
   );
 };
@@ -460,7 +460,7 @@ const isInsideCatchGuardedPromiseCallback = (node: EsTreeNode): boolean => {
           isNodeOfType(chainLink.parent.parent, "CallExpression")
         ) {
           const linkName = getStaticMemberPropertyName(chainLink.parent);
-          const linkCall = chainLink.parent.parent;
+          const linkCall: EsTreeNode = chainLink.parent.parent;
           if (linkName === "catch") return true;
           if (linkName === "then" && (linkCall.arguments?.length ?? 0) >= 2) return true;
           chainLink = linkCall;

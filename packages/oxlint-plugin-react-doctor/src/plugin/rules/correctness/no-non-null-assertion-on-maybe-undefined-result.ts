@@ -208,6 +208,10 @@ const regexComparableKey = (node: EsTreeNode): string | null => {
 // Walks up through `!`, `&&`/`||`, and parens: is this expression consumed
 // as a branch test (`if`/ternary/`while`)? A `.match(...)` in test position
 // is the guard of a validate-then-extract, not an extraction.
+// `ParenthesizedExpression` is a real oxc runtime node absent from the
+// TSESTree union, so it is matched by `.type` string, not `isNodeOfType`.
+const TRANSPARENT_TEST_WRAPPER_TYPES = new Set<string>(["ParenthesizedExpression"]);
+
 const isInBranchTestPosition = (node: EsTreeNode): boolean => {
   let child: EsTreeNode = node;
   let parent = child.parent ?? null;
@@ -215,7 +219,7 @@ const isInBranchTestPosition = (node: EsTreeNode): boolean => {
     if (
       isNodeOfType(parent, "LogicalExpression") ||
       (isNodeOfType(parent, "UnaryExpression") && parent.operator === "!") ||
-      parent.type === "ParenthesizedExpression" ||
+      TRANSPARENT_TEST_WRAPPER_TYPES.has(parent.type) ||
       isNodeOfType(parent, "ChainExpression")
     ) {
       child = parent;

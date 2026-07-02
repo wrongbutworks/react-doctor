@@ -28,6 +28,29 @@ const REORDERING_ARRAY_METHODS = new Set(["sort", "reverse", "splice"]);
 // `permutations`) are not exempted.
 const MUTATION_SAFE_WORDS = new Set(["draft", "mutable", "mutation"]);
 
+// `reverse()` / `sort()` also live on playback controllers (WAAPI
+// Animation, GSAP Timeline/Tween) and sort-strategy objects, where they
+// control playback direction or take the DATA as an argument — not
+// Array.prototype mutators. Receivers named for those shapes stay quiet.
+const NON_ARRAY_RECEIVER_NAME_PATTERN = /anim|timeline|tween|player|motion|strateg|sorter/i;
+
+// Playback-control methods that never exist on arrays: a sibling
+// `animation.pause()` / `timeline.play()` on the same receiver proves the
+// `.reverse()` is playback control.
+const PLAYBACK_SIBLING_METHOD_NAMES = new Set([
+  "play",
+  "pause",
+  "cancel",
+  "finish",
+  "resume",
+  "restart",
+]);
+
+// Store hooks whose entire API is mutate-the-proxy: MobX observables,
+// SyncedStore/Yjs CRDT proxies, valtio proxies. Splicing them IS the
+// documented update mechanism — a spread copy would silently break sync.
+const MUTABLE_STORE_HOOK_PATTERN = /^use(?:LocalObservable|LocalStore|SyncedStore|Proxy)$/;
+
 const ALIAS_RESOLUTION_DEPTH_LIMIT = 3;
 
 const identifierWords = (name: string): string[] =>
@@ -81,6 +104,109 @@ const isHookCallExpression = (node: EsTreeNode): boolean => {
   if (!isNodeOfType(node, "CallExpression")) return false;
   const calleeName = getCalleeName(node);
   return calleeName !== null && isReactHookName(calleeName);
+};
+
+const isMutableStoreHookCall = (node: EsTreeNode | null): boolean => {
+  if (!node || !isNodeOfType(node, "CallExpression")) return false;
+  const calleeName = getCalleeName(node);
+  return calleeName !== null && MUTABLE_STORE_HOOK_PATTERN.test(calleeName);
+};
+
+// The same receiver gets playback-control calls (`animation.pause()`,
+// `timeline.play()`) somewhere in the file — it is a WAAPI Animation /
+// GSAP Timeline, not an array.
+const scopeShowsPlaybackSiblingCall = (
+  callNode: EsTreeNode,
+  rootIdentifierName: string,
+): boolean => {
+  let programRoot: EsTreeNode = callNode;
+  while (programRoot.parent) programRoot = programRoot.parent;
+  let proven = false;
+  walkAst(programRoot, (child) => {
+    if (proven) return false;
+    if (
+      isNodeOfType(child, "CallExpression") &&
+      isNodeOfType(child.callee, "MemberExpression") &&
+      !child.callee.computed &&
+      isNodeOfType(child.callee.property, "Identifier") &&
+      PLAYBACK_SIBLING_METHOD_NAMES.has(child.callee.property.name) &&
+      rootIdentifierNode(stripParenExpression(child.callee.object as EsTreeNode))?.name ===
+        rootIdentifierName
+    ) {
+      proven = true;
+      return false;
+    }
+  });
+  return proven;
+};
+
+// `useEffect(() => { locks.push(id); return () => { locks.splice(...); }; })`
+// — the subscribe/unsubscribe registry idiom: the mutation lives in the
+// effect's cleanup and the effect body registered into the same container.
+const isRegistryCleanupMutation = (callNode: EsTreeNode, rootIdentifierName: string): boolean => {
+  let cleanupFunction: EsTreeNode | null = null;
+  let ancestor: EsTreeNode | null | undefined = callNode.parent;
+  while (ancestor) {
+    if (isFunctionLike(ancestor)) {
+      cleanupFunction = ancestor;
+      break;
+    }
+    ancestor = ancestor.parent ?? null;
+  }
+  if (!cleanupFunction) return false;
+  let cursor: EsTreeNode | null | undefined = cleanupFunction.parent;
+  while (cursor && !isNodeOfType(cursor, "ReturnStatement")) {
+    if (isFunctionLike(cursor)) return false;
+    cursor = cursor.parent ?? null;
+  }
+  if (!cursor) return false;
+  let effectCallback: EsTreeNode | null | undefined = cursor.parent;
+  while (effectCallback && !isFunctionLike(effectCallback)) {
+    effectCallback = effectCallback.parent ?? null;
+  }
+  if (!effectCallback) return false;
+  const effectCall = effectCallback.parent;
+  if (
+    !effectCall ||
+    !isNodeOfType(effectCall, "CallExpression") ||
+    !(effectCall.arguments ?? []).includes(effectCallback as never)
+  ) {
+    return false;
+  }
+  const effectName = getCalleeName(effectCall);
+  if (!effectName || !/^use(?:Layout|Insertion)?Effect$/.test(effectName)) return false;
+  let didRegister = false;
+  walkAst(effectCallback, (child) => {
+    if (didRegister) return false;
+    if (child === cleanupFunction) return false;
+    if (
+      isNodeOfType(child, "CallExpression") &&
+      isNodeOfType(child.callee, "MemberExpression") &&
+      !child.callee.computed &&
+      isNodeOfType(child.callee.property, "Identifier") &&
+      (child.callee.property.name === "push" || child.callee.property.name === "add") &&
+      rootIdentifierNode(stripParenExpression(child.callee.object as EsTreeNode))?.name ===
+        rootIdentifierName
+    ) {
+      didRegister = true;
+      return false;
+    }
+  });
+  return didRegister;
+};
+
+// Immutable.js codebases pass persistent `List`s through props and hooks;
+// their `.sort()`/`.reverse()`/`.splice()` are immutable by construction.
+// The engine is type-unaware, so abstain for the whole file when it
+// imports the library.
+const fileImportsImmutableJs = (node: EsTreeNode): boolean => {
+  let programRoot: EsTreeNode = node;
+  while (programRoot.parent) programRoot = programRoot.parent;
+  if (!isNodeOfType(programRoot, "Program")) return false;
+  return programRoot.body.some(
+    (statement) =>
+      isNodeOfType(statement, "ImportDeclaration") && statement.source.value === "immutable",
+  );
 };
 
 // Stops at function boundaries so a callback parameter nested inside a hook
@@ -239,6 +365,15 @@ const resolveSharedArraySource = (
   if (!reachesThroughMemberAccess && isBoundThroughRestElement(binding)) return null;
   if (isDerivedFromHookCall(binding)) {
     if (reachesThroughMemberAccess && isSetterlessUseStateBinding(binding)) return null;
+    const declaratorInit = declaratorInitFor(binding);
+    if (
+      isMutableStoreHookCall(
+        binding.initializer ? stripParenExpression(binding.initializer) : null,
+      ) ||
+      isMutableStoreHookCall(declaratorInit ? stripParenExpression(declaratorInit) : null)
+    ) {
+      return null;
+    }
     return "hook-result";
   }
   // A parameter of a React component (or hook) is a prop — shared with
@@ -283,6 +418,15 @@ export const noMutatingArrayMethodOnPropOrHookResult = defineRule({
       if (receiverReachesThroughRefCurrent(receiver)) return;
       const rootIdentifier = rootIdentifierNode(receiver);
       if (!rootIdentifier) return;
+      if (NON_ARRAY_RECEIVER_NAME_PATTERN.test(rootIdentifier.name)) return;
+      if (scopeShowsPlaybackSiblingCall(node as EsTreeNode, rootIdentifier.name)) return;
+      if (
+        callee.property.name === "splice" &&
+        isRegistryCleanupMutation(node as EsTreeNode, rootIdentifier.name)
+      ) {
+        return;
+      }
+      if (fileImportsImmutableJs(node as EsTreeNode)) return;
 
       const receiverIsMemberAccess = isNodeOfType(receiver, "MemberExpression");
       const source = resolveSharedArraySource(rootIdentifier, node, receiverIsMemberAccess, 0);

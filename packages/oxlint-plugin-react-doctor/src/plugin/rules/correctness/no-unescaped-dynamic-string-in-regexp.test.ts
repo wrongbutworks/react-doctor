@@ -206,4 +206,98 @@ describe("no-unescaped-dynamic-string-in-regexp", () => {
     );
     expect(result.diagnostics).toHaveLength(1);
   });
+
+  it("does not flag recompiling a RegExp object to add a flag", () => {
+    const result = runRule(
+      noUnescapedDynamicStringInRegexp,
+      `const globalPattern = searchPattern.global
+        ? searchPattern
+        : new RegExp(searchPattern, searchPattern.flags + "g");`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag per-element escapeRegExp inside a .map callback", () => {
+    const result = runRule(
+      noUnescapedDynamicStringInRegexp,
+      `const buildHighlightMatcher = (searchWords) =>
+        new RegExp(searchWords.map((word) => escapeRegExp(word)).join("|"), "gi");`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag point-free .map(escapeRegExp)", () => {
+    const result = runRule(
+      noUnescapedDynamicStringInRegexp,
+      `const matcher = new RegExp(searchTerms.map(escapeRegExp).join("|"), "gi");`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag the MDN replace-escape inside a .map callback", () => {
+    const result = runRule(
+      noUnescapedDynamicStringInRegexp,
+      `const buildKeywordFilter = (keywords) =>
+        new RegExp(
+          keywords
+            .map((keyword) => {
+              const escapedKeyword = keyword.replace(/[.*+?^$\\{\\}()|[\\]\\\\]/g, "\\$&");
+              return "\\b" + escapedKeyword + "\\b";
+            })
+            .join("|"),
+          "i",
+        );`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a fully-literal keyword-table alternation", () => {
+    const result = runRule(
+      noUnescapedDynamicStringInRegexp,
+      `const SQL_KEYWORDS = ["SELECT", "FROM", "WHERE", "JOIN", "LIMIT"];
+      const keywordPattern = new RegExp("\\b(" + SQL_KEYWORDS.join("|") + ")\\b", "gi");`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag .filter(Boolean) in a blessed .source composition", () => {
+    const result = runRule(
+      noUnescapedDynamicStringInRegexp,
+      `const combinedPattern = new RegExp(
+        [EMAIL_REGEX.source, PHONE_REGEX.source].filter(Boolean).join("|"),
+        "g",
+      );`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag an in-file escape helper with a non-matching name", () => {
+    const result = runRule(
+      noUnescapedDynamicStringInRegexp,
+      `const escapeSpecialChars = (value) => value.replace(/[.*+?^$\\{\\}()|[\\]\\\\]/g, "\\$&");
+      const parts = text.split(new RegExp("(" + escapeSpecialChars(query) + ")", "gi"));`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a term shape-tested by a dominating character-class guard", () => {
+    const result = runRule(
+      noUnescapedDynamicStringInRegexp,
+      `const matchesAtWordStart = (value, query) => {
+        if (!/^[\\w\\s]*$/.test(query)) return value.includes(query);
+        return new RegExp("\\b" + query, "i").test(value);
+      };`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag an imported SCREAMING_SNAKE pattern constant", () => {
+    const result = runRule(
+      noUnescapedDynamicStringInRegexp,
+      `import { SEARCH_TOKEN_PATTERN } from "./constants";
+      const tokenMatcher = new RegExp("^" + SEARCH_TOKEN_PATTERN + "$", "u");`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
 });

@@ -163,28 +163,37 @@ const isReassignedInFile = (identifier: EsTreeNodeOfType<"Identifier">): boolean
   return reassignedNames.has(identifier.name);
 };
 
-const containsCallOf = (root: EsTreeNode, functionName: string): boolean => {
-  let didFindCall = false;
+const containsReferenceOf = (root: EsTreeNode, functionName: string): boolean => {
+  let didFindReference = false;
   walkAst(root, (node) => {
-    if (didFindCall) return false;
+    if (didFindReference) return false;
+    if (!isNodeOfType(node, "Identifier") || node.name !== functionName) return;
+    const parent = node.parent;
+    // Property-name and object-key positions reuse the name without
+    // reading the binding.
     if (
-      isNodeOfType(node, "CallExpression") &&
-      isNodeOfType(node.callee, "Identifier") &&
-      node.callee.name === functionName
+      parent &&
+      isNodeOfType(parent, "MemberExpression") &&
+      parent.property === node &&
+      !parent.computed
     ) {
-      didFindCall = true;
-      return false;
+      return;
     }
+    if (parent && isNodeOfType(parent, "Property") && parent.key === node && !parent.computed) {
+      return;
+    }
+    didFindReference = true;
+    return false;
   });
-  return didFindCall;
+  return didFindReference;
 };
 
-// `if (isPolling) { isPolling(); }` / `isPolling && isPolling()` is a
-// deliberate existence guard whose branch does evaluate the predicate, so
-// "the check never runs" would be wrong.
-const isExistenceGuardThatInvokesPredicate = (
-  identifier: EsTreeNodeOfType<"Identifier">,
-): boolean => {
+// `if (isPolling) { isPolling(); }` / `isPolling && isPolling()` /
+// `if (isSessionValid) { guards.push(isSessionValid); }` /
+// `isRowSelectable ? isRowSelectable : undefined` — a deliberate existence
+// guard whose branch evaluates OR hands out the very reference it tested,
+// so "the check never runs" would be wrong.
+const isExistenceGuardOverUsedReference = (identifier: EsTreeNodeOfType<"Identifier">): boolean => {
   let current: EsTreeNode = identifier;
   let parent = current.parent ?? null;
   while (parent) {
@@ -194,7 +203,9 @@ const isExistenceGuardThatInvokesPredicate = (
       continue;
     }
     if (isNodeOfType(parent, "LogicalExpression") && parent.operator === "&&") {
-      if (parent.left === current && containsCallOf(parent.right, identifier.name)) return true;
+      if (parent.left === current && containsReferenceOf(parent.right, identifier.name)) {
+        return true;
+      }
       current = parent;
       parent = parent.parent ?? null;
       continue;
@@ -203,10 +214,10 @@ const isExistenceGuardThatInvokesPredicate = (
   }
   if (!parent) return false;
   if (isNodeOfType(parent, "IfStatement") && parent.test === current) {
-    return containsCallOf(parent.consequent, identifier.name);
+    return containsReferenceOf(parent.consequent, identifier.name);
   }
   if (isNodeOfType(parent, "ConditionalExpression") && parent.test === current) {
-    return containsCallOf(parent.consequent, identifier.name);
+    return containsReferenceOf(parent.consequent, identifier.name);
   }
   return false;
 };
@@ -223,7 +234,7 @@ export const noPredicateFunctionReferenceInBooleanPosition = defineRule({
       if (!isInBooleanContext(node)) return;
       if (!resolvesToZeroArgumentFunction(node)) return;
       if (isReassignedInFile(node)) return;
-      if (isExistenceGuardThatInvokesPredicate(node)) return;
+      if (isExistenceGuardOverUsedReference(node)) return;
       context.report({
         node,
         message: `This condition is always true because \`${node.name}\` is a function reference, not its result, so the check never runs — call it as \`${node.name}()\` to evaluate the predicate.`,

@@ -13,19 +13,36 @@ const isNumericLiteralLeaf = (node: EsTreeNode): boolean => {
   return isNodeOfType(node, "Literal") && typeof node.value === "number";
 };
 
+const resolveNumericLeafValue = (node: EsTreeNode): number | null => {
+  if (isNodeOfType(node, "UnaryExpression") && (node.operator === "-" || node.operator === "+")) {
+    const innerValue = resolveNumericLeafValue(node.argument as EsTreeNode);
+    if (innerValue === null) return null;
+    return node.operator === "-" ? -innerValue : innerValue;
+  }
+  if (isNodeOfType(node, "Literal") && typeof node.value === "number") return node.value;
+  return null;
+};
+
 // The intended fallback is the token immediately after `??`. When the
 // right operand is a bare (unparenthesized) arithmetic expression whose
-// leftmost leaf is a numeric literal, that literal got swallowed into the
-// arithmetic: `x ?? 0 / y` parsed as `x ?? (0 / y)` rather than the
-// intended `(x ?? 0) / y`. A leftmost identifier/member (e.g.
-// `x ?? count - max`, `x ?? itemGap / 2`) is a legitimate computed
-// default and stays quiet.
-const leftmostLeafIsNumericLiteral = (node: EsTreeNode): boolean => {
-  let current = node;
-  while (isNodeOfType(current, "BinaryExpression")) {
-    current = current.left as EsTreeNode;
+// leftmost leaf is a SENTINEL numeric literal, that literal got swallowed
+// into the arithmetic: `x ?? 0 / y` parsed as `x ?? (0 / y)` rather than
+// the intended `(x ?? 0) / y`. Sentinel means the as-parsed expression is
+// degenerate — `0 <op> y` (annihilation/identity), `-1 - y` (the indexOf
+// sentinel), `1 * y` (identity) — which no one writes deliberately. Any
+// other leftmost literal is a scaled-constant fallback the author meant
+// as-parsed (`x ?? 5 * MINUTE_MS`, `x ?? 1 / columnCount`,
+// `x ?? 100 - successRate`, `x ?? 2 * Math.PI`) and stays quiet, as does
+// a leftmost identifier/member (`x ?? count - max`, `x ?? itemGap / 2`).
+const isSentinelLiteralSwallow = (node: EsTreeNodeOfType<"BinaryExpression">): boolean => {
+  let innermost = node;
+  while (isNodeOfType(innermost.left, "BinaryExpression")) {
+    innermost = innermost.left;
   }
-  return isNumericLiteralLeaf(current);
+  const leftmostValue = resolveNumericLeafValue(innermost.left as EsTreeNode);
+  if (leftmostValue === null) return false;
+  if (leftmostValue === 0 || leftmostValue === -1) return true;
+  return leftmostValue === 1 && innermost.operator === "*";
 };
 
 // `x ?? 0 - someCall()` is the negation-fallback idiom: `0 - fn()` is a
@@ -74,7 +91,7 @@ export const noNullishCoalescingArithmeticPrecedence = defineRule({
       if (!isNodeOfType(right, "BinaryExpression")) return;
       if (node.range && right.range && node.range[1] !== right.range[1]) return;
       if (!ARITHMETIC_OPERATORS.has(right.operator)) return;
-      if (!leftmostLeafIsNumericLiteral(right)) return;
+      if (!isSentinelLiteralSwallow(right)) return;
       if (!hasNonNumericLiteralLeaf(right)) return;
       if (isZeroMinusNegationIdiom(right)) return;
 
