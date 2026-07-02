@@ -291,4 +291,203 @@ describe("no-enter-submit-without-ime-composition-guard", () => {
     );
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("stays quiet when the modifier gate is extracted into a same-file helper", () => {
+    const result = runRule(
+      noEnterSubmitWithoutImeCompositionGuard,
+      `const isModEnter = (event) => event.metaKey || event.ctrlKey;
+       const Composer = ({ send }) => (
+         <textarea onKeyDown={(e) => { if (e.key === 'Enter' && isModEnter(e)) send(); }} />
+       );`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet on a password field with a reveal toggle (dynamic type)", () => {
+    const result = runRule(
+      noEnterSubmitWithoutImeCompositionGuard,
+      `const PasswordField = ({ showPassword, handleLogin }) => (
+         <input
+           type={showPassword ? 'text' : 'password'}
+           onKeyDown={(e) => { if (e.key === 'Enter') handleLogin(); }}
+         />
+       );`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet when an extracted named onChange handler coerces the value numerically", () => {
+    const result = runRule(
+      noEnterSubmitWithoutImeCompositionGuard,
+      `const MaxDimension = ({ update, save }) => {
+         const handleChange = (e) => {
+           update(parseInt(e.target.value, 10));
+         };
+         return (
+           <input
+             onChange={handleChange}
+             onKeyDown={(e) => { if (e.key === 'Enter') save(); }}
+           />
+         );
+       };`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet when an inline onChange coerces the value with unary plus", () => {
+    const result = runRule(
+      noEnterSubmitWithoutImeCompositionGuard,
+      `const PriceField = ({ setPrice, applyPrice }) => (
+         <input
+           onChange={(e) => setPrice(+e.target.value)}
+           onKeyDown={(e) => { if (e.key === 'Enter') applyPrice(); }}
+         />
+       );`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet on a contentEditable={false} atomic embed activating on Enter", () => {
+    const result = runRule(
+      noEnterSubmitWithoutImeCompositionGuard,
+      `const EmbedBlock = ({ onActivate, children }) => (
+         <div
+           contentEditable={false}
+           tabIndex={0}
+           onKeyDown={(e) => {
+             if (e.key === 'Enter') {
+               e.preventDefault();
+               onActivate();
+             }
+           }}
+         >
+           {children}
+         </div>
+       );`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it('stays quiet on a type="tel" phone field', () => {
+    const result = runRule(
+      noEnterSubmitWithoutImeCompositionGuard,
+      `const PhoneField = ({ onSubmit }) => (
+         <input type="tel" onKeyDown={(e) => { if (e.key === 'Enter') onSubmit(); }} />
+       );`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet when keyCode 229 is compared against a named module constant", () => {
+    const result = runRule(
+      noEnterSubmitWithoutImeCompositionGuard,
+      `const IME_PROCESS_KEYCODE = 229;
+       const TagInput = ({ addTag }) => (
+         <input
+           onKeyDown={(e) => {
+             if (e.keyCode === IME_PROCESS_KEYCODE) return;
+             if (e.key === 'Enter') addTag(e.target.value);
+           }}
+         />
+       );`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet when a same-file IME hook wires composition via spread bind", () => {
+    const result = runRule(
+      noEnterSubmitWithoutImeCompositionGuard,
+      `const useImeGuard = () => {
+         const activeRef = useRef(false);
+         return {
+           bind: {
+             onCompositionStart: () => { activeRef.current = true; },
+             onCompositionEnd: () => { activeRef.current = false; },
+           },
+           isActive: () => activeRef.current,
+         };
+       };
+       const TitleField = ({ onSave }) => {
+         const ime = useImeGuard();
+         return (
+           <input
+             {...ime.bind}
+             onKeyDown={(e) => { if (e.key === 'Enter' && !ime.isActive()) onSave(); }}
+           />
+         );
+       };`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet when a class component delegates Enter to a guarded instance method", () => {
+    const result = runRule(
+      noEnterSubmitWithoutImeCompositionGuard,
+      `class TagInput extends React.Component {
+         commitEntry = (e) => {
+           if (e.nativeEvent.isComposing) return;
+           this.props.onAdd(e.target.value);
+         };
+         render() {
+           return (
+             <input onKeyDown={(e) => { if (e.key === 'Enter') this.commitEntry(e); }} />
+           );
+         }
+       }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet when an imported IME-event helper guards the Enter branch", () => {
+    const result = runRule(
+      noEnterSubmitWithoutImeCompositionGuard,
+      `import { isImeKeyEvent } from '../utils/keyboard';
+       const SearchField = ({ onSearch }) => (
+         <input
+           onKeyDown={(e) => {
+             if (isImeKeyEvent(e)) return;
+             if (e.key === 'Enter') onSearch(e.target.value);
+           }}
+         />
+       );`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet on a digits-only field enforced by a regex strip in onChange", () => {
+    const result = runRule(
+      noEnterSubmitWithoutImeCompositionGuard,
+      `const QuantityField = ({ setQuantity, commit }) => (
+         <input
+           onChange={(e) => setQuantity(e.target.value.replace(/\\D/g, ''))}
+           onKeyDown={(e) => { if (e.key === 'Enter') commit(); }}
+         />
+       );`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags a plain Enter submit whose helper checks no modifier", () => {
+    const result = runRule(
+      noEnterSubmitWithoutImeCompositionGuard,
+      `const normalize = (value) => value.trim();
+       const CommentBox = ({ submit }) => (
+         <textarea onKeyDown={(e) => { if (e.key === 'Enter') submit(normalize(e.target.value)); }} />
+       );`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags a timer-named handler despite containing the letters i-m-e", () => {
+    const result = runRule(
+      noEnterSubmitWithoutImeCompositionGuard,
+      `const TimeField = ({ setTimer, commitTime }) => (
+         <input
+           onChange={(e) => setTimer(e.target.value)}
+           onKeyDown={(e) => { if (e.key === 'Enter') commitTime(); }}
+         />
+       );`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
 });

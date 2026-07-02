@@ -41,6 +41,7 @@ const NON_TEXT_INPUT_TYPES = new Set([
   "hidden",
   "number",
   "password",
+  "tel",
   "date",
   "time",
   "week",
@@ -94,7 +95,31 @@ const argumentReadsValueMember = (argument: EsTreeNode): boolean => {
   return readsValue;
 };
 
+// Regexes an onChange uses to strip a field down to digits — the field has
+// numeric semantics even though its `type` stays "text".
+const DIGIT_STRIP_REGEX_SOURCE = /\\D|\[\^0-9\]|\[\^\\d\]/;
+
+const isDigitStripReplaceOfValue = (node: EsTreeNode): boolean => {
+  if (!isNodeOfType(node, "CallExpression")) return false;
+  const callee = stripGroupingParens(node.callee as EsTreeNode);
+  if (memberPropertyName(callee) !== "replace") return false;
+  if (!isNodeOfType(callee, "MemberExpression")) return false;
+  const pattern = node.arguments[0];
+  if (!pattern || !isNodeOfType(pattern, "Literal") || !("regex" in pattern)) return false;
+  if (
+    typeof pattern.regex?.pattern !== "string" ||
+    !DIGIT_STRIP_REGEX_SOURCE.test(pattern.regex.pattern)
+  ) {
+    return false;
+  }
+  return argumentReadsValueMember(callee.object as EsTreeNode);
+};
+
 const isNumericCoercionOfValue = (node: EsTreeNode): boolean => {
+  if (isNodeOfType(node, "UnaryExpression") && node.operator === "+") {
+    return argumentReadsValueMember(node.argument as EsTreeNode);
+  }
+  if (isDigitStripReplaceOfValue(node)) return true;
   if (!isNodeOfType(node, "CallExpression")) return false;
   const callee = stripGroupingParens(node.callee as EsTreeNode);
   let calleeName: string | null = null;
@@ -118,7 +143,13 @@ const onChangeCoercesValueNumerically = (node: EsTreeNodeOfType<"JSXOpeningEleme
   const attribute = hasJsxPropIgnoreCase(node.attributes, "onChange");
   if (!attribute || !attribute.value) return false;
   if (!isNodeOfType(attribute.value, "JSXExpressionContainer")) return false;
-  const changeHandler = stripGroupingParens(attribute.value.expression as EsTreeNode);
+  let changeHandler = stripGroupingParens(attribute.value.expression as EsTreeNode);
+  // `onChange={handleChange}` — resolve the same-file named handler so an
+  // extracted numeric-coercion handler counts the same as an inline one.
+  if (isNodeOfType(changeHandler, "Identifier")) {
+    const binding = findVariableInitializer(changeHandler, changeHandler.name);
+    if (binding?.initializer) changeHandler = binding.initializer;
+  }
   if (!isFunctionLike(changeHandler)) return false;
   let coercesValue = false;
   walkAst(changeHandler, (child) => {
@@ -129,6 +160,44 @@ const onChangeCoercesValueNumerically = (node: EsTreeNodeOfType<"JSXOpeningEleme
     }
   });
   return coercesValue;
+};
+
+// A dynamic `type={...}` that can resolve to a non-text type — the
+// password-reveal toggle `type={show ? "text" : "password"}` is the dominant
+// shape — keeps its non-text semantics (no IME composition in practice).
+const typeAttributeCanBeNonText = (node: EsTreeNodeOfType<"JSXOpeningElement">): boolean => {
+  const attribute = hasJsxPropIgnoreCase(node.attributes, "type");
+  if (!attribute?.value || !isNodeOfType(attribute.value, "JSXExpressionContainer")) return false;
+  let canBeNonText = false;
+  walkAst(attribute.value.expression as EsTreeNode, (child) => {
+    if (canBeNonText) return false;
+    if (
+      isNodeOfType(child, "Literal") &&
+      typeof child.value === "string" &&
+      NON_TEXT_INPUT_TYPES.has(child.value.toLowerCase())
+    ) {
+      canBeNonText = true;
+      return false;
+    }
+  });
+  return canBeNonText;
+};
+
+// `contentEditable` only makes an element text-entry when it is actually
+// editable — `contentEditable={false}` marks an atomic non-editable embed
+// (activating it on Enter is deliberate and composition-free).
+const isEditableContentEditable = (node: EsTreeNodeOfType<"JSXOpeningElement">): boolean => {
+  const attribute = hasJsxPropIgnoreCase(node.attributes, "contentEditable");
+  if (!attribute) return false;
+  if (!attribute.value) return true;
+  if (isNodeOfType(attribute.value, "Literal")) return attribute.value.value !== "false";
+  if (isNodeOfType(attribute.value, "JSXExpressionContainer")) {
+    const expression = stripGroupingParens(attribute.value.expression as EsTreeNode);
+    if (isNodeOfType(expression, "Literal")) {
+      return expression.value !== false && expression.value !== "false";
+    }
+  }
+  return true;
 };
 
 const isTextEntryElement = (node: EsTreeNodeOfType<"JSXOpeningElement">): boolean => {
@@ -145,9 +214,10 @@ const isTextEntryElement = (node: EsTreeNodeOfType<"JSXOpeningElement">): boolea
   if (tag === "input") {
     const inputType = getStringAttr(node, "type");
     if (inputType && NON_TEXT_INPUT_TYPES.has(inputType.toLowerCase())) return false;
+    if (!inputType && typeAttributeCanBeNonText(node)) return false;
     return true;
   }
-  if (hasJsxPropIgnoreCase(node.attributes, "contentEditable")) return true;
+  if (isEditableContentEditable(node)) return true;
   if (role && TEXT_ENTRY_ROLES.has(role)) return true;
   return false;
 };
@@ -209,7 +279,13 @@ const analyzeEnterBranch = (enterTest: EsTreeNode): EnterBranch | null => {
   return null;
 };
 
-const testUsesModifierOrSpace = (testExpr: EsTreeNode): boolean => {
+// The modifier gate may be extracted into a same-file helper —
+// `if (e.key === 'Enter' && isModEnter(e))` — so scan the resolved bodies of
+// helpers called from the test expression alongside the test itself.
+const testUsesModifierOrSpace = (testExpr: EsTreeNode): boolean =>
+  [testExpr, ...handlerCalleeInitializers(testExpr)].some(scopeUsesModifierOrSpace);
+
+const scopeUsesModifierOrSpace = (testExpr: EsTreeNode): boolean => {
   let found = false;
   walkAst(testExpr, (child) => {
     if (found) return false;
@@ -261,13 +337,23 @@ const branchPerformsCommit = (actionNode: EsTreeNode): boolean => {
   return found;
 };
 
+// "ime" as a standalone word in an identifier (`imeActive`, `isImeKeyEvent`,
+// `IME_PROCESS_KEYCODE`) signals composition wiring the same way /composi/i
+// does. Word-split on case/underscore boundaries so `time` / `setTimeout`
+// never match.
+const identifierHasImeWord = (name: string): boolean =>
+  name
+    .split(/[_\-$]+/)
+    .flatMap((part) => part.split(/(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])/))
+    .some((word) => word.toLowerCase() === "ime");
+
 const scopeHasCompositionGuard = (scope: EsTreeNode): boolean => {
   let found = false;
   walkAst(scope, (child) => {
     if (found) return false;
     if (
       (isNodeOfType(child, "Identifier") || isNodeOfType(child, "JSXIdentifier")) &&
-      COMPOSITION_TEXT_PATTERN.test(child.name)
+      (COMPOSITION_TEXT_PATTERN.test(child.name) || identifierHasImeWord(child.name))
     ) {
       found = true;
       return false;
@@ -280,11 +366,42 @@ const scopeHasCompositionGuard = (scope: EsTreeNode): boolean => {
   return found;
 };
 
+// `this.commitEntry()` delegates to a class member — resolve it to the
+// method/property function on the enclosing class so a guard inside the
+// instance method suppresses the same way a resolved const helper does.
+const resolveClassMemberFunction = (
+  callSite: EsTreeNode,
+  memberName: string,
+): EsTreeNode | null => {
+  let cursor: EsTreeNode | null = callSite;
+  while (cursor) {
+    if (isNodeOfType(cursor, "ClassBody")) {
+      for (const element of cursor.body) {
+        const classElement = element as EsTreeNode;
+        if (
+          (isNodeOfType(classElement, "MethodDefinition") ||
+            isNodeOfType(classElement, "PropertyDefinition")) &&
+          isNodeOfType(classElement.key, "Identifier") &&
+          classElement.key.name === memberName &&
+          classElement.value &&
+          isFunctionLike(classElement.value as EsTreeNode)
+        ) {
+          return classElement.value as EsTreeNode;
+        }
+      }
+      return null;
+    }
+    cursor = cursor.parent ?? null;
+  }
+  return null;
+};
+
 // Same-file function bodies reachable from the handler through bare
 // identifier calls (`commitEdit()` resolved to its `const commitEdit = …`
 // or `function commitEdit` initializer, then that body's own callees,
-// transitively) — a composition guard may live inside the commit helper
-// chain rather than the inline handler.
+// transitively) or `this.commitEdit()` class-member calls — a composition
+// guard may live inside the commit helper chain rather than the inline
+// handler.
 const handlerCalleeInitializers = (handler: EsTreeNode): EsTreeNode[] => {
   const initializers: EsTreeNode[] = [];
   const seenCalleeNames = new Set<string>();
@@ -295,12 +412,30 @@ const handlerCalleeInitializers = (handler: EsTreeNode): EsTreeNode[] => {
     walkAst(scope, (child) => {
       if (!isNodeOfType(child, "CallExpression")) return;
       const callee = stripGroupingParens(child.callee as EsTreeNode);
-      if (!isNodeOfType(callee, "Identifier") || seenCalleeNames.has(callee.name)) return;
-      seenCalleeNames.add(callee.name);
-      const binding = findVariableInitializer(callee, callee.name);
-      if (binding?.initializer) {
-        initializers.push(binding.initializer);
-        pendingScopes.push(binding.initializer);
+      if (isNodeOfType(callee, "Identifier")) {
+        if (seenCalleeNames.has(callee.name)) return;
+        seenCalleeNames.add(callee.name);
+        const binding = findVariableInitializer(callee, callee.name);
+        if (binding?.initializer) {
+          initializers.push(binding.initializer);
+          pendingScopes.push(binding.initializer);
+        }
+        return;
+      }
+      if (
+        isNodeOfType(callee, "MemberExpression") &&
+        isNodeOfType(callee.object, "ThisExpression") &&
+        !callee.computed &&
+        isNodeOfType(callee.property, "Identifier")
+      ) {
+        const memberName = `this.${callee.property.name}`;
+        if (seenCalleeNames.has(memberName)) return;
+        seenCalleeNames.add(memberName);
+        const memberFunction = resolveClassMemberFunction(child, callee.property.name);
+        if (memberFunction) {
+          initializers.push(memberFunction);
+          pendingScopes.push(memberFunction);
+        }
       }
     });
   }
