@@ -46,13 +46,21 @@ interface PersistedFileLintCache {
 
 const validateDiagnostic = Schema.decodeUnknownSync(DiagnosticSchema);
 
+const decodeDiagnostic = (raw: unknown): Diagnostic => {
+  const diagnostic = validateDiagnostic(raw);
+  return {
+    ...diagnostic,
+    relatedLocations: diagnostic.relatedLocations?.map((location) => ({ ...location })),
+  };
+};
+
 // Validate one file's stored diagnostics against the `Diagnostic` schema,
 // returning `null` if ANY entry is malformed so the whole file degrades to a
 // miss rather than a partial set.
 const decodeFileDiagnostics = (raw: unknown): ReadonlyArray<Diagnostic> | null => {
   if (!Array.isArray(raw)) return null;
   try {
-    return raw.map((entry) => validateDiagnostic(entry));
+    return raw.map((entry) => decodeDiagnostic(entry));
   } catch {
     return null;
   }
