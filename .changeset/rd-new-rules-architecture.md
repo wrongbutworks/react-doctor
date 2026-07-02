@@ -1,5 +1,5 @@
 ---
-"oxlint-plugin-react-doctor": minor
+"oxlint-plugin-react-doctor": patch
 ---
 
 feat(rules): add 1 new architecture rule, corpus-validated and FP-hardened
