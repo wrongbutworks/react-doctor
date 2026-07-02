@@ -265,4 +265,98 @@ describe("no-floating-then-in-jsx-handler", () => {
     );
     expect(result.diagnostics).toHaveLength(1);
   });
+
+  it("stays quiet: Promise.allSettled(...).then(...) — allSettled never rejects", () => {
+    const result = runRule(
+      noFloatingThenInJsxHandler,
+      `const el = <button onClick={() => { Promise.allSettled(files.map((file) => deleteFile(file.id))).then(setResults); }}>Delete all</button>;`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Promise.resolve().then(cb) microtask deferral for focus", () => {
+    const result = runRule(
+      noFloatingThenInJsxHandler,
+      `const el = <MenuItem onSelect={() => { setOpen(false); Promise.resolve().then(() => triggerRef.current?.focus()); }} />;`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: TanStack Query refetch() — documented to never reject", () => {
+    const result = runRule(
+      noFloatingThenInJsxHandler,
+      `const el = <button onClick={() => refetch().then(({ data }) => setSelected(data?.rows[0] ?? null))}>Reload</button>;`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Concise arrow returns the chain to an in-file consumer that awaits it in try/catch", () => {
+    const result = runRule(
+      noFloatingThenInJsxHandler,
+      `const ConfirmDialog = ({ onConfirm }) => {
+  const [failed, setFailed] = useState(false);
+  const handleOk = async () => {
+    try {
+      await onConfirm();
+    } catch {
+      setFailed(true);
+    }
+  };
+  return <button onClick={handleOk}>{failed ? "Retry" : "OK"}</button>;
+};
+const DeleteFlow = ({ removeItem, onRemoved }) => (
+  <ConfirmDialog onConfirm={() => removeItem().then(onRemoved)} />
+);`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: In-file helper already swallows rejection with .catch — handler chains .then on it", () => {
+    const result = runRule(
+      noFloatingThenInJsxHandler,
+      `const loadPreview = (url) =>
+  fetch(url)
+    .then((res) => res.json())
+    .catch(() => null);
+const PreviewButton = ({ url, setPreview }) => (
+  <button onMouseEnter={() => { loadPreview(url).then(setPreview); }}>Preview</button>
+);`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Resolve-only new Promise bridge — image preloader resolves on both load and error", () => {
+    const result = runRule(
+      noFloatingThenInJsxHandler,
+      `const preloadImage = (src) =>
+  new Promise((resolve) => {
+    const image = new Image();
+    image.onload = () => resolve(true);
+    image.onerror = () => resolve(false);
+    image.src = src;
+  });
+const Thumb = ({ nextSrc, setReady }) => (
+  <img onMouseEnter={() => { preloadImage(nextSrc).then(setReady); }} alt="" />
+);`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: navigator.serviceWorker.ready — spec-guaranteed to never reject", () => {
+    const result = runRule(
+      noFloatingThenInJsxHandler,
+      `const el = <button onClick={() => { navigator.serviceWorker.ready.then(() => setPwaReady(true)); }}>Enable offline</button>;`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags a floating then on a DOM handler over a rejectable call", () => {
+    const result = runRule(
+      noFloatingThenInJsxHandler,
+      `const Save = ({ save }) => (
+         <button onClick={() => save().then((res) => setSaved(res))}>Save</button>
+       );`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
 });

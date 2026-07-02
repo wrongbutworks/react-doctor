@@ -87,6 +87,49 @@ const chainRootExpression = (thenCall: EsTreeNode): EsTreeNode => {
 // a promise — except for two structurally rejection-proof roots (a
 // no-reject `new Promise` wrapper, a same-file never-rejecting helper),
 // where a `.catch` would be dead code.
+// Roots that never reject by spec or documented contract:
+// `Promise.allSettled(...)`, TanStack Query's `refetch()`, and
+// `navigator.serviceWorker.ready`.
+const isSpecNeverRejectingRoot = (root: EsTreeNode): boolean => {
+  const inner = stripParenExpression(root);
+  if (isNodeOfType(inner, "CallExpression")) {
+    const callee = stripParenExpression(inner.callee as EsTreeNode);
+    if (isNodeOfType(callee, "Identifier") && callee.name === "refetch") return true;
+    if (
+      isNodeOfType(callee, "MemberExpression") &&
+      !callee.computed &&
+      isNodeOfType(callee.object, "Identifier") &&
+      callee.object.name === "Promise" &&
+      isNodeOfType(callee.property, "Identifier") &&
+      callee.property.name === "allSettled"
+    ) {
+      return true;
+    }
+    if (
+      isNodeOfType(callee, "MemberExpression") &&
+      !callee.computed &&
+      isNodeOfType(callee.property, "Identifier") &&
+      callee.property.name === "refetch"
+    ) {
+      return true;
+    }
+    return false;
+  }
+  if (
+    isNodeOfType(inner, "MemberExpression") &&
+    !inner.computed &&
+    isNodeOfType(inner.property, "Identifier") &&
+    inner.property.name === "ready" &&
+    isNodeOfType(inner.object, "MemberExpression") &&
+    !inner.object.computed &&
+    isNodeOfType(inner.object.property, "Identifier") &&
+    inner.object.property.name === "serviceWorker"
+  ) {
+    return true;
+  }
+  return false;
+};
+
 const floatingThenCall = (expression: EsTreeNode): EsTreeNodeOfType<"CallExpression"> | null => {
   let terminal = stripParenExpression(expression);
   while (
@@ -101,6 +144,7 @@ const floatingThenCall = (expression: EsTreeNode): EsTreeNodeOfType<"CallExpress
   if (getCallMethodName(terminal.callee as EsTreeNode) !== "then") return null;
   if (chainHasRejectionHandler(terminal)) return null;
   const root = chainRootExpression(terminal);
+  if (isSpecNeverRejectingRoot(root)) return null;
   // `Promise.resolve(...)` roots never reject on their own — the
   // microtask-scheduling idiom (upstream exemption, folded into the
   // root-based checks).
@@ -181,6 +225,18 @@ export const noFloatingThenInJsxHandler = defineRule({
     JSXAttribute(node: EsTreeNodeOfType<"JSXAttribute">) {
       const name = getJsxAttributeName(node.name as EsTreeNode);
       if (!name || !HANDLER_PROP_PATTERN.test(name)) return;
+      // A component prop (`<ConfirmDialog onConfirm={() => save().then(...)}/>`)
+      // hands the chain to a consumer that may await it — only intrinsic DOM
+      // handlers discard the returned promise unconditionally.
+      const openingElement = node.parent;
+      if (
+        !openingElement ||
+        !isNodeOfType(openingElement, "JSXOpeningElement") ||
+        !isNodeOfType(openingElement.name, "JSXIdentifier") ||
+        !/^[a-z]/.test(openingElement.name.name)
+      ) {
+        return;
+      }
       if (!node.value || !isNodeOfType(node.value, "JSXExpressionContainer")) return;
 
       const handler = stripParenExpression(node.value.expression as EsTreeNode);
