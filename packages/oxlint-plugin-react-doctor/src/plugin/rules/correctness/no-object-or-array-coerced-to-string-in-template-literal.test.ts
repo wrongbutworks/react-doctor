@@ -180,4 +180,29 @@ describe("no-object-or-array-coerced-to-string-in-template-literal", () => {
     );
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("does not flag an array comma-join inside rgb()", () => {
+    const result = runRule(
+      noObjectOrArrayCoercedToStringInTemplateLiteral,
+      "const accent = [250, 128, 114];\nconst style = `color: rgb(${accent})`;",
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag an array comma-join inside matrix()", () => {
+    const result = runRule(
+      noObjectOrArrayCoercedToStringInTemplateLiteral,
+      "const matrixValues = [1, 0, 0, 1, 20, 30];\nel.style.transform = `matrix(${matrixValues})`;",
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags a bare interpolated array outside functional syntax", () => {
+    const result = runRule(
+      noObjectOrArrayCoercedToStringInTemplateLiteral,
+      "const items = [1, 2, 3];\nconst label = `items: ${items}`;",
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
 });

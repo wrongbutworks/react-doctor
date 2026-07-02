@@ -135,9 +135,14 @@ export const noObjectOrArrayCoercedToStringInTemplateLiteral = defineRule({
       TemplateLiteral(node: EsTreeNodeOfType<"TemplateLiteral">) {
         const parent = node.parent;
         if (parent && isNodeOfType(parent, "TaggedTemplateExpression")) return;
-        for (const expression of node.expressions) {
+        node.expressions.forEach((expression, expressionIndex) => {
+          // `rgb(${channels})` / `matrix(${values})` — the interpolation
+          // sits inside functional syntax whose separator IS the comma, so
+          // an array's comma-join is the intended output.
+          const precedingText = node.quasis[expressionIndex]?.value.cooked ?? "";
+          if (/[a-zA-Z-]\(\s*$/.test(precedingText)) return;
           reportIfCoercedLiteral(expression as EsTreeNode);
-        }
+        });
       },
       BinaryExpression(node: EsTreeNodeOfType<"BinaryExpression">) {
         if (node.operator !== "+") return;
