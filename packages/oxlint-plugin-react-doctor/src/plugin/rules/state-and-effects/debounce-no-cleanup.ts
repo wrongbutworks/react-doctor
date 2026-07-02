@@ -9,7 +9,7 @@ import { walkAst } from "../../utils/walk-ast.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
 import type { RuleContext } from "../../utils/rule-context.js";
-import { findEnclosingFunction } from "./utils/find-enclosing-function.js";
+import { findEnclosingFunction } from "../../utils/find-enclosing-function.js";
 
 const DEBOUNCE_WRAPPER_HOOK_NAMES = new Set(["useMemo", "useCallback", "useRef"]);
 const DEBOUNCE_FACTORY_NAMES = new Set(["debounce", "throttle"]);

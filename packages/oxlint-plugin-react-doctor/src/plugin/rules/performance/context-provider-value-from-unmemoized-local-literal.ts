@@ -1,7 +1,5 @@
-import {
-  componentOrHookDisplayNameForFunction,
-  nearestEnclosingFunction,
-} from "../../utils/component-or-hook-display-name.js";
+import { componentOrHookDisplayNameForFunction } from "../../utils/component-or-hook-display-name.js";
+import { findEnclosingFunction } from "../../utils/find-enclosing-function.js";
 import { collectContextBindings } from "../../utils/collect-context-bindings.js";
 import { defineRule } from "../../utils/define-rule.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
@@ -60,7 +58,7 @@ const isDirectDeclarationInitializer = (binding: BindingInfo): boolean => {
 const owningFunctionOfBinding = (binding: BindingInfo): EsTreeNode | null =>
   isFunctionLike(binding.scopeOwner)
     ? binding.scopeOwner
-    : nearestEnclosingFunction(binding.scopeOwner);
+    : findEnclosingFunction(binding.scopeOwner);
 
 // Complements `jsx-no-constructed-context-values` (which fires only when
 // the `value` attribute is ITSELF a literal). This rule resolves a
@@ -87,7 +85,7 @@ export const contextProviderValueFromUnmemoizedLocalLiteral = defineRule({
         // useMemo. An inline callback (a `.map()` render loop, a
         // `useMemo` factory) is neither: hooks cannot be called there,
         // so the recommendation would be unactionable — bail.
-        const renderFunction = nearestEnclosingFunction(node);
+        const renderFunction = findEnclosingFunction(node);
         if (!renderFunction) return;
         if (componentOrHookDisplayNameForFunction(renderFunction) === null) return;
 

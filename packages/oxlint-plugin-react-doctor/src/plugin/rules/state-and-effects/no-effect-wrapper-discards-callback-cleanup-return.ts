@@ -1,7 +1,5 @@
-import {
-  componentOrHookDisplayNameForFunction,
-  nearestEnclosingFunction,
-} from "../../utils/component-or-hook-display-name.js";
+import { componentOrHookDisplayNameForFunction } from "../../utils/component-or-hook-display-name.js";
+import { findEnclosingFunction } from "../../utils/find-enclosing-function.js";
 import { defineRule } from "../../utils/define-rule.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
@@ -154,7 +152,7 @@ export const noEffectWrapperDiscardsCallbackCleanupReturn = defineRule({
       const effectBody = effectCallback.body;
       if (!isNodeOfType(effectBody, "BlockStatement")) return;
 
-      const hookFunction = nearestEnclosingFunction(node);
+      const hookFunction = findEnclosingFunction(node);
       if (!hookFunction) return;
       const hookName = componentOrHookDisplayNameForFunction(hookFunction);
       if (!hookName || !isReactHookName(hookName)) return;

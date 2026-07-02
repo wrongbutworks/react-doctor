@@ -1,7 +1,5 @@
-import {
-  componentOrHookDisplayNameForFunction,
-  nearestEnclosingFunction,
-} from "../../utils/component-or-hook-display-name.js";
+import { componentOrHookDisplayNameForFunction } from "../../utils/component-or-hook-display-name.js";
+import { findEnclosingFunction } from "../../utils/find-enclosing-function.js";
 import { defineRule } from "../../utils/define-rule.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
@@ -241,7 +239,7 @@ export const noNondeterministicIdValueInRenderBody = defineRule({
   create: (context: RuleContext) => ({
     VariableDeclarator(node: EsTreeNodeOfType<"VariableDeclarator">) {
       if (!isNodeOfType(node.id, "Identifier") || !node.init) return;
-      const enclosingFunction = nearestEnclosingFunction(node);
+      const enclosingFunction = findEnclosingFunction(node);
       if (!enclosingFunction || !componentOrHookDisplayNameForFunction(enclosingFunction)) return;
 
       const initializer = stripParenExpression(node.init);

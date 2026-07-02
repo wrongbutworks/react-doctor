@@ -1,7 +1,5 @@
-import {
-  componentOrHookDisplayNameForFunction,
-  nearestEnclosingFunction,
-} from "../../utils/component-or-hook-display-name.js";
+import { componentOrHookDisplayNameForFunction } from "../../utils/component-or-hook-display-name.js";
+import { findEnclosingFunction } from "../../utils/find-enclosing-function.js";
 import { defineRule } from "../../utils/define-rule.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
@@ -104,11 +102,11 @@ const isRenderTimeInitializerCallback = (functionNode: EsTreeNode): boolean => {
 // initializer within one. Reads inside effects, event handlers,
 // useMemo, or any other nested callback return false.
 const isOnRenderTimePath = (node: EsTreeNode): boolean => {
-  const enclosingFunction = nearestEnclosingFunction(node);
+  const enclosingFunction = findEnclosingFunction(node);
   if (!enclosingFunction) return false;
   if (componentOrHookDisplayNameForFunction(enclosingFunction)) return true;
   if (isRenderTimeInitializerCallback(enclosingFunction)) {
-    const outerFunction = nearestEnclosingFunction(enclosingFunction);
+    const outerFunction = findEnclosingFunction(enclosingFunction);
     return Boolean(outerFunction && componentOrHookDisplayNameForFunction(outerFunction));
   }
   return false;

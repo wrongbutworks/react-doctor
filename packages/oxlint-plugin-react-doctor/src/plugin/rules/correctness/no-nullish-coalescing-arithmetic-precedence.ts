@@ -67,7 +67,12 @@ export const noNullishCoalescingArithmeticPrecedence = defineRule({
       const right = node.right as EsTreeNode;
       // Only a BARE arithmetic BinaryExpression — an explicitly
       // parenthesized right operand means the author disambiguated intent.
+      // Both oxlint and the test harness parse with `preserveParens: false`,
+      // so `x ?? (0 / y)` carries no ParenthesizedExpression node — but the
+      // closing paren keeps the right operand's range from reaching the end
+      // of the enclosing expression, which is the positional tell.
       if (!isNodeOfType(right, "BinaryExpression")) return;
+      if (node.range && right.range && node.range[1] !== right.range[1]) return;
       if (!ARITHMETIC_OPERATORS.has(right.operator)) return;
       if (!leftmostLeafIsNumericLiteral(right)) return;
       if (!hasNonNumericLiteralLeaf(right)) return;

@@ -12,7 +12,7 @@ import { walkAst } from "../../utils/walk-ast.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
 import type { RuleContext } from "../../utils/rule-context.js";
-import { findEnclosingFunction } from "./utils/find-enclosing-function.js";
+import { findEnclosingFunction } from "../../utils/find-enclosing-function.js";
 
 const REQUEST_ANIMATION_FRAME_NAME = "requestAnimationFrame";
 const CANCEL_ANIMATION_FRAME_NAME = "cancelAnimationFrame";

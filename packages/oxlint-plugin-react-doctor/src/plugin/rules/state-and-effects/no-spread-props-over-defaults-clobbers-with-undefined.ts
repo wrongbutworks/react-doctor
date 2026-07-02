@@ -1,8 +1,6 @@
 import { collectPatternNames } from "../../utils/collect-pattern-names.js";
-import {
-  componentOrHookDisplayNameForFunction,
-  nearestEnclosingFunction,
-} from "../../utils/component-or-hook-display-name.js";
+import { componentOrHookDisplayNameForFunction } from "../../utils/component-or-hook-display-name.js";
+import { findEnclosingFunction } from "../../utils/find-enclosing-function.js";
 import { defineRule } from "../../utils/define-rule.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
@@ -357,7 +355,7 @@ export const noSpreadPropsOverDefaultsClobbersWithUndefined = defineRule({
       const lastSpreadArgument = spreadArgumentOf(spreads[spreads.length - 1] as EsTreeNode);
       if (!lastSpreadArgument || !isNodeOfType(lastSpreadArgument, "Identifier")) return;
 
-      const enclosingFunction = nearestEnclosingFunction(node as EsTreeNode);
+      const enclosingFunction = findEnclosingFunction(node as EsTreeNode);
       if (!enclosingFunction) return;
       if (!componentOrHookDisplayNameForFunction(enclosingFunction)) return;
 

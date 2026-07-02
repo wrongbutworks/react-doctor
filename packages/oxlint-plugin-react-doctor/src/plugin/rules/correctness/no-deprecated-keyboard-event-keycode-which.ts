@@ -4,7 +4,7 @@ import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
 import { findVariableInitializer } from "../../utils/find-variable-initializer.js";
 import { getJsxAttributeName } from "../../utils/get-jsx-attribute-name.js";
 import { getMeaningfulParent } from "../../utils/get-meaningful-parent.js";
-import { nearestEnclosingFunction } from "../../utils/component-or-hook-display-name.js";
+import { findEnclosingFunction } from "../../utils/find-enclosing-function.js";
 import { isFunctionLike } from "../../utils/is-function-like.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
 import { stripGroupingParens } from "../../utils/strip-grouping-parens.js";
@@ -317,7 +317,7 @@ export const noDeprecatedKeyboardEventKeycodeWhich = defineRule({
       const { conditionRoot, branching } = resolveBranchingContext(node as EsTreeNode);
       if (!branching) return;
 
-      const enclosingFunction = nearestEnclosingFunction(node as EsTreeNode);
+      const enclosingFunction = findEnclosingFunction(node as EsTreeNode);
       if (!enclosingFunction || !isFunctionLike(enclosingFunction)) return;
       const firstParam = enclosingFunction.params?.[0];
       if (!firstParam || !isNodeOfType(firstParam as EsTreeNode, "Identifier")) return;
