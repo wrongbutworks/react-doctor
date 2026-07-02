@@ -554,8 +554,13 @@ const hasPreAwaitEarlyReturnLatch = (
     if (isLatched) return;
     if (!isNodeOfType(node, "IfStatement") || node.alternate) return;
     const start = (node as { start?: unknown }).start;
+    const end = (node as { end?: unknown }).end;
     if (typeof start !== "number" || start >= firstSuspensionStart) return;
-    if (!isEarlyExitStatement(node.consequent)) return;
+    // Two spellings of the same latch: the guard-clause early exit
+    // (`if (busy) return; ... await`) and the wrap-in-if form whose
+    // consequent CONTAINS the await (`if (!busy) { setBusy(true); await }`).
+    const wrapsSuspension = typeof end === "number" && end > firstSuspensionStart;
+    if (!wrapsSuspension && !isEarlyExitStatement(node.consequent)) return;
     walkAst(node.test as EsTreeNode, (testChild: EsTreeNode) => {
       if (isLatched) return false;
       if (!isNodeOfType(testChild, "Identifier")) return;

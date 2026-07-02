@@ -910,4 +910,30 @@ const Search = ({ query }) => {
     );
     expect(result.diagnostics).toHaveLength(1);
   });
+
+  it("stays quiet on a wrap-in-if useState latch with try/finally reset (outline shape)", () => {
+    const result = runRule(
+      noSetStateAfterAwaitInEffect,
+      `const DefaultCollectionSelect = observer(({ collections }) => {
+         const [fetching, setFetching] = useState(false);
+         const [fetchError, setFetchError] = useState();
+         React.useEffect(() => {
+           async function fetchData() {
+             if (!collections.isLoaded && !fetching && !fetchError) {
+               try {
+                 setFetching(true);
+                 await collections.fetchPage({ limit: 100 });
+               } catch (error) {
+                 setFetchError(error);
+               } finally {
+                 setFetching(false);
+               }
+             }
+           }
+           void fetchData();
+         }, [fetchError, fetching, collections]);
+       });`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
 });
