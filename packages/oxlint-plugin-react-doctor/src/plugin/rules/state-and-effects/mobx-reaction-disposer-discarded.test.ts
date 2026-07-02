@@ -270,4 +270,67 @@ describe("mobx-reaction-disposer-discarded", () => {
     );
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("stays quiet: App-bootstrap registerReactions wiring intended to live for the whole app lifetime", () => {
+    const result = runRule(
+      mobxReactionDisposerDiscarded,
+      `import { reaction } from "mobx";
+import type { StoreMapping } from "./stores";
+
+export const registerReactions = (stores: StoreMapping) => {
+  reaction(
+    () => stores.currentUser.loggedIn,
+    (loggedIn) => {
+      if (loggedIn) {
+        stores.appStore.refresh();
+      } else {
+        stores.messagesStore.clearAll();
+      }
+    },
+  );
+};`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Module-level singleton store whose constructor reaction lives as long as the app", () => {
+    const result = runRule(
+      mobxReactionDisposerDiscarded,
+      `import { makeAutoObservable, reaction } from "mobx";
+
+class ThemeStore {
+  theme = "light";
+  constructor() {
+    makeAutoObservable(this);
+    reaction(
+      () => this.theme,
+      (theme) => localStorage.setItem("theme", theme),
+    );
+  }
+  setTheme(theme: string) {
+    this.theme = theme;
+  }
+}
+
+export const themeStore = new ThemeStore();`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags a reaction in an ordinary event handler function", () => {
+    const result = runRule(
+      mobxReactionDisposerDiscarded,
+      `import { reaction } from "mobx";
+       const Widget = ({ store }) => {
+         const handleClick = () => {
+           reaction(
+             () => store.value,
+             (value) => console.log(value),
+           );
+         };
+         return <button onClick={handleClick}>Go</button>;
+       };`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
 });

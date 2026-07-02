@@ -227,4 +227,43 @@ describe("jsx-numeric-and-leaked-render", () => {
     expect(result.parseErrors).toEqual([]);
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("stays quiet on react-hook-form errors.length whose render side reads errors.length.message", () => {
+    const result = runRule(
+      jsxNumericAndLeakedRender,
+      `const DimensionsForm = () => {
+         const { register, formState: { errors } } = useForm();
+         return (
+           <form>
+             <input {...register("length", { required: "Length is required" })} />
+             {errors.length && <p className="error">{errors.length.message}</p>}
+           </form>
+         );
+       };`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet on a length property typed string by an in-file interface", () => {
+    const result = runRule(
+      jsxNumericAndLeakedRender,
+      `interface Track { title: string; length: string }
+       const TrackRow = ({ track }: { track: Track }) => (
+         <tr>
+           <td>{track.title}</td>
+           <td>{track.length && <Duration label={track.length} />}</td>
+         </tr>
+       );`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags array length even when an in-file interface types an unrelated receiver", () => {
+    const result = runRule(
+      jsxNumericAndLeakedRender,
+      `interface Track { length: string }
+       const List = ({ items }) => <div>{items.length && <ul>{items.map((i) => <li key={i} />)}</ul>}</div>;`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
 });

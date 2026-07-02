@@ -7,6 +7,7 @@ import { findVariableInitializer } from "../../utils/find-variable-initializer.j
 import { isFunctionLike } from "../../utils/is-function-like.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
 import type { RuleContext } from "../../utils/rule-context.js";
+import { stripParenExpression } from "../../utils/strip-paren-expression.js";
 import { walkAst } from "../../utils/walk-ast.js";
 
 const STRING_COERCION_FUNCTIONS = new Set(["String", "Number"]);
@@ -248,6 +249,35 @@ const findEnclosingMapCall = (
   return null;
 };
 
+// The filled array escaping into a call (`shuffle(slots)`;
+// `fillWithShuffledIndices(slots)`) may mutate its elements into distinct
+// values before the map — the fill-elements-are-identical premise no longer
+// holds.
+const fillBindingPassedToCall = (receiver: EsTreeNode): boolean => {
+  const stripped = stripParenExpression(receiver);
+  if (!isNodeOfType(stripped, "Identifier")) return false;
+  const receiverName = stripped.name;
+  let scope: EsTreeNode | null | undefined = stripped.parent;
+  while (scope && !isFunctionLike(scope) && !isNodeOfType(scope, "Program")) {
+    scope = scope.parent ?? null;
+  }
+  if (!scope) return false;
+  let escapes = false;
+  walkAst(scope, (child: EsTreeNode) => {
+    if (escapes) return false;
+    if (!isNodeOfType(child, "CallExpression")) return;
+    if (
+      (child.arguments ?? []).some(
+        (argument) => isNodeOfType(argument, "Identifier") && argument.name === receiverName,
+      )
+    ) {
+      escapes = true;
+      return false;
+    }
+  });
+  return escapes;
+};
+
 export const noFillMapElementAsKey = defineRule({
   id: "no-fill-map-element-as-key",
   title: "fill().map() first param is the element, not the index",
@@ -275,6 +305,7 @@ export const noFillMapElementAsKey = defineRule({
       const lengthArgument = resolveFillReceiverLengthArgument(enclosingMap.receiver);
       if (!lengthArgument) return;
       if (isNodeOfType(lengthArgument, "Literal") && lengthArgument.value === 1) return;
+      if (fillBindingPassedToCall(enclosingMap.receiver)) return;
 
       context.report({
         node,

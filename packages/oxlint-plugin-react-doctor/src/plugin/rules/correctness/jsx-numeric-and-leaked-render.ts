@@ -1,5 +1,7 @@
 import { containsJsxElement } from "../../utils/contains-jsx-element.js";
 import { defineRule } from "../../utils/define-rule.js";
+import { walkAst } from "../../utils/walk-ast.js";
+import { isFunctionLike } from "../../utils/is-function-like.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
 import { findVariableInitializer } from "../../utils/find-variable-initializer.js";
@@ -98,6 +100,127 @@ const isProvableCollectionReceiver = (objectNode: EsTreeNode): boolean => {
   return isRefCurrentOfMapOrSet(stripped);
 };
 
+// Serializes `errors.length` / `formState.errors.length` to a dotted path
+// of non-computed identifier links, or null for anything else.
+const memberPathOf = (node: EsTreeNode): string | null => {
+  const parts: string[] = [];
+  let current = stripParenExpression(node);
+  while (isNodeOfType(current, "MemberExpression")) {
+    if (current.computed || !isNodeOfType(current.property, "Identifier")) return null;
+    parts.unshift(current.property.name);
+    current = stripParenExpression(current.object as EsTreeNode);
+  }
+  if (!isNodeOfType(current, "Identifier")) return null;
+  parts.unshift(current.name);
+  return parts.join(".");
+};
+
+// `{errors.length && <p>{errors.length.message}</p>}` — the render side
+// reads a member OFF the guard's own `.length` path, proving the guarded
+// value is an object (react-hook-form's FieldError for a field named
+// "length"), not a count. Numbers have no such chained reads in JSX.
+const renderSideReadsMemberOfGuardPath = (
+  guardOperand: EsTreeNode,
+  renderOperand: EsTreeNode,
+): boolean => {
+  const guardPath = memberPathOf(guardOperand);
+  if (!guardPath) return false;
+  let found = false;
+  walkAst(renderOperand, (child: EsTreeNode) => {
+    if (found) return false;
+    if (!isNodeOfType(child, "MemberExpression") || child.computed) return;
+    const objectPath = memberPathOf(child.object as EsTreeNode);
+    if (objectPath === guardPath) {
+      found = true;
+      return false;
+    }
+  });
+  return found;
+};
+
+// A `length` member whose receiver's in-file TS type declares `length` as a
+// non-numeric member (`interface Track { length: string }` — a duration
+// label, not a count) cannot leak a `0`. Resolves one hop: a direct
+// `param: Track` annotation or a destructured `({ track }: { track: Track })`
+// object-pattern property.
+const inFileTypeDeclaresNonNumericLength = (receiverNode: EsTreeNode): boolean => {
+  const receiver = stripParenExpression(receiverNode);
+  if (!isNodeOfType(receiver, "Identifier")) return false;
+  const typeName = resolveReceiverTypeName(receiver);
+  if (!typeName) return false;
+  let declaresNonNumericLength = false;
+  let cursor: EsTreeNode | null | undefined = receiver;
+  while (cursor && !isNodeOfType(cursor, "Program")) cursor = cursor.parent ?? null;
+  if (!cursor) return false;
+  walkAst(cursor, (child: EsTreeNode) => {
+    if (declaresNonNumericLength) return false;
+    if (
+      !isNodeOfType(child, "TSInterfaceDeclaration") ||
+      !isNodeOfType(child.id, "Identifier") ||
+      child.id.name !== typeName
+    ) {
+      return;
+    }
+    for (const member of child.body?.body ?? []) {
+      if (
+        isNodeOfType(member, "TSPropertySignature") &&
+        !member.computed &&
+        isNodeOfType(member.key, "Identifier") &&
+        member.key.name === "length" &&
+        isNodeOfType(member.typeAnnotation, "TSTypeAnnotation") &&
+        !isNodeOfType(member.typeAnnotation.typeAnnotation, "TSNumberKeyword")
+      ) {
+        declaresNonNumericLength = true;
+        return false;
+      }
+    }
+  });
+  return declaresNonNumericLength;
+};
+
+const resolveReceiverTypeName = (receiver: EsTreeNodeOfType<"Identifier">): string | null => {
+  let cursor: EsTreeNode | null | undefined = receiver.parent;
+  while (cursor) {
+    if (isFunctionLike(cursor)) {
+      for (const param of cursor.params ?? []) {
+        const paramNode = param as EsTreeNode;
+        // param: Track
+        if (
+          isNodeOfType(paramNode, "Identifier") &&
+          paramNode.name === receiver.name &&
+          isNodeOfType(paramNode.typeAnnotation, "TSTypeAnnotation") &&
+          isNodeOfType(paramNode.typeAnnotation.typeAnnotation, "TSTypeReference") &&
+          isNodeOfType(paramNode.typeAnnotation.typeAnnotation.typeName, "Identifier")
+        ) {
+          return paramNode.typeAnnotation.typeAnnotation.typeName.name;
+        }
+        // ({ track }: { track: Track })
+        if (
+          isNodeOfType(paramNode, "ObjectPattern") &&
+          isNodeOfType(paramNode.typeAnnotation, "TSTypeAnnotation") &&
+          isNodeOfType(paramNode.typeAnnotation.typeAnnotation, "TSTypeLiteral")
+        ) {
+          for (const member of paramNode.typeAnnotation.typeAnnotation.members ?? []) {
+            if (
+              isNodeOfType(member, "TSPropertySignature") &&
+              !member.computed &&
+              isNodeOfType(member.key, "Identifier") &&
+              member.key.name === receiver.name &&
+              isNodeOfType(member.typeAnnotation, "TSTypeAnnotation") &&
+              isNodeOfType(member.typeAnnotation.typeAnnotation, "TSTypeReference") &&
+              isNodeOfType(member.typeAnnotation.typeAnnotation.typeName, "Identifier")
+            ) {
+              return member.typeAnnotation.typeAnnotation.typeName.name;
+            }
+          }
+        }
+      }
+    }
+    cursor = cursor.parent ?? null;
+  }
+  return null;
+};
+
 // True only for expressions whose runtime value is syntactically numeric, so
 // short-circuiting to a falsy `0`/`NaN` leaks a visible text node. No type
 // inference — comparisons, `!`/`!!`, `Boolean(...)`, strings, and bare
@@ -111,7 +234,9 @@ const isSyntacticallyNumeric = (node: EsTreeNode): boolean => {
     !stripped.computed &&
     isNodeOfType(stripped.property, "Identifier")
   ) {
-    if (stripped.property.name === "length") return true;
+    if (stripped.property.name === "length") {
+      return !inFileTypeDeclaresNonNumericLength(stripped.object as EsTreeNode);
+    }
     if (stripped.property.name === "size") return isProvableCollectionReceiver(stripped.object);
     return false;
   }
@@ -215,6 +340,7 @@ export const jsxNumericAndLeakedRender = defineRule({
         .slice(0, -1)
         .find((guardOperand) => isSyntacticallyNumeric(guardOperand));
       if (!leakingOperand) return;
+      if (renderSideReadsMemberOfGuardPath(leakingOperand, renderOperand)) return;
 
       context.report({
         node: leakingOperand,

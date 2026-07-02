@@ -1,4 +1,5 @@
 import { defineRule } from "../../utils/define-rule.js";
+import { walkAst } from "../../utils/walk-ast.js";
 import {
   getImportedNameFromModule,
   isNamespaceImportFromModule,
@@ -55,6 +56,74 @@ const isEvaluatedAtModuleScope = (node: EsTreeNode): boolean => {
   return true;
 };
 
+// App-bootstrap wiring functions (`registerReactions`, `initStores`,
+// `setupAutoruns`) exist to be called once for the process lifetime — the
+// same no-teardown-moment argument as bare module scope.
+const PROCESS_LIFETIME_WIRING_NAME_PATTERN = /^(?:register|init|setup|bootstrap|start|install)/i;
+
+const enclosingFunctionNameOf = (functionNode: EsTreeNode): string | null => {
+  if (
+    isNodeOfType(functionNode, "FunctionDeclaration") &&
+    isNodeOfType(functionNode.id, "Identifier")
+  ) {
+    return functionNode.id.name;
+  }
+  const parent = functionNode.parent;
+  if (isNodeOfType(parent, "VariableDeclarator") && isNodeOfType(parent.id, "Identifier")) {
+    return parent.id.name;
+  }
+  return null;
+};
+
+// The constructor of a class instantiated at module scope in the same file
+// (`export const themeStore = new ThemeStore()`) also runs once per process:
+// the singleton's reactions live as long as the app.
+const isProcessLifetimeWiring = (node: EsTreeNode): boolean => {
+  let ancestor = node.parent;
+  while (ancestor) {
+    if (isFunctionLike(ancestor)) {
+      const wiringName = enclosingFunctionNameOf(ancestor);
+      if (wiringName && PROCESS_LIFETIME_WIRING_NAME_PATTERN.test(wiringName)) return true;
+      const methodDefinition = ancestor.parent;
+      if (
+        isNodeOfType(methodDefinition, "MethodDefinition") &&
+        methodDefinition.kind === "constructor"
+      ) {
+        let classNode: EsTreeNode | null | undefined = methodDefinition.parent;
+        while (classNode && !isNodeOfType(classNode, "ClassDeclaration")) {
+          classNode = classNode.parent ?? null;
+        }
+        if (classNode && isNodeOfType(classNode.id, "Identifier")) {
+          const className = classNode.id.name;
+          let programRoot: EsTreeNode | null | undefined = classNode;
+          while (programRoot && !isNodeOfType(programRoot, "Program")) {
+            programRoot = programRoot.parent ?? null;
+          }
+          if (programRoot) {
+            let instantiatedAtModuleScope = false;
+            walkAst(programRoot, (child: EsTreeNode) => {
+              if (instantiatedAtModuleScope) return false;
+              if (
+                isNodeOfType(child, "NewExpression") &&
+                isNodeOfType(child.callee, "Identifier") &&
+                child.callee.name === className &&
+                isEvaluatedAtModuleScope(child)
+              ) {
+                instantiatedAtModuleScope = true;
+                return false;
+              }
+            });
+            if (instantiatedAtModuleScope) return true;
+          }
+        }
+      }
+      return false;
+    }
+    ancestor = ancestor.parent ?? null;
+  }
+  return false;
+};
+
 const mayCarryAbortSignal = (optionsArgument: unknown): boolean => {
   if (!optionsArgument) return false;
   if (!isNodeOfType(optionsArgument, "ObjectExpression")) return true;
@@ -86,6 +155,7 @@ export const mobxReactionDisposerDiscarded = defineRule({
       if (!isNodeOfType(node.parent, "ExpressionStatement")) return;
 
       if (isEvaluatedAtModuleScope(node)) return;
+      if (isProcessLifetimeWiring(node)) return;
 
       // A `signal` option is MobX's documented alternative disposal mechanism,
       // so discarding the disposer is correct there; opaque (non-literal)

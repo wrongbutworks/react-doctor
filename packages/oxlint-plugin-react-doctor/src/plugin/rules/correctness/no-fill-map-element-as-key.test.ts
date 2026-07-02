@@ -201,4 +201,39 @@ describe("no-fill-map-element-as-key", () => {
     expect(result.parseErrors).toEqual([]);
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("stays quiet: In-place Fisher-Yates shuffle helper populates the fill array before mapping", () => {
+    const result = runRule(
+      noFillMapElementAsKey,
+      `const fillWithShuffledIndices = (slots) => {
+  for (let position = 0; position < slots.length; position += 1) {
+    slots[position] = position;
+  }
+  for (let position = slots.length - 1; position > 0; position -= 1) {
+    const swapWith = Math.floor(Math.random() * (position + 1));
+    const held = slots[position];
+    slots[position] = slots[swapWith];
+    slots[swapWith] = held;
+  }
+};
+
+const QuizChoices = ({ choices }) => {
+  const order = Array(choices.length).fill(0);
+  fillWithShuffledIndices(order);
+  return <ol>{order.map((index) => <li key={index}>{choices[index]}</li>)}</ol>;
+};`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags when the filled binding is only mapped, never passed to a call", () => {
+    const result = runRule(
+      noFillMapElementAsKey,
+      `const Grid = ({ count }) => {
+         const slots = Array(count).fill(0);
+         return <ul>{slots.map((index) => <li key={index} />)}</ul>;
+       };`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
 });

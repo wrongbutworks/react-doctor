@@ -213,4 +213,61 @@ describe("no-effect-wrapper-discards-callback-cleanup-return", () => {
     );
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("stays quiet: for-of loop variable shadows the forwarded param while the real forwarded call is properly returned", () => {
+    const result = runRule(
+      noEffectWrapperDiscardsCallbackCleanupReturn,
+      `const useQueuedEffects = (effect: EffectCallback, deps: DependencyList) => {
+  const queuedEffects = useRef<Array<() => void>>([]);
+  useEffect(() => {
+    for (const effect of queuedEffects.current) {
+      effect();
+    }
+    queuedEffects.current = [];
+    return effect();
+  }, deps);
+  return queuedEffects;
+};`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: React 19 cleanup-style ref callback: bare detach call refCallback(null) whose return value is meaningless by contract", () => {
+    const result = runRule(
+      noEffectWrapperDiscardsCallbackCleanupReturn,
+      `const useAttachedRef = (
+  refCallback: (node: HTMLElement | null) => void | (() => void),
+  nodeRef: RefObject<HTMLElement | null>,
+) => {
+  useEffect(() => {
+    const node = nodeRef.current;
+    if (!node) {
+      refCallback(null);
+      return undefined;
+    }
+    const detach = refCallback(node);
+    return () => {
+      if (typeof detach === "function") {
+        detach();
+      } else {
+        refCallback(null);
+      }
+    };
+  }, [refCallback, nodeRef]);
+};`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags a bare forwarded call with a non-null argument", () => {
+    const result = runRule(
+      noEffectWrapperDiscardsCallbackCleanupReturn,
+      `const useWrapped = (effect: EffectCallback, deps: DependencyList) => {
+         useEffect(() => {
+           effect();
+         }, deps);
+       };`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
 });

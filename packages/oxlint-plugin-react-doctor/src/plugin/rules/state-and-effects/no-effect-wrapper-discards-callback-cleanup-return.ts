@@ -113,9 +113,30 @@ const discardedForwardedCallInExpression = (
     isNodeOfType(expression.callee, "Identifier") &&
     expression.callee.name === callbackName
   ) {
+    // `refCallback(null)` — a React 19 cleanup-style ref callback's detach
+    // call returns nothing meaningful by contract; only the ATTACH call's
+    // return carries the cleanup.
+    const onlyArgument = expression.arguments?.length === 1 ? expression.arguments[0] : null;
+    if (onlyArgument && isNodeOfType(onlyArgument, "Literal") && onlyArgument.value === null) {
+      return null;
+    }
     return expression;
   }
   return null;
+};
+
+// `for (const effect of queue) { effect(); }` rebinds the forwarded name —
+// calls of the loop variable are a different binding.
+const statementRebindsCallbackName = (statement: EsTreeNode, callbackName: string): boolean => {
+  if (!isNodeOfType(statement, "ForOfStatement") && !isNodeOfType(statement, "ForInStatement")) {
+    return false;
+  }
+  const left = statement.left;
+  if (!isNodeOfType(left, "VariableDeclaration")) return false;
+  return (left.declarations ?? []).some(
+    (declarator) =>
+      isNodeOfType(declarator.id, "Identifier") && declarator.id.name === callbackName,
+  );
 };
 
 const findBareForwardedCall = (effectBody: EsTreeNode, callbackName: string): EsTreeNode | null => {
@@ -123,6 +144,7 @@ const findBareForwardedCall = (effectBody: EsTreeNode, callbackName: string): Es
   walkAst(effectBody, (child) => {
     if (bareCall) return false;
     if (child !== effectBody && isFunctionLike(child)) return false;
+    if (statementRebindsCallbackName(child, callbackName)) return false;
     if (!isNodeOfType(child, "ExpressionStatement")) return;
     const forwardedCall = discardedForwardedCallInExpression(child.expression, callbackName);
     if (forwardedCall) {
