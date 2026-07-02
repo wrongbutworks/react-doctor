@@ -24,7 +24,13 @@ const EXTERNAL_STORE_HOOK_PATTERN = /^use(?:[A-Z][A-Za-z0-9]*)?Store$/;
 // (react-router's navigate, redux dispatch, react-query's client) — a deps
 // array of only these is de-facto mount-only, so overlapping re-runs cannot
 // occur. Corpus-verified: NextChat's `[navigate]` effect.
-const STABLE_RESULT_HOOKS = new Set(["useNavigate", "useDispatch", "useQueryClient"]);
+const STABLE_RESULT_HOOKS = new Set(["useNavigate", "useDispatch", "useQueryClient", "useRouter"]);
+// Typed wrappers over stable dispatchers (Redux Toolkit's documented
+// `useAppDispatch`) share the base hook's identity guarantee.
+const STABLE_RESULT_HOOK_PATTERN = /^use[A-Z]\w*Dispatch$/;
+// Hooks whose destructured METHODS are documented stable (react-hook-form's
+// `reset`/`setValue` from useForm).
+const STABLE_METHOD_HOOKS = new Set(["useForm"]);
 
 // Cancellation / mounted-guard idioms. When the awaiting scope reads any of
 // these we assume the developer already guards the post-await write, so we
@@ -120,6 +126,47 @@ const isDependencyOnlyInvokedInCallback = (
   return !hasNonInvocationUse;
 };
 
+// `const load = useCallback(async () => ..., [])` — an empty-deps
+// useCallback/useMemo result never changes identity, so a deps array of
+// only such bindings is de-facto mount-only. Also covers hooks matching
+// STABLE_RESULT_HOOK_PATTERN and stable methods destructured from
+// STABLE_METHOD_HOOKS results.
+const isStableHookProductBinding = (scopeAnchor: EsTreeNode, bindingName: string): boolean => {
+  let cursor: EsTreeNode | null | undefined = scopeAnchor;
+  while (cursor) {
+    if (isNodeOfType(cursor, "BlockStatement") || isNodeOfType(cursor, "Program")) {
+      for (const statement of cursor.body ?? []) {
+        if (!isNodeOfType(statement, "VariableDeclaration")) continue;
+        for (const declarator of statement.declarations ?? []) {
+          if (!doesBindingPatternBindName(declarator.id, bindingName)) continue;
+          if (!isNodeOfType(declarator.init, "CallExpression")) continue;
+          const hookCallee = declarator.init.callee;
+          if (!isNodeOfType(hookCallee, "Identifier")) continue;
+          if (STABLE_RESULT_HOOK_PATTERN.test(hookCallee.name)) return true;
+          if (
+            STABLE_METHOD_HOOKS.has(hookCallee.name) &&
+            isNodeOfType(declarator.id, "ObjectPattern")
+          ) {
+            return true;
+          }
+          if (hookCallee.name === "useCallback" || hookCallee.name === "useMemo") {
+            const dependencyArgument = declarator.init.arguments?.[1];
+            if (
+              dependencyArgument &&
+              isNodeOfType(dependencyArgument, "ArrayExpression") &&
+              (dependencyArgument.elements ?? []).length === 0
+            ) {
+              return true;
+            }
+          }
+        }
+      }
+    }
+    cursor = cursor.parent ?? null;
+  }
+  return false;
+};
+
 // A module-scope `const` (or import) has one identity for the module's whole
 // lifetime, so it can never re-trigger the effect. Any closer binding of the
 // same name (param, local declaration) shadows it and disqualifies the dep.
@@ -198,6 +245,7 @@ const hasOnlyStableIdentityDependencies = ({
         bindingName: dependencyElement.name,
         hookName: STABLE_RESULT_HOOKS,
       }) ||
+      isStableHookProductBinding(dependencyArray, dependencyElement.name) ||
       isModuleScopeConstBinding(dependencyArray, dependencyElement.name) ||
       (isExternalStoreHookBinding(dependencyArray, dependencyElement.name) &&
         isDependencyOnlyInvokedInCallback(effectCallback, dependencyElement.name))
@@ -247,10 +295,70 @@ const findFirstSuspensionStart = (asyncFunction: EsTreeNode): number | null => {
   return earliestSuspensionStart;
 };
 
+const MERGE_COLLECTION_CONSTRUCTOR_NAMES = new Set(["Map", "Set"]);
+
+// A merge-shaped expression over the previous-state parameter `p`:
+// `{ ...p, [k]: v }`, `Object.assign({}, p, ...)`, `new Map(p).set(k, v)` /
+// `new Set(p).add(v)`, or `p` itself (bail-out return). All preserve every
+// other run's entries, so a late resolution cannot clobber newer state.
+// A merge CONSTRUCTION copies prev into a fresh container: `{ ...p, ... }`,
+// `Object.assign({}, p, ...)`, `new Map(p)` / `new Set(p)` — optionally
+// followed by member calls on the fresh copy (`new Map(p).set(k, v)`).
+// Member calls on `p` ITSELF (`p.concat(chunk)`) are not merges: they
+// transform stale state directly, the exact streaming hazard the rule
+// targets.
+const isMergeConstruction = (expression: EsTreeNode, previousStateName: string): boolean => {
+  const inner = stripParenExpression(expression);
+  if (isNodeOfType(inner, "ObjectExpression")) {
+    return (inner.properties ?? []).some(
+      (property) =>
+        isNodeOfType(property, "SpreadElement") &&
+        isNodeOfType(property.argument, "Identifier") &&
+        property.argument.name === previousStateName,
+    );
+  }
+  if (isNodeOfType(inner, "NewExpression")) {
+    return (
+      isNodeOfType(inner.callee, "Identifier") &&
+      MERGE_COLLECTION_CONSTRUCTOR_NAMES.has(inner.callee.name) &&
+      (inner.arguments ?? []).some(
+        (argument) => isNodeOfType(argument, "Identifier") && argument.name === previousStateName,
+      )
+    );
+  }
+  if (isNodeOfType(inner, "CallExpression")) {
+    const callee = inner.callee;
+    if (
+      isNodeOfType(callee, "MemberExpression") &&
+      !callee.computed &&
+      isNodeOfType(callee.object, "Identifier") &&
+      callee.object.name === "Object" &&
+      isNodeOfType(callee.property, "Identifier") &&
+      callee.property.name === "assign"
+    ) {
+      return (inner.arguments ?? []).some(
+        (argument) => isNodeOfType(argument, "Identifier") && argument.name === previousStateName,
+      );
+    }
+    if (isNodeOfType(callee, "MemberExpression")) {
+      return isMergeConstruction(callee.object as EsTreeNode, previousStateName);
+    }
+  }
+  return false;
+};
+
+const isMergeShapedExpression = (expression: EsTreeNode, previousStateName: string): boolean => {
+  const inner = stripParenExpression(expression);
+  if (isNodeOfType(inner, "Identifier")) return inner.name === previousStateName;
+  return isMergeConstruction(inner, previousStateName);
+};
+
 // `setMessages(prev => ({ ...prev, [key]: value }))` — a functional updater
 // that MERGES into its own previous-state parameter is order-independent
 // cache accumulation: a late resolution adds its own key and cannot clobber
-// a newer run's state. Replace-shaped updaters (`() => fetched`) still flag.
+// a newer run's state. Block bodies qualify when EVERY return path yields a
+// merge shape (directly, or via a local temp initialized to one). Replace-
+// shaped updaters (`() => fetched`) still flag.
 const isMergeShapedFunctionalUpdater = (
   setterCall: EsTreeNodeOfType<"CallExpression">,
 ): boolean => {
@@ -258,22 +366,37 @@ const isMergeShapedFunctionalUpdater = (
   if (!isFunctionLike(updater)) return false;
   const previousStateParam = updater.params?.[0];
   if (!isNodeOfType(previousStateParam, "Identifier")) return false;
-  let body: EsTreeNode = updater.body as EsTreeNode;
-  if (isNodeOfType(body, "BlockStatement")) {
-    const statements = body.body ?? [];
-    if (statements.length !== 1) return false;
-    const only = statements[0];
-    if (!isNodeOfType(only, "ReturnStatement") || !only.argument) return false;
-    body = only.argument as EsTreeNode;
+  const previousStateName = previousStateParam.name;
+  const body: EsTreeNode = updater.body as EsTreeNode;
+  if (!isNodeOfType(body, "BlockStatement")) {
+    return isMergeShapedExpression(body, previousStateName);
   }
-  body = stripParenExpression(body);
-  if (!isNodeOfType(body, "ObjectExpression")) return false;
-  return (body.properties ?? []).some(
-    (property) =>
-      isNodeOfType(property, "SpreadElement") &&
-      isNodeOfType(property.argument, "Identifier") &&
-      property.argument.name === previousStateParam.name,
-  );
+  const mergeShapedLocals = new Set<string>();
+  const returnArguments: EsTreeNode[] = [];
+  let sawNonMergeStructure = false;
+  walkOwnFunctionScope(updater, (child: EsTreeNode) => {
+    if (
+      isNodeOfType(child, "VariableDeclarator") &&
+      isNodeOfType(child.id, "Identifier") &&
+      child.init &&
+      isMergeShapedExpression(child.init as EsTreeNode, previousStateName)
+    ) {
+      mergeShapedLocals.add(child.id.name);
+    }
+    if (isNodeOfType(child, "ReturnStatement")) {
+      if (!child.argument) {
+        sawNonMergeStructure = true;
+        return;
+      }
+      returnArguments.push(child.argument as EsTreeNode);
+    }
+  });
+  if (sawNonMergeStructure || returnArguments.length === 0) return false;
+  return returnArguments.every((argument) => {
+    const inner = stripParenExpression(argument);
+    if (isNodeOfType(inner, "Identifier") && mergeShapedLocals.has(inner.name)) return true;
+    return isMergeShapedExpression(inner, previousStateName);
+  });
 };
 
 // The awaiting async scope is a stale-write hazard when a state setter
@@ -349,7 +472,10 @@ const containsBooleanLiteralAssignmentTo = (root: EsTreeNode, bindingName: strin
   return found;
 };
 
-const containsSetterCallWithBooleanLiteral = (root: EsTreeNode, setterName: string): boolean => {
+// Boolean AND string/number literals qualify — a string status machine
+// (`setPhase("running")`) latches with the same concurrency semantics as a
+// boolean flag.
+const containsSetterCallWithLiteral = (root: EsTreeNode, setterName: string): boolean => {
   let found = false;
   walkAst(root, (child: EsTreeNode) => {
     if (found) return false;
@@ -357,14 +483,57 @@ const containsSetterCallWithBooleanLiteral = (root: EsTreeNode, setterName: stri
       isNodeOfType(child, "CallExpression") &&
       isNodeOfType(child.callee, "Identifier") &&
       child.callee.name === setterName &&
-      isNodeOfType(child.arguments?.[0], "Literal") &&
-      typeof (child.arguments[0] as EsTreeNodeOfType<"Literal">).value === "boolean"
+      isNodeOfType(child.arguments?.[0], "Literal")
     ) {
       found = true;
       return false;
     }
   });
   return found;
+};
+
+// `const seq = ++requestSeq; ... if (seq !== requestSeq) return;` — the
+// latest-request-wins sequence counter (the rule's own recommended
+// remediation, spelled with a module-level counter instead of a ref).
+const hasSequenceCounterGuard = (
+  asyncFunction: EsTreeNode,
+  effectCallback: EsTreeNode,
+): boolean => {
+  let counterName: string | null = null;
+  let snapshotName: string | null = null;
+  walkAst(effectCallback, (child: EsTreeNode) => {
+    if (counterName) return false;
+    if (
+      isNodeOfType(child, "VariableDeclarator") &&
+      isNodeOfType(child.id, "Identifier") &&
+      child.init &&
+      isNodeOfType(child.init, "UpdateExpression") &&
+      child.init.operator === "++" &&
+      isNodeOfType(child.init.argument, "Identifier")
+    ) {
+      snapshotName = child.id.name;
+      counterName = child.init.argument.name;
+      return false;
+    }
+  });
+  if (!counterName || !snapshotName) return false;
+  let isGuarded = false;
+  walkOwnFunctionScope(asyncFunction, (child: EsTreeNode) => {
+    if (isGuarded) return false;
+    if (!isNodeOfType(child, "IfStatement") || !isEarlyExitStatement(child.consequent)) return;
+    const test = stripParenExpression(child.test as EsTreeNode);
+    if (!isNodeOfType(test, "BinaryExpression")) return;
+    if (test.operator !== "!==" && test.operator !== "!=") return;
+    const names = [test.left, test.right]
+      .map((side) => stripParenExpression(side as EsTreeNode))
+      .filter((side) => isNodeOfType(side, "Identifier"))
+      .map((side) => (side as EsTreeNodeOfType<"Identifier">).name);
+    if (names.includes(counterName as string) && names.includes(snapshotName as string)) {
+      isGuarded = true;
+      return false;
+    }
+  });
+  return isGuarded;
 };
 
 // An in-flight mutex whose NAME doesn't match CANCELLATION_GUARD_PATTERN:
@@ -403,7 +572,7 @@ const hasPreAwaitEarlyReturnLatch = (
         return false;
       }
       const setterName = findPairedUseStateSetterName(asyncFunction, testChild.name);
-      if (setterName && containsSetterCallWithBooleanLiteral(effectCallback, setterName)) {
+      if (setterName && containsSetterCallWithLiteral(effectCallback, setterName)) {
         isLatched = true;
         return false;
       }
@@ -450,6 +619,7 @@ export const noSetStateAfterAwaitInEffect = defineRule({
 
       for (const asyncFunction of asyncFunctions) {
         if (hasPreAwaitEarlyReturnLatch(asyncFunction, callback)) continue;
+        if (hasSequenceCounterGuard(asyncFunction, callback)) continue;
         if (hasPostAwaitStateSetter(asyncFunction)) {
           context.report({ node, message: MESSAGE });
           return;

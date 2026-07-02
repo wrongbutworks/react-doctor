@@ -642,4 +642,272 @@ describe("no-set-state-after-await-in-effect", () => {
     );
     expect(result.diagnostics).toHaveLength(1);
   });
+
+  it("stays quiet: useCallback with empty deps as the only dependency (de-facto mount-only)", () => {
+    const result = runRule(
+      noSetStateAfterAwaitInEffect,
+      `const Dashboard = () => {
+  const loadStats = useCallback(async () => statsApi.fetchSummary(), []);
+  const [stats, setStats] = useState(null);
+  useEffect(() => {
+    const run = async () => {
+      const summary = await loadStats();
+      setStats(summary);
+    };
+    run();
+  }, [loadStats]);
+};`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: useAppDispatch (Redux Toolkit's documented typed dispatch wrapper) as the only dependency", () => {
+    const result = runRule(
+      noSetStateAfterAwaitInEffect,
+      `const SessionBootstrap = () => {
+  const dispatch = useAppDispatch();
+  const [restored, setRestored] = useState(false);
+  useEffect(() => {
+    const bootstrap = async () => {
+      const session = await loadPersistedSession();
+      dispatch(sessionRestored(session));
+      setRestored(true);
+    };
+    bootstrap();
+  }, [dispatch]);
+};`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: next/navigation useRouter as the only dependency (stable app-router instance)", () => {
+    const result = runRule(
+      noSetStateAfterAwaitInEffect,
+      `import { useRouter } from "next/navigation";
+const AuthGate = ({ children }) => {
+  const router = useRouter();
+  const [checked, setChecked] = useState(false);
+  useEffect(() => {
+    const verify = async () => {
+      const session = await getSession();
+      if (!session) {
+        router.replace("/login");
+        return;
+      }
+      setChecked(true);
+    };
+    verify();
+  }, [router]);
+  return checked ? children : null;
+};`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Block-bodied object-merge updater with a temp variable (same semantics as the exempt inline spread)", () => {
+    const result = runRule(
+      noSetStateAfterAwaitInEffect,
+      `const LocaleLoader = ({ currentLocale }) => {
+  const [messages, setMessages] = useState({});
+  useEffect(() => {
+    const loadLocale = async () => {
+      const localeFile = await import("./locales/" + currentLocale + ".json");
+      setMessages((prev) => {
+        const next = { ...prev, [currentLocale]: localeFile };
+        return next;
+      });
+    };
+    loadLocale();
+  }, [currentLocale]);
+};`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Map-merge functional updater keyed by the dep (order-independent cache)", () => {
+    const result = runRule(
+      noSetStateAfterAwaitInEffect,
+      `const LocaleLoader = ({ locale }) => {
+  const [bundles, setBundles] = useState(new Map());
+  useEffect(() => {
+    const load = async () => {
+      const bundle = await fetchLocaleBundle(locale);
+      setBundles((prev) => new Map(prev).set(locale, bundle));
+    };
+    load();
+  }, [locale]);
+};`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Object.assign-shaped merge updater", () => {
+    const result = runRule(
+      noSetStateAfterAwaitInEffect,
+      `const ThumbnailGrid = ({ assetId }) => {
+  const [thumbnails, setThumbnails] = useState({});
+  useEffect(() => {
+    const resolve = async () => {
+      const thumbnailUrl = await resolveThumbnail(assetId);
+      setThumbnails((prev) => Object.assign({}, prev, { [assetId]: thumbnailUrl }));
+    };
+    resolve();
+  }, [assetId]);
+};`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Guarded merge updater that no-ops when the key already exists", () => {
+    const result = runRule(
+      noSetStateAfterAwaitInEffect,
+      `const PageCache = ({ pageId }) => {
+  const [pages, setPages] = useState({});
+  useEffect(() => {
+    const load = async () => {
+      const rows = await fetchPage(pageId);
+      setPages((prev) => {
+        if (prev[pageId]) return prev;
+        return { ...prev, [pageId]: rows };
+      });
+    };
+    load();
+  }, [pageId]);
+};`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Set-union functional updater keyed by the dep", () => {
+    const result = runRule(
+      noSetStateAfterAwaitInEffect,
+      `const ImagePreloader = ({ src }) => {
+  const [loadedSrcs, setLoadedSrcs] = useState(() => new Set());
+  useEffect(() => {
+    const preload = async () => {
+      await preloadImage(src);
+      setLoadedSrcs((prev) => new Set(prev).add(src));
+    };
+    preload();
+  }, [src]);
+};`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Module-level sequence counter implementing latest-request-wins (the rule's own remediation)", () => {
+    const result = runRule(
+      noSetStateAfterAwaitInEffect,
+      `let searchSeq = 0;
+const Search = ({ query }) => {
+  const [results, setResults] = useState([]);
+  useEffect(() => {
+    const seq = ++searchSeq;
+    const run = async () => {
+      const found = await searchApi(query);
+      if (seq !== searchSeq) return;
+      setResults(found);
+    };
+    run();
+  }, [query]);
+};`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: String-status one-shot latch (same concurrency semantics as the blessed boolean latch)", () => {
+    const result = runRule(
+      noSetStateAfterAwaitInEffect,
+      `const MigrationGate = () => {
+  const [phase, setPhase] = useState("pending");
+  useEffect(() => {
+    const advance = async () => {
+      if (phase !== "pending") return;
+      setPhase("running");
+      await runPendingMigrations();
+      setPhase("ready");
+    };
+    advance();
+  }, [phase]);
+};`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: react-hook-form reset as the only dependency (documented stable method)", () => {
+    const result = runRule(
+      noSetStateAfterAwaitInEffect,
+      `const ProfileForm = () => {
+  const { reset } = useForm();
+  const [hydrated, setHydrated] = useState(false);
+  useEffect(() => {
+    const hydrate = async () => {
+      const profile = await api.fetchProfile();
+      reset(profile);
+      setHydrated(true);
+    };
+    hydrate();
+  }, [reset]);
+};`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags a useCallback dep whose own deps are non-empty", () => {
+    const result = runRule(
+      noSetStateAfterAwaitInEffect,
+      `const Dashboard = ({ range }) => {
+         const loadStats = useCallback(async () => statsApi.fetchSummary(range), [range]);
+         const [stats, setStats] = useState(null);
+         useEffect(() => {
+           const run = async () => {
+             const summary = await loadStats();
+             setStats(summary);
+           };
+           run();
+         }, [loadStats]);
+       };`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags a block-bodied updater whose return replaces prev", () => {
+    const result = runRule(
+      noSetStateAfterAwaitInEffect,
+      `const Profile = ({ userId }) => {
+         const [profile, setProfile] = useState(null);
+         useEffect(() => {
+           const load = async () => {
+             const fetched = await fetchProfile(userId);
+             setProfile((prev) => {
+               const next = { name: fetched.name };
+               return next;
+             });
+           };
+           load();
+         }, [userId]);
+       };`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags a sequence guard comparing unrelated names", () => {
+    const result = runRule(
+      noSetStateAfterAwaitInEffect,
+      `let searchSeq = 0;
+       const Search = ({ query }) => {
+         const [results, setResults] = useState([]);
+         useEffect(() => {
+           const seq = ++searchSeq;
+           const run = async () => {
+             const found = await searchApi(query);
+             if (seq !== query.length) return;
+             setResults(found);
+           };
+           run();
+         }, [query]);
+       };`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
 });
