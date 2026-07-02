@@ -1,3 +1,6 @@
+import { walkAst } from "../../utils/walk-ast.js";
+import { isFunctionLike } from "../../utils/is-function-like.js";
+import { stripParenExpression } from "../../utils/strip-paren-expression.js";
 import { defineRule } from "../../utils/define-rule.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
@@ -123,6 +126,113 @@ const resolveConstInitializer = (identifier: EsTreeNodeOfType<"Identifier">): Es
   return binding.initializer;
 };
 
+// `EXTERNAL_LINKS.docs` — property read off a same-file const object of
+// trusted literals; `item.href` — property of an element of a const config
+// array iterated by the enclosing map callback. Both are developer-typed
+// destinations behind one level of data structure.
+const isTrustedConstConfigMember = (
+  memberNode: EsTreeNodeOfType<"MemberExpression">,
+  depth: number,
+): boolean => {
+  if (!isNodeOfType(memberNode.property, "Identifier")) return false;
+  const propertyName = memberNode.property.name;
+  const receiver = stripParenExpression(memberNode.object as EsTreeNode);
+  if (!isNodeOfType(receiver, "Identifier")) return false;
+
+  const objectValueIsTrusted = (objectLiteral: EsTreeNode): boolean => {
+    if (!isNodeOfType(objectLiteral, "ObjectExpression")) return false;
+    for (const property of objectLiteral.properties ?? []) {
+      if (
+        isNodeOfType(property, "Property") &&
+        !property.computed &&
+        isNodeOfType(property.key, "Identifier") &&
+        property.key.name === propertyName
+      ) {
+        return isTrustedDestination(property.value as EsTreeNode, depth + 1);
+      }
+    }
+    return false;
+  };
+
+  const constInitializer = resolveConstInitializer(receiver);
+  if (constInitializer && isNodeOfType(constInitializer, "ObjectExpression")) {
+    return objectValueIsTrusted(constInitializer);
+  }
+
+  // Callback param of `<CONST_ARRAY>.map((item) => ...)`.
+  const binding = findVariableInitializer(receiver, receiver.name);
+  const paramParent = binding?.bindingIdentifier.parent;
+  if (!paramParent) return false;
+  let callbackFunction: EsTreeNode | null = null;
+  if (
+    isFunctionLike(paramParent) &&
+    (paramParent.params ?? []).includes(binding.bindingIdentifier as never)
+  ) {
+    callbackFunction = paramParent;
+  }
+  if (!callbackFunction) return false;
+  const iterationCall = callbackFunction.parent;
+  if (
+    !iterationCall ||
+    !isNodeOfType(iterationCall, "CallExpression") ||
+    !isNodeOfType(iterationCall.callee, "MemberExpression")
+  ) {
+    return false;
+  }
+  const iterated = stripParenExpression(iterationCall.callee.object as EsTreeNode);
+  let arrayLiteral: EsTreeNode | null = null;
+  if (isNodeOfType(iterated, "ArrayExpression")) arrayLiteral = iterated;
+  else if (isNodeOfType(iterated, "Identifier")) {
+    const arrayInitializer = resolveConstInitializer(iterated);
+    if (arrayInitializer && isNodeOfType(arrayInitializer, "ArrayExpression")) {
+      arrayLiteral = arrayInitializer;
+    }
+  }
+  if (!arrayLiteral || !isNodeOfType(arrayLiteral, "ArrayExpression")) return false;
+  const elements = arrayLiteral.elements ?? [];
+  return (
+    elements.length > 0 &&
+    elements.every(
+      (element) =>
+        element != null && objectValueIsTrusted(stripParenExpression(element as EsTreeNode)),
+    )
+  );
+};
+
+// A `let url;` whose EVERY assignment in the enclosing scope is a trusted
+// static literal (switch/case link pickers) cannot carry attacker data.
+const isLetAssignedOnlyTrustedLiterals = (
+  identifier: EsTreeNodeOfType<"Identifier">,
+  depth: number,
+): boolean => {
+  const binding = findVariableInitializer(identifier, identifier.name);
+  if (!binding) return false;
+  const declarator = binding.bindingIdentifier.parent;
+  if (!declarator || !isNodeOfType(declarator, "VariableDeclarator")) return false;
+  if (declarator.init && !isTrustedDestination(declarator.init as EsTreeNode, depth + 1)) {
+    return false;
+  }
+  const scopeOwner = binding.scopeOwner;
+  let sawAssignment = false;
+  let sawUntrustedAssignment = false;
+  walkAst(scopeOwner, (child: EsTreeNode) => {
+    if (sawUntrustedAssignment) return false;
+    if (
+      isNodeOfType(child, "AssignmentExpression") &&
+      child.operator === "=" &&
+      isNodeOfType(child.left, "Identifier") &&
+      child.left.name === identifier.name
+    ) {
+      sawAssignment = true;
+      if (!isTrustedDestination(child.right as EsTreeNode, depth + 1)) {
+        sawUntrustedAssignment = true;
+        return false;
+      }
+    }
+  });
+  return sawAssignment && !sawUntrustedAssignment;
+};
+
 // The trusted-by-construction check, extended one binding hop: a local
 // const holding a ternary over origin-pinned templates
 // (releaseUrl = version ? `https://github.com/…/tag/v${version}` : null)
@@ -131,6 +241,44 @@ const resolveConstInitializer = (identifier: EsTreeNodeOfType<"Identifier">): Es
 // initializer must itself be trusted; opaque initializers (call results,
 // awaited API responses, hook-destructured values) resolve to nothing
 // and keep firing.
+// `'https://github.com/' + owner + '/' + repo` — concatenation whose
+// LEFTMOST operand pins the origin (or a same-origin path) is the semantic
+// twin of the exempt template.
+const leftmostConcatOperand = (node: EsTreeNode): EsTreeNode => {
+  let cursor = node;
+  while (isNodeOfType(cursor, "BinaryExpression") && cursor.operator === "+") {
+    cursor = stripParenExpression(cursor.left as EsTreeNode);
+  }
+  return cursor;
+};
+
+// SCREAMING_SNAKE URL constants imported from the app's own modules are
+// developer-controlled configuration, same trust class as a same-file const.
+const IMPORTED_URL_CONSTANT_NAME_PATTERN = /^[A-Z][A-Z0-9_]*(?:URL|LINK|HREF)$/;
+
+const isImportedUrlConstant = (identifier: EsTreeNodeOfType<"Identifier">): boolean => {
+  if (!IMPORTED_URL_CONSTANT_NAME_PATTERN.test(identifier.name)) return false;
+  const binding = findVariableInitializer(identifier, identifier.name);
+  if (!binding) return false;
+  const bindingParent = binding.bindingIdentifier.parent;
+  return Boolean(
+    bindingParent &&
+    (isNodeOfType(bindingParent, "ImportSpecifier") ||
+      isNodeOfType(bindingParent, "ImportDefaultSpecifier")),
+  );
+};
+
+// `URL.createObjectURL(blob)` — a blob: URL of app-generated content; the
+// opened document is same-process content, no opener hazard.
+const isCreateObjectUrlCall = (node: EsTreeNode): boolean =>
+  isNodeOfType(node, "CallExpression") &&
+  isNodeOfType(node.callee, "MemberExpression") &&
+  !node.callee.computed &&
+  isNodeOfType(node.callee.object, "Identifier") &&
+  node.callee.object.name === "URL" &&
+  isNodeOfType(node.callee.property, "Identifier") &&
+  node.callee.property.name === "createObjectURL";
+
 const isTrustedDestination = (
   urlArgument: EsTreeNode | null | undefined,
   depth: number,
@@ -156,10 +304,58 @@ const isTrustedDestination = (
       isTrustedOrNullishDestination(urlArgument.right, depth + 1)
     );
   }
+  // TS assertions (`'https://…' as const`) are transparent.
+  if (
+    urlArgument.type === "TSAsExpression" ||
+    urlArgument.type === "TSSatisfiesExpression" ||
+    urlArgument.type === "TSNonNullExpression"
+  ) {
+    return isTrustedDestination(
+      (urlArgument as { expression?: EsTreeNode }).expression ?? null,
+      depth + 1,
+    );
+  }
+  if (isNodeOfType(urlArgument, "BinaryExpression") && urlArgument.operator === "+") {
+    return isTrustedStaticDestination(leftmostConcatOperand(urlArgument));
+  }
+  if (isCreateObjectUrlCall(urlArgument)) return true;
+  // `shareUrl.toString()` / `shareUrl.href` where shareUrl is a const
+  // `new URL('<trusted>')` builder — searchParams mutation cannot change
+  // the origin.
+  if (
+    isNodeOfType(urlArgument, "CallExpression") &&
+    isNodeOfType(urlArgument.callee, "MemberExpression") &&
+    !urlArgument.callee.computed &&
+    isNodeOfType(urlArgument.callee.property, "Identifier") &&
+    (urlArgument.callee.property.name === "toString" ||
+      urlArgument.callee.property.name === "toJSON")
+  ) {
+    return isTrustedDestination(urlArgument.callee.object as EsTreeNode, depth + 1);
+  }
+  if (isNodeOfType(urlArgument, "NewExpression")) {
+    return (
+      isNodeOfType(urlArgument.callee, "Identifier") &&
+      urlArgument.callee.name === "URL" &&
+      isTrustedDestination((urlArgument.arguments?.[0] as EsTreeNode) ?? null, depth + 1)
+    );
+  }
+  // `EXTERNAL_LINKS.docs` / `item.href` — a member read off a const
+  // object/array config whose relevant values are all trusted literals.
+  // Non-terminal: location-shaped member reads are handled below.
+  if (
+    isNodeOfType(urlArgument, "MemberExpression") &&
+    !urlArgument.computed &&
+    isTrustedConstConfigMember(urlArgument, depth + 1)
+  ) {
+    return true;
+  }
   if (isNodeOfType(urlArgument, "Identifier")) {
+    if (isImportedUrlConstant(urlArgument)) return true;
     const constInitializer = resolveConstInitializer(urlArgument);
-    if (constInitializer == null) return false;
-    return isTrustedOrNullishDestination(constInitializer, depth + 1);
+    if (constInitializer != null) {
+      return isTrustedOrNullishDestination(constInitializer, depth + 1);
+    }
+    return isLetAssignedOnlyTrustedLiterals(urlArgument, depth + 1);
   }
   if (isNodeOfType(urlArgument, "ChainExpression")) {
     return isTrustedDestination(urlArgument.expression as EsTreeNode, depth + 1);

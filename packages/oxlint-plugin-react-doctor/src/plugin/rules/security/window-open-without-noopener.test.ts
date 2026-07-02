@@ -494,4 +494,208 @@ describe("window-open-without-noopener", () => {
     const result = runRule(windowOpenWithoutNoopener, `db.open(url);`);
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("stays quiet: Hardcoded link map: member access on a same-file const object of literal URLs", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      `const EXTERNAL_LINKS = {
+  docs: 'https://docs.example.com/',
+  github: 'https://github.com/acme/widget',
+};
+const HelpMenu = () => (
+  <button onClick={() => window.open(EXTERNAL_LINKS.docs, '_blank')}>Docs</button>
+);`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Nav config array with hardcoded hrefs: item.external ? window.open(item.href) : navigate(item.href)", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      `const NAV_ITEMS = [
+  { label: 'Docs', href: 'https://docs.example.com/', external: true },
+  { label: 'Settings', href: '/settings', external: false },
+];
+const Sidebar = ({ navigate }) => (
+  <ul>
+    {NAV_ITEMS.map((item) => (
+      <li key={item.label}>
+        <button
+          onClick={() => {
+            item.external ? window.open(item.href, '_blank') : navigate(item.href);
+          }}
+        >
+          {item.label}
+        </button>
+      </li>
+    ))}
+  </ul>
+);`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: String concatenation with a pinned https origin — the exempt template's exact + equivalent", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      `window.open('https://github.com/' + owner + '/' + repo, '_blank');`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: String concatenation with a same-origin path prefix (drawdb wild shape)", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      `window.open('/editor/templates/' + selectedTemplateId, '_blank');`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Same-origin absolute URL via ${window.location.origin} in the host position", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      `window.open(\`\${window.location.origin}/preview?id=\${documentId}\`, '_blank');`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: URL API builder: new URL literal origin + searchParams.set + toString()", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      `const shareUrl = new URL('https://twitter.com/intent/tweet');
+shareUrl.searchParams.set('text', message);
+window.open(shareUrl.toString(), '_blank');`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Imported URL constant from the app's constants module", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      `import { CHANGELOG_URL } from './constants';
+const openChangelog = () => {
+  window.open(CHANGELOG_URL, '_blank');
+};`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Template interpolating a same-file trusted const base URL", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      `const API_BASE = 'https://api.example.com';
+window.open(\`\${API_BASE}/docs/getting-started\`, '_blank');`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: OAuth popup that must keep window.opener for the postMessage handshake", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      `const API_BASE = 'https://api.example.com';
+function ConnectButton({ onToken }) {
+  const startOAuth = () => {
+    window.open(\`\${API_BASE}/oauth/google/start\`, 'oauth-popup', 'width=500,height=650');
+  };
+  React.useEffect(() => {
+    const onMessage = (event) => {
+      if (event.origin !== window.location.origin) return;
+      if (event.data?.type === 'oauth-token') onToken(event.data.token);
+    };
+    window.addEventListener('message', onMessage);
+    return () => window.removeEventListener('message', onMessage);
+  }, [onToken]);
+  return <button onClick={startOAuth}>Connect Google</button>;
+}`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Blob object URL of app-generated content (SVG/PDF export preview)", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      `const handleExport = () => {
+  const svgMarkup = new XMLSerializer().serializeToString(svgRef.current);
+  const blob = new Blob([svgMarkup], { type: 'image/svg+xml' });
+  const objectUrl = URL.createObjectURL(blob);
+  window.open(objectUrl, '_blank');
+};`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: as-const literal URL binding (TSAsExpression not unwrapped)", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      `const DOCS_URL = 'https://docs.example.com/guide' as const;
+window.open(DOCS_URL, '_blank');`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: let assigned only hardcoded literals across switch branches", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      `function openHelp(kind) {
+  let url;
+  switch (kind) {
+    case 'docs':
+      url = 'https://docs.example.com/';
+      break;
+    default:
+      url = 'https://support.example.com/';
+  }
+  window.open(url, '_blank');
+}`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Const search base + encodeURIComponent query (freeCodeCamp shape)", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      `const SEARCH_URL = 'https://www.freecodecamp.org/news/search/';
+window.open(\`\${SEARCH_URL}?query=\${encodeURIComponent(value)}\`, '_blank');`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags an untrusted dynamic destination", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      `const OpenLink = ({ url }) => (
+         <button onClick={() => window.open(url, "_blank")}>Open</button>
+       );`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags a let reassigned from a prop across branches", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      `function openTarget(kind, external) {
+         let url;
+         switch (kind) {
+           case "docs":
+             url = "https://docs.example.com/";
+             break;
+           default:
+             url = external;
+         }
+         window.open(url, "_blank");
+       }`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags a const object map whose accessed value is dynamic", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      `const LINKS = { docs: buildUrl() };
+       const Help = () => (
+         <button onClick={() => window.open(LINKS.docs, "_blank")}>Docs</button>
+       );`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
 });
