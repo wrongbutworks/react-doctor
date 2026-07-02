@@ -1,8 +1,11 @@
+import { componentOrHookDisplayNameForFunction } from "../../utils/component-or-hook-display-name.js";
 import { defineRule } from "../../utils/define-rule.js";
+import { findEnclosingFunction } from "../../utils/find-enclosing-function.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
 import { getImportedName } from "../../utils/get-imported-name.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
+import { isNonSourceFilename } from "../../utils/is-non-source-filename.js";
 import type { RuleContext } from "../../utils/rule-context.js";
 
 // eslint-plugin-react-hooks and the React Compiler recognise hooks by the
@@ -31,6 +34,7 @@ export const hookImportRenameLosesUsePrefix = defineRule({
     "Keep the `use` prefix in the alias (e.g. `useQuery as useProducts`) or import the hook without renaming. Hook linting recognises hooks only by their `use` name at the call site, so dropping the prefix silently turns off rules-of-hooks and exhaustive-deps for it.",
   create: (context: RuleContext) => ({
     ImportSpecifier(node: EsTreeNodeOfType<"ImportSpecifier">) {
+      if (isNonSourceFilename(context.filename)) return;
       // A type-only hook import can never be called as a hook, so renaming
       // it changes nothing downstream — skip to avoid noise.
       if (node.importKind === "type") return;
@@ -56,10 +60,24 @@ export const hookImportRenameLosesUsePrefix = defineRule({
       // and exhaustive-deps coverage intact wherever the flow lands.
       const aliasSymbol = context.scopes.symbolFor(node.local);
       if (!aliasSymbol) return;
-      const isAliasInvoked = aliasSymbol.references.some((reference) =>
+      const invokedReferences = aliasSymbol.references.filter((reference) =>
         isInvokedAsCallee(reference.identifier),
       );
-      if (!isAliasInvoked) return;
+      if (invokedReferences.length === 0) return;
+
+      // The rename-to-wrap idiom: `import { useNavigate as RRDuseNavigate }`
+      // freeing the name for a same-file `export function useNavigate()`
+      // wrapper. Every call of the alias lives inside the wrapper that
+      // re-binds the ORIGINAL hook name, so external call sites keep full
+      // hook-lint coverage and the rename is the only way to spell the wrap.
+      const isEveryCallInsideSameNameWrapper = invokedReferences.every((reference) => {
+        const enclosingFunction = findEnclosingFunction(reference.identifier);
+        return Boolean(
+          enclosingFunction &&
+          componentOrHookDisplayNameForFunction(enclosingFunction) === importedName,
+        );
+      });
+      if (isEveryCallInsideSameNameWrapper) return;
 
       context.report({
         node,

@@ -424,4 +424,14 @@ const labelKeyDownEntry = (entry: ReplayKeystroke) =>
     );
     expect(result.diagnostics.length).toBeGreaterThanOrEqual(1);
   });
+
+  it("does not flag keyCode branching inside bundled build output", () => {
+    const result = runRule(
+      noDeprecatedKeyboardEventKeycodeWhich,
+      `element.addEventListener("keydown", (e) => { if (e.keyCode === 13) submit(); });`,
+      { filename: "/repo/docs/build/0.355cdadd.js" },
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
 });

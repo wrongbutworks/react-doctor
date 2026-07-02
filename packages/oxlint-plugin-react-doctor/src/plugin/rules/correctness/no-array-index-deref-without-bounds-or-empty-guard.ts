@@ -7,15 +7,12 @@ import { isEarlyExitStatement } from "../../utils/is-early-exit-statement.js";
 import { isFunctionLike } from "../../utils/is-function-like.js";
 import { isAlwaysMatchingRegexPattern } from "../../utils/is-always-matching-regex-pattern.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
+import { isNonSourceFilename } from "../../utils/is-non-source-filename.js";
 import { stripParenExpression } from "../../utils/strip-paren-expression.js";
 import { unwrapNegativeGuardForm } from "../../utils/unwrap-negative-guard-form.js";
 import { walkAst } from "../../utils/walk-ast.js";
 import type { RuleContext } from "../../utils/rule-context.js";
 import type { RuleVisitors } from "../../utils/rule-visitors.js";
-
-// Bundled / minified output is not actionable source; the `test-noise`
-// tag already skips test/spec/story/script files.
-const NON_SOURCE_FILENAME_MARKERS = ["/dist/", "/build/", ".min.", ".umd."];
 
 const REGEX_RESULT_METHOD_NAMES = new Set(["exec", "match"]);
 const TOUCH_LIST_PROPERTY_NAMES = new Set(["touches", "targetTouches"]);
@@ -471,7 +468,7 @@ export const noArrayIndexDerefWithoutBoundsOrEmptyGuard = defineRule({
     "An array index read is typed `T` but is `T | undefined` at runtime, so dereferencing it on an empty list, a non-matching regex, or a short split throws. Add a length/emptiness check or optional chaining before the access.",
   create: (context: RuleContext): RuleVisitors => {
     const filename = context.filename ?? "";
-    if (NON_SOURCE_FILENAME_MARKERS.some((marker) => filename.includes(marker))) return {};
+    if (isNonSourceFilename(filename)) return {};
 
     return {
       MemberExpression(node: EsTreeNodeOfType<"MemberExpression">) {

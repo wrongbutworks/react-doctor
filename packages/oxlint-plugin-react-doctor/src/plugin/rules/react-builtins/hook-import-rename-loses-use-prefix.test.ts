@@ -218,4 +218,41 @@ describe("hook-import-rename-loses-use-prefix", () => {
     );
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("does not flag the rename-to-wrap idiom re-binding the original hook name", () => {
+    const result = runRule(
+      hookImportRenameLosesUsePrefix,
+      `import { useNavigate as RRDuseNavigate } from "react-router-dom";
+      export function useNavigate() {
+        const navigate = RRDuseNavigate();
+        return navigate;
+      }`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags an alias also called outside the same-name wrapper", () => {
+    const result = runRule(
+      hookImportRenameLosesUsePrefix,
+      `import { useQuery as fetchQuery } from "@tanstack/react-query";
+      export function useQuery(options) {
+        return fetchQuery(options);
+      }
+      export function useProducts() {
+        return fetchQuery({ queryKey: ["products"] });
+      }`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("does not flag renames inside bundled dist output", () => {
+    const result = runRule(
+      hookImportRenameLosesUsePrefix,
+      `import { useState as N } from "react";
+      export const Card = () => { const [open, setOpen] = N(false); return open; };`,
+      { filename: "/repo/docs/.yalc/pkg/dist/index.js" },
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
 });

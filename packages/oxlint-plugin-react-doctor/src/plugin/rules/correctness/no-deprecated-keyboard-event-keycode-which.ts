@@ -8,6 +8,7 @@ import { getMeaningfulParent } from "../../utils/get-meaningful-parent.js";
 import { findEnclosingFunction } from "../../utils/find-enclosing-function.js";
 import { isFunctionLike } from "../../utils/is-function-like.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
+import { isNonSourceFilename } from "../../utils/is-non-source-filename.js";
 import { stripGroupingParens } from "../../utils/strip-grouping-parens.js";
 import { walkAst } from "../../utils/walk-ast.js";
 import type { RuleContext } from "../../utils/rule-context.js";
@@ -443,6 +444,7 @@ export const noDeprecatedKeyboardEventKeycodeWhich = defineRule({
     "`KeyboardEvent.keyCode`/`which`/`charCode` are deprecated and layout/engine dependent for character keys. Branch on `event.key` (logical key like `'/'`) or `event.code` (physical position) so the handler works across keyboard layouts and browsers.",
   create: (context: RuleContext) => ({
     MemberExpression(node: EsTreeNodeOfType<"MemberExpression">) {
+      if (isNonSourceFilename(context.filename)) return;
       if (node.computed) return;
       if (!isNodeOfType(node.property, "Identifier")) return;
       const propertyName = node.property.name;
