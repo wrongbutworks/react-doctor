@@ -5,6 +5,7 @@ import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
 import { getCalleeName } from "../../utils/get-callee-name.js";
 import { getCallMethodName } from "../../utils/get-call-method-name.js";
 import { getImportSourceForName } from "../../utils/find-import-source-for-name.js";
+import { isEarlyExitStatement } from "../../utils/is-early-exit-statement.js";
 import { isFunctionLike } from "../../utils/is-function-like.js";
 import { isHookCall } from "../../utils/is-hook-call.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
@@ -257,6 +258,59 @@ const thenHandlerConsumesResponse = (
   return bindingConsumesResponse(handler.params[0], context);
 };
 
+// `useEffect(() => { if (isTokenCreated) return; ...; mutate(...) })` —
+// an early return on the SAME mutation result's status/data binding gives
+// the effect run-once semantics: this is a deliberate on-mount write
+// (create a token, then display it), not a cacheable read that useQuery
+// could replace.
+const RUN_ONCE_STATUS_KEYS = new Set(["isSuccess", "isPending", "isLoading", "data"]);
+
+const isInsideEffectEarlyReturnTest = (identifier: EsTreeNode): boolean => {
+  let child: EsTreeNode = identifier;
+  let ancestor: EsTreeNode | null | undefined = identifier.parent;
+  let sawEarlyReturnTest = false;
+  while (ancestor) {
+    if (
+      isNodeOfType(ancestor, "IfStatement") &&
+      ancestor.test === child &&
+      isEarlyExitStatement(ancestor.consequent)
+    ) {
+      sawEarlyReturnTest = true;
+    }
+    if (isFunctionLike(ancestor)) {
+      const enclosingCall = skipGroupingParensUpward(ancestor);
+      return Boolean(
+        sawEarlyReturnTest &&
+        isNodeOfType(enclosingCall, "CallExpression") &&
+        isHookCall(enclosingCall, EFFECT_HOOK_NAMES),
+      );
+    }
+    child = ancestor;
+    ancestor = ancestor.parent ?? null;
+  }
+  return false;
+};
+
+const effectGatesOnOwnMutationResult = (
+  declaratorId: EsTreeNode,
+  context: RuleContext,
+): boolean => {
+  for (const statusKey of RUN_ONCE_STATUS_KEYS) {
+    const statusBinding = findPatternPropertyBinding(declaratorId, (name) => name === statusKey);
+    if (!statusBinding) continue;
+    const statusSymbol = context.scopes.symbolFor(statusBinding);
+    if (!statusSymbol) continue;
+    if (
+      statusSymbol.references.some((reference) =>
+        isInsideEffectEarlyReturnTest(reference.identifier),
+      )
+    ) {
+      return true;
+    }
+  }
+  return false;
+};
+
 export const queryNoMutationInEffectAsRead = defineRule({
   id: "query-no-mutation-in-effect-as-read",
   title: "Mutation driven from an effect as a read",
@@ -304,6 +358,7 @@ export const queryNoMutationInEffectAsRead = defineRule({
       const dataConsumed = Boolean(dataSymbol && symbolHasConsumerRead(dataSymbol));
 
       if (!dataConsumed && !effectResultConsumed) return;
+      if (effectGatesOnOwnMutationResult(node.id, context)) return;
 
       context.report({
         node: node.init,

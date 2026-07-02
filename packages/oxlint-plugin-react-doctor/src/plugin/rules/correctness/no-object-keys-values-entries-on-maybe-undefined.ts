@@ -17,12 +17,16 @@ const OBJECT_ITERATION_METHODS = new Set(["keys", "values", "entries"]);
 // non-logical ancestor — must be entered from the OUTERMOST wrapper to see
 // the guard. Climbing these is safe: an enclosing `&&`/`||` short-circuits
 // the whole subtree regardless of the wrappers in between.
+// `CallExpression` is transparent too: `x && Object.values(x).every(cb)`
+// wraps the call in `.every(...)` before the `&&` holds it, and the
+// guard-mention requirement keeps unrelated calls sound.
 const GUARD_TRANSPARENT_WRAPPER_TYPES = new Set<string>([
   "MemberExpression",
   "BinaryExpression",
   "UnaryExpression",
   "TSNonNullExpression",
   "ParenthesizedExpression",
+  "CallExpression",
 ]);
 
 // Climb from the call through value-position wrappers to the highest node

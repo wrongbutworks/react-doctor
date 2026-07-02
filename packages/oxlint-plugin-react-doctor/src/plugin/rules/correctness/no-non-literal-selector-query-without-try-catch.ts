@@ -178,6 +178,71 @@ const isHrefHashDerivedExpression = (node: EsTreeNode): boolean => {
   return isHrefHashNamedCall(stripped) && !isSanitizedSelectorHelperCall(stripped);
 };
 
+const ITERATION_CALLBACK_METHOD_NAMES = new Set(["map", "forEach", "filter", "flatMap", "find"]);
+
+// Every element is an object literal, and every `href` it declares is a
+// string literal — the developer-authored nav-table shape.
+const isLiteralHrefTable = (node: EsTreeNode): boolean => {
+  const stripped = stripParenExpression(node);
+  if (!isNodeOfType(stripped, "ArrayExpression")) return false;
+  const elements = stripped.elements ?? [];
+  if (elements.length === 0) return false;
+  return elements.every((element) => {
+    if (!element) return false;
+    const strippedElement = stripParenExpression(element as EsTreeNode);
+    if (!isNodeOfType(strippedElement, "ObjectExpression")) return false;
+    return strippedElement.properties.every((property) => {
+      if (!isNodeOfType(property, "Property") || property.computed) return true;
+      if (!isNodeOfType(property.key, "Identifier") || property.key.name !== "href") return true;
+      const value = stripParenExpression(property.value as EsTreeNode);
+      return isNodeOfType(value, "Literal") && typeof value.value === "string";
+    });
+  });
+};
+
+// `navItems.map((item) => document.querySelector(item.href))` where
+// `navItems` is a same-file array of object literals with literal `href`s
+// — every selector the query can receive is developer-authored, so the
+// DOMException the rule warns about cannot occur.
+const selectorComesFromLiteralHrefTable = (selectorArgument: EsTreeNode): boolean => {
+  const stripped = stripParenExpression(selectorArgument);
+  let member: EsTreeNode = stripped;
+  if (isNodeOfType(member, "ChainExpression")) member = member.expression as EsTreeNode;
+  if (!isNodeOfType(member, "MemberExpression")) {
+    if (!isNodeOfType(stripped, "Identifier")) return false;
+    const binding = findVariableInitializer(stripped, stripped.name);
+    if (!binding?.initializer) return false;
+    member = stripParenExpression(binding.initializer);
+    if (isNodeOfType(member, "ChainExpression")) member = member.expression as EsTreeNode;
+    if (!isNodeOfType(member, "MemberExpression")) return false;
+  }
+  const itemRoot = stripParenExpression(member.object as EsTreeNode);
+  if (!isNodeOfType(itemRoot, "Identifier")) return false;
+  const itemBinding = findVariableInitializer(itemRoot, itemRoot.name);
+  if (!itemBinding || itemBinding.initializer) return false;
+  const callbackFunction = itemBinding.scopeOwner;
+  const callbackParams = (callbackFunction as { params?: EsTreeNode[] }).params;
+  if (!Array.isArray(callbackParams) || callbackParams[0] !== itemBinding.bindingIdentifier) {
+    return false;
+  }
+  const iterationCall = callbackFunction.parent;
+  if (
+    !iterationCall ||
+    !isNodeOfType(iterationCall, "CallExpression") ||
+    !iterationCall.arguments?.includes(callbackFunction as never) ||
+    !isNodeOfType(iterationCall.callee, "MemberExpression")
+  ) {
+    return false;
+  }
+  const methodName = getStaticMemberPropertyName(iterationCall.callee);
+  if (!methodName || !ITERATION_CALLBACK_METHOD_NAMES.has(methodName)) return false;
+  const tableReceiver = stripParenExpression(iterationCall.callee.object as EsTreeNode);
+  if (isLiteralHrefTable(tableReceiver)) return true;
+  if (!isNodeOfType(tableReceiver, "Identifier")) return false;
+  const tableBinding = findVariableInitializer(tableReceiver, tableReceiver.name);
+  return Boolean(tableBinding?.initializer && isLiteralHrefTable(tableBinding.initializer));
+};
+
 // The selector argument taints to an href/hash value: either directly, or
 // through a same-file binding whose initializer is href/hash-derived.
 const selectorArgumentTaintsToHref = (argument: EsTreeNode): boolean => {
@@ -582,6 +647,7 @@ export const noNonLiteralSelectorQueryWithoutTryCatch = defineRule({
       if (!selectorArgument || isNodeOfType(selectorArgument, "SpreadElement")) return;
       if (isStringLiteralSelector(selectorArgument)) return;
       if (!selectorArgumentTaintsToHref(selectorArgument)) return;
+      if (selectorComesFromLiteralHrefTable(selectorArgument)) return;
       if (isShapeValidatedByDominatingGuard(node, selectorArgument)) return;
       if (
         isInsideTryStatement(node as EsTreeNode, {

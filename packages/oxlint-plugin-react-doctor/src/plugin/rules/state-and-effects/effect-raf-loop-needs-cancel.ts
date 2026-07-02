@@ -294,10 +294,26 @@ const doesLoopGuardOnAnyName = (loopFunction: EsTreeNode, guardNames: Set<string
   return didFindGuard;
 };
 
-// A tween that reschedules only while progress is below a numeric bound
-// (`if (t < 1) requestAnimationFrame(step)`) terminates by construction
-// within a bounded number of frames — there is nothing left to cancel.
-const RELATIONAL_BOUND_OPERATORS = new Set(["<", "<="]);
+// A tween that reschedules only while progress is inside a numeric bound
+// terminates by construction within a bounded number of frames — there is
+// nothing left to cancel. Both directions count: `if (t < 1) raf(step)`
+// (progress grows to the bound) and `if (Math.abs(velocity) > 0.1)
+// raf(animate)` (a damped quantity decays to the threshold), including
+// `&&`/`||` combinations of such comparisons.
+const RELATIONAL_BOUND_OPERATORS = new Set(["<", "<=", ">", ">="]);
+
+const isNumericBoundTest = (test: EsTreeNode): boolean => {
+  const stripped = stripParenExpression(test);
+  if (isNodeOfType(stripped, "LogicalExpression") && stripped.operator !== "??") {
+    return isNumericBoundTest(stripped.left) && isNumericBoundTest(stripped.right);
+  }
+  return (
+    isNodeOfType(stripped, "BinaryExpression") &&
+    RELATIONAL_BOUND_OPERATORS.has(stripped.operator) &&
+    ((isNodeOfType(stripped.right, "Literal") && typeof stripped.right.value === "number") ||
+      (isNodeOfType(stripped.left, "Literal") && typeof stripped.left.value === "number"))
+  );
+};
 
 const everyRescheduleIsProgressBounded = (scheduledFunction: EsTreeNode): boolean => {
   let sawReschedule = false;
@@ -309,17 +325,12 @@ const everyRescheduleIsProgressBounded = (scheduledFunction: EsTreeNode): boolea
     let bounded = false;
     let cursor: EsTreeNode | null | undefined = child.parent;
     while (cursor && cursor !== scheduledFunction) {
-      if (isNodeOfType(cursor, "IfStatement") || isNodeOfType(cursor, "ConditionalExpression")) {
-        const test = cursor.test as EsTreeNode;
-        if (
-          isNodeOfType(test, "BinaryExpression") &&
-          RELATIONAL_BOUND_OPERATORS.has(test.operator) &&
-          ((isNodeOfType(test.right, "Literal") && typeof test.right.value === "number") ||
-            (isNodeOfType(test.left, "Literal") && typeof test.left.value === "number"))
-        ) {
-          bounded = true;
-          break;
-        }
+      if (
+        (isNodeOfType(cursor, "IfStatement") || isNodeOfType(cursor, "ConditionalExpression")) &&
+        isNumericBoundTest(cursor.test as EsTreeNode)
+      ) {
+        bounded = true;
+        break;
       }
       cursor = cursor.parent ?? null;
     }

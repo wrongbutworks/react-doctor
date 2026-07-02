@@ -329,4 +329,55 @@ describe("no-non-literal-selector-query-without-try-catch", () => {
     );
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("does not flag querying hrefs mapped from a literal nav table", () => {
+    const result = runRule(
+      noNonLiteralSelectorQueryWithoutTryCatch,
+      `const navItems = [
+        { href: "#Portofolio", label: "Portofolio" },
+        { href: "#Contact", label: "Contact" },
+      ];
+      const sections = navItems.map((item) => {
+        const section = document.querySelector(item.href);
+        return section ? { id: item.href, offset: section.offsetTop } : null;
+      });`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a scroll handler over a module-level literal link table", () => {
+    const result = runRule(
+      noNonLiteralSelectorQueryWithoutTryCatch,
+      `const homeLinks = [{ href: "#features" }, { href: "#pricing" }];
+      export const Header = () => (
+        <nav>
+          {homeLinks.map((link) => (
+            <a
+              href={link.href}
+              key={link.href}
+              onClick={(e) => {
+                e.preventDefault();
+                const target = document.querySelector(link.href);
+                target?.scrollIntoView({ behavior: "smooth" });
+              }}
+            >
+              {link.href}
+            </a>
+          ))}
+        </nav>
+      );`,
+      { filename: "header.tsx" },
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags iteration over a table with a dynamic href", () => {
+    const result = runRule(
+      noNonLiteralSelectorQueryWithoutTryCatch,
+      `const navItems = [{ href: location.hash }, { href: "#contact" }];
+      navItems.forEach((item) => { document.querySelector(item.href); });`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
 });

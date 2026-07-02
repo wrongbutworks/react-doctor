@@ -295,4 +295,31 @@ describe("no-object-keys-values-entries-on-maybe-undefined", () => {
     );
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("does not flag when the same && chain truthiness-guards the optional param through a method wrapper", () => {
+    const result = runRule(
+      noObjectKeysValuesEntriesOnMaybeUndefined,
+      `function getColumnVisibility(columns: string[], defaultVisibility?: Record<string, boolean>) {
+        const allDefaultsTrue = defaultVisibility && Object.values(defaultVisibility).every((v) => v === true);
+        return allDefaultsTrue;
+      }`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag when a typeof+null conjunction guards the optional param before the call", () => {
+    const result = runRule(
+      noObjectKeysValuesEntriesOnMaybeUndefined,
+      `export const queried = (path: string, params?: Record<string, unknown>): string => {
+        const keys =
+          typeof params === "object" &&
+          params !== null &&
+          Object.keys(params).filter((key) => /string|number/.test(typeof params[key]));
+        if (keys && keys.length > 0) return path + "?" + keys.join("&");
+        return path;
+      };`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
 });

@@ -494,4 +494,33 @@ describe("effect-raf-loop-needs-cancel", () => {
     );
     expect(result.diagnostics).toHaveLength(1);
   });
+
+  it("does not flag a decay-terminated spring loop (reschedule while velocity above threshold)", () => {
+    const result = runRule(
+      effectRafLoopNeedsCancel,
+      `const Logo = () => {
+        useEffect(() => {
+          const handleMove = (x, y) => {
+            let velocityX = 0;
+            let velocityY = 0;
+            const animate = () => {
+              velocityX = velocityX * 0.8 + x;
+              velocityY = velocityY * 0.8 + y;
+              el.setAttribute("cx", String(velocityX));
+              if (Math.abs(velocityX) > 0.1 || Math.abs(velocityY) > 0.1) {
+                requestAnimationFrame(animate);
+              }
+            };
+            requestAnimationFrame(animate);
+          };
+          window.addEventListener("mousemove", handleMove);
+          return () => window.removeEventListener("mousemove", handleMove);
+        }, []);
+        return null;
+      };`,
+      { filename: "logo.tsx" },
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
 });

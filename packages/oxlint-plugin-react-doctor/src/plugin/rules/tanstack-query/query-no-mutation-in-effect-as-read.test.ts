@@ -316,4 +316,27 @@ describe("query-no-mutation-in-effect-as-read", () => {
     );
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("does not flag a create-once mutation gated by its own isSuccess early return", () => {
+    const result = runRule(
+      queryNoMutationInEffectAsRead,
+      `const ConnectUsingCli = () => {
+        const {
+          mutate: mutateAccessToken,
+          data: tokenData,
+          isSuccess: isTokenCreated,
+        } = useCreateAccessToken();
+
+        useEffect(() => {
+          if (isTokenCreated) return;
+          mutateAccessToken({ expiresAt: new Date() });
+        }, [isTokenCreated, mutateAccessToken]);
+
+        return <pre>{tokenData?.token}</pre>;
+      };`,
+      { filename: "connect.tsx" },
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
 });
