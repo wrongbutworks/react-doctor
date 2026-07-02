@@ -102,25 +102,26 @@ const findSelfReschedulingRafLoop = (
   return foundLoop;
 };
 
+const memberChainBaseIdentifierName = (node: EsTreeNode): string | null => {
+  let cursor: EsTreeNode = node;
+  while (isNodeOfType(cursor, "MemberExpression")) cursor = cursor.object as EsTreeNode;
+  return isNodeOfType(cursor, "Identifier") ? cursor.name : null;
+};
+
 const collectRafHandleNames = (root: EsTreeNode): Set<string> => {
   const handleNames = new Set<string>();
   walkAst(root, (child: EsTreeNode) => {
     if (!isRequestAnimationFrameCall(child)) return;
     const parent = child.parent;
-    if (
-      isNodeOfType(parent, "AssignmentExpression") &&
-      parent.right === child &&
-      isNodeOfType(parent.left, "Identifier")
-    ) {
-      handleNames.add(parent.left.name);
-    }
-    if (
-      isNodeOfType(parent, "AssignmentExpression") &&
-      parent.right === child &&
-      isNodeOfType(parent.left, "MemberExpression") &&
-      isNodeOfType(parent.left.object, "Identifier")
-    ) {
-      handleNames.add(parent.left.object.name);
+    if (isNodeOfType(parent, "AssignmentExpression") && parent.right === child) {
+      if (isNodeOfType(parent.left, "Identifier")) {
+        handleNames.add(parent.left.name);
+      } else if (isNodeOfType(parent.left, "MemberExpression")) {
+        // `animRef.current.rafId = raf(...)` — any nesting depth roots at
+        // the ref binding.
+        const baseName = memberChainBaseIdentifierName(parent.left as EsTreeNode);
+        if (baseName) handleNames.add(baseName);
+      }
     }
     if (
       isNodeOfType(parent, "VariableDeclarator") &&
@@ -128,6 +129,15 @@ const collectRafHandleNames = (root: EsTreeNode): Set<string> => {
       isNodeOfType(parent.id, "Identifier")
     ) {
       handleNames.add(parent.id.name);
+    }
+    // `frameIds.set(piece.id, raf(loop))` — the CONTAINER holds the handle.
+    if (
+      isNodeOfType(parent, "CallExpression") &&
+      (parent.arguments ?? []).includes(child as never) &&
+      isNodeOfType(parent.callee, "MemberExpression")
+    ) {
+      const containerName = memberChainBaseIdentifierName(parent.callee.object as EsTreeNode);
+      if (containerName) handleNames.add(containerName);
     }
   });
   return handleNames;
@@ -143,13 +153,21 @@ const findCleanupReturnFunction = (effectCallback: EsTreeNode): EsTreeNode | nul
   if (!isNodeOfType(effectCallback.body, "BlockStatement")) {
     return resolveFunctionNode(effectCallback.body);
   }
-  for (const statement of effectCallback.body.body ?? []) {
-    if (isNodeOfType(statement, "ReturnStatement") && statement.argument) {
-      const returnedFunction = resolveFunctionNode(statement.argument);
-      if (returnedFunction) return returnedFunction;
+  let nestedReturnFunction: EsTreeNode | null = null;
+  walkAst(effectCallback.body, (child: EsTreeNode) => {
+    if (nestedReturnFunction) return false;
+    // Do not descend into inner functions — their returns are not the
+    // effect's cleanup — but DO look inside if/try blocks.
+    if (child !== effectCallback.body && isFunctionLike(child)) return false;
+    if (isNodeOfType(child, "ReturnStatement") && child.argument) {
+      const returnedFunction = resolveFunctionNode(child.argument as EsTreeNode);
+      if (returnedFunction) {
+        nestedReturnFunction = returnedFunction;
+        return false;
+      }
     }
-  }
-  return null;
+  });
+  return nestedReturnFunction;
 };
 
 const didCancelAnyStoredHandle = (searchRoot: EsTreeNode, handleNames: Set<string>): boolean => {
@@ -168,13 +186,26 @@ const didCancelAnyStoredHandle = (searchRoot: EsTreeNode, handleNames: Set<strin
         return false;
       }
     }
+    // `frameIds.forEach((id) => cancelAnimationFrame(id))` — the cancel sits
+    // in an iteration callback whose RECEIVER is the handle container.
+    let cursor: EsTreeNode | null | undefined = child.parent;
+    while (cursor && !didCancel) {
+      if (
+        isNodeOfType(cursor, "CallExpression") &&
+        isNodeOfType(cursor.callee, "MemberExpression") &&
+        subtreeReferencesIdentifierName(cursor.callee.object as EsTreeNode, handleNames)
+      ) {
+        didCancel = true;
+        return false;
+      }
+      cursor = cursor.parent ?? null;
+    }
   });
   return didCancel;
 };
 
-const collectCleanupWrittenNames = (cleanupFunction: EsTreeNode): Set<string> => {
-  const writtenNames = new Set<string>();
-  walkAst(cleanupFunction, (child: EsTreeNode) => {
+const collectWrittenNames = (root: EsTreeNode, writtenNames: Set<string>): void => {
+  walkAst(root, (child: EsTreeNode) => {
     const writeTarget = isNodeOfType(child, "AssignmentExpression")
       ? child.left
       : isNodeOfType(child, "UpdateExpression")
@@ -182,11 +213,59 @@ const collectCleanupWrittenNames = (cleanupFunction: EsTreeNode): Set<string> =>
         : null;
     if (isNodeOfType(writeTarget, "Identifier")) {
       writtenNames.add(writeTarget.name);
-    } else if (
-      isNodeOfType(writeTarget, "MemberExpression") &&
-      isNodeOfType(writeTarget.object, "Identifier")
-    ) {
-      writtenNames.add(writeTarget.object.name);
+    } else if (isNodeOfType(writeTarget, "MemberExpression")) {
+      const baseName = memberChainBaseIdentifierName(writeTarget as EsTreeNode);
+      if (baseName) writtenNames.add(baseName);
+    }
+  });
+};
+
+// Names the cleanup neutralizes: direct writes, the roots of anything it
+// CALLS (`controller.abort()`, `stop()`, `stopRef.current()`), the writes
+// inside same-effect functions those calls resolve to, and the writes of
+// functions assigned to `<root>.current` (custom stop-through-a-ref hooks).
+const collectCleanupWrittenNames = (
+  cleanupFunction: EsTreeNode,
+  effectCallback: EsTreeNode,
+): Set<string> => {
+  const writtenNames = new Set<string>();
+  collectWrittenNames(cleanupFunction, writtenNames);
+  walkAst(cleanupFunction, (child: EsTreeNode) => {
+    if (!isNodeOfType(child, "CallExpression")) return;
+    const callee = child.callee;
+    if (isNodeOfType(callee, "Identifier")) {
+      writtenNames.add(callee.name);
+      // `return () => stop()` — merge the writes of the same-effect helper.
+      walkAst(effectCallback, (candidate: EsTreeNode) => {
+        if (
+          isNodeOfType(candidate, "VariableDeclarator") &&
+          isNodeOfType(candidate.id, "Identifier") &&
+          candidate.id.name === callee.name &&
+          candidate.init &&
+          isFunctionLike(candidate.init as EsTreeNode)
+        ) {
+          collectWrittenNames(candidate.init as EsTreeNode, writtenNames);
+        }
+      });
+      return;
+    }
+    if (isNodeOfType(callee, "MemberExpression")) {
+      const rootName = memberChainBaseIdentifierName(callee as EsTreeNode);
+      if (!rootName) return;
+      writtenNames.add(rootName);
+      // `stopRef.current()` — merge the writes of the function assigned to
+      // `stopRef.current` inside the effect.
+      walkAst(effectCallback, (candidate: EsTreeNode) => {
+        if (
+          isNodeOfType(candidate, "AssignmentExpression") &&
+          isNodeOfType(candidate.left, "MemberExpression") &&
+          memberChainBaseIdentifierName(candidate.left as EsTreeNode) === rootName &&
+          candidate.right &&
+          isFunctionLike(candidate.right as EsTreeNode)
+        ) {
+          collectWrittenNames(candidate.right as EsTreeNode, writtenNames);
+        }
+      });
     }
   });
   return writtenNames;
@@ -215,6 +294,40 @@ const doesLoopGuardOnAnyName = (loopFunction: EsTreeNode, guardNames: Set<string
   return didFindGuard;
 };
 
+// A tween that reschedules only while progress is below a numeric bound
+// (`if (t < 1) requestAnimationFrame(step)`) terminates by construction
+// within a bounded number of frames — there is nothing left to cancel.
+const RELATIONAL_BOUND_OPERATORS = new Set(["<", "<="]);
+
+const everyRescheduleIsProgressBounded = (scheduledFunction: EsTreeNode): boolean => {
+  let sawReschedule = false;
+  let sawUnboundedReschedule = false;
+  walkAst(scheduledFunction, (child: EsTreeNode) => {
+    if (sawUnboundedReschedule) return false;
+    if (!isRequestAnimationFrameCall(child)) return;
+    sawReschedule = true;
+    let bounded = false;
+    let cursor: EsTreeNode | null | undefined = child.parent;
+    while (cursor && cursor !== scheduledFunction) {
+      if (isNodeOfType(cursor, "IfStatement") || isNodeOfType(cursor, "ConditionalExpression")) {
+        const test = cursor.test as EsTreeNode;
+        if (
+          isNodeOfType(test, "BinaryExpression") &&
+          RELATIONAL_BOUND_OPERATORS.has(test.operator) &&
+          ((isNodeOfType(test.right, "Literal") && typeof test.right.value === "number") ||
+            (isNodeOfType(test.left, "Literal") && typeof test.left.value === "number"))
+        ) {
+          bounded = true;
+          break;
+        }
+      }
+      cursor = cursor.parent ?? null;
+    }
+    if (!bounded) sawUnboundedReschedule = true;
+  });
+  return sawReschedule && !sawUnboundedReschedule;
+};
+
 export const effectRafLoopNeedsCancel = defineRule({
   id: "effect-raf-loop-needs-cancel",
   title: "requestAnimationFrame loop never cancelled",
@@ -230,6 +343,7 @@ export const effectRafLoopNeedsCancel = defineRule({
 
       const rafLoop = findSelfReschedulingRafLoop(callback);
       if (!rafLoop) return;
+      if (everyRescheduleIsProgressBounded(rafLoop.scheduledFunction)) return;
 
       const handleNames = new Set([
         ...collectRafHandleNames(callback),
@@ -243,7 +357,7 @@ export const effectRafLoopNeedsCancel = defineRule({
       const cleanupReturnFunction = findCleanupReturnFunction(callback);
       if (cleanupReturnFunction) {
         if (subtreeReferencesIdentifierName(cleanupReturnFunction, handleNames)) return;
-        const cleanupWrittenNames = collectCleanupWrittenNames(cleanupReturnFunction);
+        const cleanupWrittenNames = collectCleanupWrittenNames(cleanupReturnFunction, callback);
         if (doesLoopGuardOnAnyName(rafLoop.scheduledFunction, cleanupWrittenNames)) return;
       }
 

@@ -255,4 +255,243 @@ describe("effect-raf-loop-needs-cancel", () => {
     );
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("stays quiet: AbortController signal-guarded loop with cleanup abort", () => {
+    const result = runRule(
+      effectRafLoopNeedsCancel,
+      `function Wave() {
+  useEffect(() => {
+    const controller = new AbortController();
+    const loop = () => {
+      if (controller.signal.aborted) return;
+      draw();
+      requestAnimationFrame(loop);
+    };
+    requestAnimationFrame(loop);
+    return () => controller.abort();
+  }, []);
+  return null;
+}`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Cleanup wraps the flag-flipping stop helper in an arrow: return () => stop()", () => {
+    const result = runRule(
+      effectRafLoopNeedsCancel,
+      `function Spinner() {
+  useEffect(() => {
+    let active = true;
+    const loop = () => {
+      if (!active) return;
+      rotate();
+      requestAnimationFrame(loop);
+    };
+    const stop = () => {
+      active = false;
+    };
+    requestAnimationFrame(loop);
+    return () => stop();
+  }, []);
+  return null;
+}`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Session token nested one member level deeper on a ref-held object", () => {
+    const result = runRule(
+      effectRafLoopNeedsCancel,
+      `function Particles() {
+  const sessionRef = useRef({ id: 0 });
+  useEffect(() => {
+    sessionRef.current.id += 1;
+    const sessionId = sessionRef.current.id;
+    const loop = () => {
+      if (sessionRef.current.id !== sessionId) return;
+      step();
+      requestAnimationFrame(loop);
+    };
+    requestAnimationFrame(loop);
+    return () => {
+      sessionRef.current.id += 1;
+    };
+  }, []);
+  return null;
+}`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Literal cancelAnimationFrame in cleanup — the rule's own remediation — with the id stored on a nested ref object", () => {
+    const result = runRule(
+      effectRafLoopNeedsCancel,
+      `function Progress() {
+  const animRef = useRef({ rafId: 0, startTime: 0 });
+  useEffect(() => {
+    animRef.current.startTime = performance.now();
+    const loop = () => {
+      paint();
+      animRef.current.rafId = requestAnimationFrame(loop);
+    };
+    animRef.current.rafId = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(animRef.current.rafId);
+  }, []);
+  return null;
+}`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Flag cleanup returned from inside the enabled branch", () => {
+    const result = runRule(
+      effectRafLoopNeedsCancel,
+      `function Marquee({ enabled }) {
+  useEffect(() => {
+    let active = true;
+    const loop = () => {
+      if (!active) return;
+      scrollStep();
+      requestAnimationFrame(loop);
+    };
+    if (enabled) {
+      requestAnimationFrame(loop);
+      return () => {
+        active = false;
+      };
+    }
+    return undefined;
+  }, [enabled]);
+  return null;
+}`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Finite DOM-only smooth-scroll tween on mount", () => {
+    const result = runRule(
+      effectRafLoopNeedsCancel,
+      `function ScrollReset({ containerRef }) {
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const startTop = el.scrollTop;
+    const start = performance.now();
+    const step = (now) => {
+      const t = Math.min((now - start) / 300, 1);
+      el.scrollTop = startTop * (1 - t);
+      if (t < 1) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  }, [containerRef]);
+  return null;
+}`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Custom useRafLoop hook whose cleanup invokes the stop closure through a ref", () => {
+    const result = runRule(
+      effectRafLoopNeedsCancel,
+      `const useRafLoop = (onFrame) => {
+  const stopRef = useRef(() => {});
+  useEffect(() => {
+    let active = true;
+    const loop = () => {
+      if (!active) return;
+      onFrame();
+      requestAnimationFrame(loop);
+    };
+    requestAnimationFrame(loop);
+    stopRef.current = () => {
+      active = false;
+    };
+    return () => stopRef.current();
+  }, [onFrame]);
+  return stopRef;
+};`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Frame ids collected in a Map and every one cancelled in cleanup", () => {
+    const result = runRule(
+      effectRafLoopNeedsCancel,
+      `function Confetti({ pieces }) {
+  useEffect(() => {
+    const frameIds = new Map();
+    pieces.forEach((piece) => {
+      const loop = () => {
+        movePiece(piece);
+        frameIds.set(piece.id, requestAnimationFrame(loop));
+      };
+      frameIds.set(piece.id, requestAnimationFrame(loop));
+    });
+    return () => {
+      frameIds.forEach((frameId) => cancelAnimationFrame(frameId));
+    };
+  }, [pieces]);
+  return null;
+}`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: WebGL init in try/catch with the flag cleanup returned from the try block", () => {
+    const result = runRule(
+      effectRafLoopNeedsCancel,
+      `function GlScene() {
+  const canvasRef = useRef(null);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    let active = true;
+    try {
+      const gl = canvas.getContext('webgl');
+      if (!gl) return;
+      const loop = () => {
+        if (!active) return;
+        renderScene(gl);
+        requestAnimationFrame(loop);
+      };
+      requestAnimationFrame(loop);
+      return () => {
+        active = false;
+      };
+    } catch (error) {
+      console.error(error);
+      return undefined;
+    }
+  }, []);
+  return <canvas ref={canvasRef} />;
+}`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags an uncancelled loop with an unrelated cleanup call", () => {
+    const result = runRule(
+      effectRafLoopNeedsCancel,
+      `function Ticker() {
+         useEffect(() => {
+           const loop = () => {
+             tick();
+             requestAnimationFrame(loop);
+           };
+           requestAnimationFrame(loop);
+           return () => resetOtherThing();
+         }, []);
+       }`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
 });
