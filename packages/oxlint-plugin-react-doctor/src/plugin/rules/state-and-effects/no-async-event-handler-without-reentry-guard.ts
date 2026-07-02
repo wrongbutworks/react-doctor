@@ -17,6 +17,7 @@ const MUTATING_REQUEST_METHOD_NAMES = new Set(["post", "put", "patch", "delete",
 const MUTATING_FETCH_HTTP_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 const STATE_SETTER_NAME_PATTERN = /^set[A-Z]/;
 const NON_STATE_SETTER_GLOBAL_NAMES = new Set(["setTimeout", "setInterval", "setImmediate"]);
+const LOCAL_STORAGE_RECEIVER_NAME_PATTERN = /^(?:db|idb|database|caches?|store)$/i;
 
 const getNodeOffset = (node: EsTreeNode, edge: "start" | "end"): number | null => {
   const offset = (node as { start?: unknown; end?: unknown })[edge];
@@ -105,6 +106,22 @@ const awaitedExpressionIsMutatingNetworkOp = (
       isNodeOfType(callee.property, "Identifier") &&
       MUTATING_REQUEST_METHOD_NAMES.has(callee.property.name)
     ) {
+      // SWR's bound `mutate()` with no arguments is a GET revalidation.
+      if (callee.property.name === "mutate" && (stripped.arguments?.length ?? 0) === 0) {
+        return false;
+      }
+      // `db.delete(...)` (IndexedDB) / `caches.delete(...)` are local,
+      // idempotent storage operations — no network request exists to double-fire.
+      let receiverBase: EsTreeNode = callee.object as EsTreeNode;
+      while (isNodeOfType(receiverBase, "MemberExpression")) {
+        receiverBase = receiverBase.object as EsTreeNode;
+      }
+      if (
+        isNodeOfType(receiverBase, "Identifier") &&
+        LOCAL_STORAGE_RECEIVER_NAME_PATTERN.test(receiverBase.name)
+      ) {
+        return false;
+      }
       return true;
     }
     return awaitedExpressionIsMutatingNetworkOp(callee.object as EsTreeNode);
@@ -113,11 +130,20 @@ const awaitedExpressionIsMutatingNetworkOp = (
 };
 
 const isLeadingReentryGuard = (statement: EsTreeNode): boolean => {
-  if (
-    isNodeOfType(statement, "ExpressionStatement") &&
-    isStateSetterCall(statement.expression as EsTreeNode)
-  ) {
-    return true;
+  if (isNodeOfType(statement, "ExpressionStatement")) {
+    if (isStateSetterCall(statement.expression as EsTreeNode)) return true;
+    // `submitButton.disabled = true;` / `busyRef.current = true;` before
+    // the await imperatively closes the re-entry window.
+    const expression = statement.expression;
+    if (
+      isNodeOfType(expression, "AssignmentExpression") &&
+      isNodeOfType(expression.left, "MemberExpression") &&
+      !expression.left.computed &&
+      isNodeOfType(expression.left.property, "Identifier") &&
+      (expression.left.property.name === "disabled" || expression.left.property.name === "current")
+    ) {
+      return true;
+    }
   }
   if (isNodeOfType(statement, "IfStatement")) {
     const consequent = statement.consequent;
@@ -130,6 +156,38 @@ const isLeadingReentryGuard = (statement: EsTreeNode): boolean => {
     }
   }
   return false;
+};
+
+const statementContainsPreAwaitGuardWrite = (
+  statement: EsTreeNode,
+  firstAwait: EsTreeNode,
+): boolean => {
+  const awaitStart = getNodeOffset(firstAwait, "start");
+  if (awaitStart === null) return false;
+  let hasGuardWrite = false;
+  walkAst(statement, (child: EsTreeNode) => {
+    if (hasGuardWrite) return false;
+    const childEnd = getNodeOffset(child, "end");
+    if (childEnd === null || childEnd > awaitStart) return;
+    if (
+      isNodeOfType(child, "ExpressionStatement") &&
+      isStateSetterCall(child.expression as EsTreeNode)
+    ) {
+      hasGuardWrite = true;
+      return false;
+    }
+    if (
+      isNodeOfType(child, "AssignmentExpression") &&
+      isNodeOfType(child.left, "MemberExpression") &&
+      !child.left.computed &&
+      isNodeOfType(child.left.property, "Identifier") &&
+      (child.left.property.name === "current" || child.left.property.name === "disabled")
+    ) {
+      hasGuardWrite = true;
+      return false;
+    }
+  });
+  return hasGuardWrite;
 };
 
 const unwrapUseCallback = (expression: EsTreeNode): EsTreeNode => {
@@ -179,6 +237,11 @@ const analyzeAsyncHandler = (context: RuleContext, functionNode: EsTreeNode): vo
         ) {
           return;
         }
+        // A busy write BEFORE the await inside the same statement — the
+        // wrap-in-if guard (`if (!busy) { setBusy(true); await ... }`), the
+        // try/finally form (the rule's own remediation), or an imperative
+        // `submitButton.disabled = true` — closes the re-entry window.
+        if (statementContainsPreAwaitGuardWrite(currentStatement, firstAwait)) return;
         mutatingAwaitNode = firstAwait;
         const awaitEnd = getNodeOffset(firstAwait, "end");
         if (
@@ -209,6 +272,18 @@ export const noAsyncEventHandlerWithoutReentryGuard = defineRule({
       JSXAttribute(node: EsTreeNodeOfType<"JSXAttribute">) {
         if (!isNodeOfType(node.name, "JSXIdentifier")) return;
         if (!REENTRY_GUARDED_EVENT_HANDLER_NAMES.has(node.name.name)) return;
+        // Only intrinsic DOM elements stay interactive across the await:
+        // component handlers (Formik onSubmit injects setSubmitting, Radix
+        // menu/dialog items auto-close on select) manage their own gating.
+        const openingElement = node.parent;
+        if (
+          !openingElement ||
+          !isNodeOfType(openingElement, "JSXOpeningElement") ||
+          !isNodeOfType(openingElement.name, "JSXIdentifier") ||
+          !/^[a-z]/.test(openingElement.name.name)
+        ) {
+          return;
+        }
         const value = node.value;
         if (!value || !isNodeOfType(value, "JSXExpressionContainer")) return;
         const handlerFunction = resolveHandlerFunction(value.expression as EsTreeNode);

@@ -242,4 +242,264 @@ describe("no-async-event-handler-without-reentry-guard", () => {
     );
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("stays quiet: Wrap-in-if ref busy guard (no early return)", () => {
+    const result = runRule(
+      noAsyncEventHandlerWithoutReentryGuard,
+      `function SaveButton({ payload }) {
+  const busyRef = useRef(false);
+  const handleSave = async () => {
+    if (!busyRef.current) {
+      busyRef.current = true;
+      try {
+        await api.post('/save', payload);
+        setSaved(true);
+      } finally {
+        busyRef.current = false;
+      }
+    }
+  };
+  return <button onClick={handleSave}>Save</button>;
+}`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Wrap-in-if state guard with setSubmitting(true) before the await (real-world outline/outline shape)", () => {
+    const result = runRule(
+      noAsyncEventHandlerWithoutReentryGuard,
+      `function EmailForm({ onSuccess }) {
+  const [email, setEmail] = useState('');
+  const [isSubmitting, setSubmitting] = useState(false);
+  const handleSubmit = async (event) => {
+    event.preventDefault();
+    if (email && !isSubmitting) {
+      setSubmitting(true);
+      try {
+        const response = await client.post('/auth/email', { email });
+        setSubmitting(false);
+        onSuccess(response);
+      } catch (error) {
+        setSubmitting(false);
+      }
+    }
+  };
+  return (
+    <form onSubmit={handleSubmit}>
+      <input value={email} onChange={(event) => setEmail(event.target.value)} />
+      <button type="submit" disabled={isSubmitting}>Continue</button>
+    </form>
+  );
+}`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: The rule's own recommended remediation: flag set before the await inside try, reset in finally, control disabled", () => {
+    const result = runRule(
+      noAsyncEventHandlerWithoutReentryGuard,
+      `function PasswordForm({ body }) {
+  const [saving, setSaving] = useState(false);
+  async function handleSave() {
+    try {
+      setSaving(true);
+      await fetch('/api/password', { method: 'PUT', body });
+      setSaved(true);
+    } finally {
+      setSaving(false);
+    }
+  }
+  return <button disabled={saving} onClick={handleSave}>Save</button>;
+}`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Formik async onSubmit calling the injected setSubmitting(false) after the await", () => {
+    const result = runRule(
+      noAsyncEventHandlerWithoutReentryGuard,
+      `function ContactForm() {
+  return (
+    <Formik
+      initialValues={{ message: '' }}
+      onSubmit={async (values, { setSubmitting }) => {
+        await api.post('/contact', values);
+        setSubmitting(false);
+      }}
+    >
+      {({ isSubmitting }) => (
+        <Form>
+          <Field name="message" />
+          <button type="submit" disabled={isSubmitting}>Send</button>
+        </Form>
+      )}
+    </Formik>
+  );
+}`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: shadcn/Radix AlertDialogAction confirm-delete (dialog auto-closes on click)", () => {
+    const result = runRule(
+      noAsyncEventHandlerWithoutReentryGuard,
+      `function DeleteProjectDialog({ projectId, setProjects }) {
+  return (
+    <AlertDialog>
+      <AlertDialogTrigger asChild>
+        <Button variant="destructive">Delete project</Button>
+      </AlertDialogTrigger>
+      <AlertDialogContent>
+        <AlertDialogAction
+          onClick={async () => {
+            await api.delete(\`/projects/\${projectId}\`);
+            setProjects((previous) => previous.filter((project) => project.id !== projectId));
+          }}
+        >
+          Confirm
+        </AlertDialogAction>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Radix DropdownMenuItem async action (menu auto-closes on select)", () => {
+    const result = runRule(
+      noAsyncEventHandlerWithoutReentryGuard,
+      `function WorkspaceMenu({ workspaceId }) {
+  const [archived, setArchived] = useState(false);
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger>Options</DropdownMenuTrigger>
+      <DropdownMenuContent>
+        <DropdownMenuItem
+          onClick={async () => {
+            await api.post(\`/workspaces/\${workspaceId}/archive\`);
+            setArchived(true);
+          }}
+        >
+          Archive
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Local IndexedDB delete via idb — no network request exists", () => {
+    const result = runRule(
+      noAsyncEventHandlerWithoutReentryGuard,
+      `function NoteRow({ db, noteId }) {
+  const [selectedId, setSelectedId] = useState(noteId);
+  const handleDelete = async () => {
+    await db.delete('notes', noteId);
+    setSelectedId(null);
+  };
+  return <button onClick={handleDelete}>Delete note</button>;
+}`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: SWR bound mutate() with no args — a GET revalidation, not a mutation", () => {
+    const result = runRule(
+      noAsyncEventHandlerWithoutReentryGuard,
+      `function StatsPanel() {
+  const stats = useSWR('/api/stats', fetcher);
+  const [lastRefreshed, setLastRefreshed] = useState(null);
+  const handleRefresh = async () => {
+    await stats.mutate();
+    setLastRefreshed(Date.now());
+  };
+  return <button onClick={handleRefresh}>Refresh</button>;
+}`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Imperative DOM disable of the captured submit button before the await", () => {
+    const result = runRule(
+      noAsyncEventHandlerWithoutReentryGuard,
+      `function WaitlistForm() {
+  const [joined, setJoined] = useState(false);
+  const handleSubmit = async (event) => {
+    event.preventDefault();
+    const submitButton = event.currentTarget.elements.namedItem('join');
+    submitButton.disabled = true;
+    try {
+      await fetch('/api/waitlist', { method: 'POST', body: new FormData(event.currentTarget) });
+      setJoined(true);
+    } finally {
+      submitButton.disabled = false;
+    }
+  };
+  return (
+    <form onSubmit={handleSubmit}>
+      <button name="join" type="submit">Join waitlist</button>
+    </form>
+  );
+}`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Cache API caches.delete — local, idempotent, no request", () => {
+    const result = runRule(
+      noAsyncEventHandlerWithoutReentryGuard,
+      `function ClearCacheButton() {
+  const [cleared, setCleared] = useState(false);
+  const handleClear = async () => {
+    await caches.delete('offline-articles');
+    setCleared(true);
+  };
+  return <button onClick={handleClear}>Clear offline data</button>;
+}`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags an unguarded post-await setter after a mutating request", () => {
+    const result = runRule(
+      noAsyncEventHandlerWithoutReentryGuard,
+      `function SaveButton({ payload }) {
+         const [saved, setSaved] = useState(false);
+         const handleSave = async () => {
+           await api.post("/save", payload);
+           setSaved(true);
+         };
+         return <button onClick={handleSave}>Save</button>;
+       }`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags a mutate call with arguments (a real mutation)", () => {
+    const result = runRule(
+      noAsyncEventHandlerWithoutReentryGuard,
+      `function RenameButton({ mutation, name }) {
+         const [done, setDone] = useState(false);
+         const handleRename = async () => {
+           await mutation.mutate({ name });
+           setDone(true);
+         };
+         return <button onClick={handleRename}>Rename</button>;
+       }`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
 });
