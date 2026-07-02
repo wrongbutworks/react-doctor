@@ -631,7 +631,7 @@ export const inspectAction = async (directory: string, flags: InspectFlags): Pro
     }
 
     if (!isQuiet && isMultiProject && completedScans.length > 0) {
-      const shouldShowShareLink =
+      const showShareLink =
         !isShareOptedOut(completedScans, scanOptions.noScore) && !scanOptions.isCi;
       await Effect.runPromise(
         printMultiProjectSummary({
@@ -639,7 +639,7 @@ export const inspectAction = async (directory: string, flags: InspectFlags): Pro
           categoryFilters,
           verbose: Boolean(flags.verbose),
           outputDirectory: flags.outputDir,
-          isOffline: !shouldShowShareLink,
+          isOffline: !showShareLink,
           projectName: path.basename(resolvedDirectory),
           totalElapsedMilliseconds: performance.now() - scanLoopStartTime,
         }),

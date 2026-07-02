@@ -14,6 +14,9 @@ export const useExitOnCtrlC = (): void => {
   const { exit } = useApp();
   useInput((input, key) => {
     if (key.ctrl && input === "c") {
+      // HACK: hard-exit from inside a React input handler. Ink's own teardown
+      // can't run (the in-flight scan holds the event loop), so restore the
+      // terminal by hand before process.exit.
       exit();
       process.stdin.setRawMode?.(false);
       process.stdout.write(SHOW_CURSOR);

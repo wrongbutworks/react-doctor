@@ -25,8 +25,10 @@ import { findNearestPackageDirectory } from "../utils/install-doctor-script.js";
 import { setUpGitHubActions } from "../utils/set-up-github-actions.js";
 import { recordCount } from "../utils/record-metric.js";
 import { METRIC } from "../utils/constants.js";
+import { shouldShowShareLink } from "../utils/should-show-share-link.js";
 import { ProjectSelect } from "./components/project-select.js";
 import { ScanApp } from "./scan-app.js";
+import { progressLayerForStore, reporterLayerForStore } from "./scan-bridge-layers.js";
 import { createScanStore } from "./scan-store.js";
 import type { MultiProjectSummary, ScanReport, TuiHandoffRequest } from "./scan-store.js";
 
@@ -76,11 +78,12 @@ const qualifyDiagnosticPaths = (
   );
 };
 
-// The share URL is suppressed for --no-score, `share: false` in config, and in
-// CI, mirroring the CLI's `shouldShowShareLink` gate exactly (CI only — it does
-// not additionally gate on coding-agent environments).
 const resolveIsOffline = (input: RunScanAppInput): boolean =>
-  input.options?.noScore === true || input.share === false || isCiEnvironment();
+  !shouldShowShareLink({
+    noScore: input.options?.noScore === true,
+    share: input.share !== false,
+    isCi: isCiEnvironment(),
+  });
 
 /** Resolves the directories to scan, prompting via Ink only when truly interactive. */
 const resolveSelectedDirectories = async (
@@ -181,8 +184,8 @@ interface ExitFooterInput {
 }
 
 // The Ink report never shows the post-scan lint-failure hint (it's suppressed
-// when `uiStore` is active), so the exit footer surfaces it instead — otherwise
-// a TUI report could look clean while oxlint silently failed.
+// while UI layers are attached), so the exit footer surfaces it instead —
+// otherwise a TUI report could look clean while oxlint silently failed.
 const resolveLintFailureReason = (results: ReadonlyArray<InspectResult>): string | null => {
   for (const result of results) {
     const reason = result.skippedCheckReasons?.lint;
@@ -288,7 +291,13 @@ const runSingleProjectScan = async (
   const noScoreMessage = buildNoScoreMessage(input.options?.noScore === true);
 
   try {
-    const result = await inspect(directory, { ...input.options, uiStore: store });
+    const result = await inspect(directory, {
+      ...input.options,
+      isCi: isCiEnvironment(),
+      // A lone scan drives both the live diagnostic feed and the in-app
+      // progress spinner through the store-backed layers.
+      uiLayers: { reporter: reporterLayerForStore(store), progress: progressLayerForStore(store) },
+    });
     const projectedScore = result.score
       ? await computeProjectedScore([...result.diagnostics], [...result.diagnostics], result.score)
       : null;
@@ -328,27 +337,24 @@ const runMultiProjectScan = async (
   try {
     const startTime = performance.now();
     let finishedCount = 0;
-    store.setProgress({
-      text: `Scanning ${directories.length} projects…`,
-      status: "active",
-    });
+    store.setProgress(`Scanning ${directories.length} projects…`);
     const results = await mapWithConcurrency(
       [...directories],
       DEFAULT_PROJECT_SCAN_CONCURRENCY,
       async (projectDirectory) => {
         const result = await inspect(projectDirectory, {
           ...input.options,
-          // Stream each project's diagnostics into the shared store so the live
-          // scan view shows the error feed (uiStore implies suppressRendering);
-          // `concurrentScan` keeps per-project progress off the shared counter.
-          uiStore: store,
+          isCi: isCiEnvironment(),
+          // Stream each project's diagnostics into the shared store so the
+          // live scan view shows the error feed. No progress layer: the batch
+          // loop below owns the shared "x/N projects" counter.
+          uiLayers: { reporter: reporterLayerForStore(store) },
           concurrentScan: true,
         });
         finishedCount += 1;
-        store.setProgress({
-          text: `Scanning ${directories.length} projects… (${finishedCount}/${directories.length})`,
-          status: "active",
-        });
+        store.setProgress(
+          `Scanning ${directories.length} projects… (${finishedCount}/${directories.length})`,
+        );
         return { directory: projectDirectory, result };
       },
     );
@@ -422,6 +428,12 @@ export const runScanApp = async (input: RunScanAppInput): Promise<RunScanAppResu
   const rootDirectory = scanTarget.resolvedDirectory;
   const resolvedInput: RunScanAppInput = {
     ...input,
+    options: {
+      ...input.options,
+      // Fold the config's `noScore` in (like the static resolver does) so the
+      // offline gate and the no-score header agree with what the scan runs.
+      noScore: input.options?.noScore ?? scanTarget.userConfig?.noScore ?? false,
+    },
     configProjects: input.configProjects ?? scanTarget.userConfig?.projects,
     share: input.share ?? scanTarget.userConfig?.share ?? true,
   };

@@ -1,14 +1,12 @@
 import { formatFixRecipeLine, formatLearnMoreLine } from "../../utils/diagnostic-grouping.js";
 import { TUI_ISSUE_PROMPT_MAX_SITES } from "../../utils/constants.js";
+import { formatDiagnosticSite } from "../../utils/format-diagnostic-site.js";
 import type { DiagnosticRow } from "./diagnostic-rows.js";
 
 export interface BuildIssuePromptInput {
   readonly row: DiagnosticRow;
   readonly projectName: string;
 }
-
-const formatSite = (diagnostic: DiagnosticRow["representative"]): string =>
-  diagnostic.line > 0 ? `${diagnostic.filePath}:${diagnostic.line}` : diagnostic.filePath;
 
 /**
  * A focused, single-rule fix prompt for the interactive report's triage actions
@@ -19,7 +17,7 @@ const formatSite = (diagnostic: DiagnosticRow["representative"]): string =>
 export const buildIssuePrompt = ({ row, projectName }: BuildIssuePromptInput): string => {
   const { representative } = row;
   const severityLabel = row.severity === "error" ? "ERROR" : "WARN";
-  const uniqueSites = [...new Set(row.diagnostics.map(formatSite))];
+  const uniqueSites = [...new Set(row.diagnostics.map(formatDiagnosticSite))];
   const inlineSites = uniqueSites.slice(0, TUI_ISSUE_PROMPT_MAX_SITES);
   const remainingSiteCount = uniqueSites.length - inlineSites.length;
 

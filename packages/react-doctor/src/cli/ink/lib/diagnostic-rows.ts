@@ -4,6 +4,7 @@ import {
   buildSortedRuleGroups,
   formatLearnMoreLine,
 } from "../../utils/diagnostic-grouping.js";
+import { formatDiagnosticSite } from "../../utils/format-diagnostic-site.js";
 import type { Severity } from "./severity-variants.js";
 
 /** One scannable row in the diagnostics list: a fully-sorted rule group. */
@@ -23,9 +24,6 @@ export interface DiagnosticRow {
 const pickRepresentative = (diagnostics: ReadonlyArray<Diagnostic>): Diagnostic =>
   diagnostics.find((diagnostic) => diagnostic.line > 0) ?? diagnostics[0];
 
-const formatLocation = (diagnostic: Diagnostic): string =>
-  diagnostic.line > 0 ? `${diagnostic.filePath}:${diagnostic.line}` : diagnostic.filePath;
-
 /**
  * Projects the settled diagnostics into the full, score-priority-sorted list of
  * rule-group rows — no top-N truncation. The TUI viewport handles the volume.
@@ -43,7 +41,7 @@ export const buildDiagnosticRows = (
       severity: representative.severity === "error" ? "error" : "warning",
       category: representative.category,
       title: representative.title ?? ruleKey,
-      location: formatLocation(representative),
+      location: formatDiagnosticSite(representative),
       siteCount: ruleDiagnostics.length,
       representative,
       learnMore: formatLearnMoreLine(representative),

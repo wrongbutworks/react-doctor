@@ -17,6 +17,7 @@ import {
 import { versionAction } from "./commands/version.js";
 import { whyAction } from "./commands/why.js";
 import { applyColorPreference } from "./utils/apply-color-preference.js";
+import { TUI_MIN_NODE_MAJOR_VERSION } from "./utils/constants.js";
 import { ensureWindowsUtf8Console } from "./utils/ensure-windows-utf8-console.js";
 import { exitGracefully } from "./utils/exit-gracefully.js";
 import { guardStdin } from "./utils/guard-stdin.js";
@@ -417,14 +418,26 @@ program
       directory = ".",
       options: { deadCode?: boolean; score?: boolean; project?: string; yes?: boolean },
     ) => {
-      // Piped / redirected / CI: the interactive Ink report can't own the
-      // terminal (raw-mode stdin, cursor control, a live viewport), so degrade
-      // to the static non-interactive scan — and skip paying Ink's startup cost
-      // entirely. `--score false` maps to `--no-score`; the score-only mode
-      // (`flags.score === true`) isn't reachable from the TUI command's flags.
-      if (process.stdout.isTTY !== true || isNonInteractiveEnvironment()) {
+      // Commander defaults a lone `--no-x` flag to `true`, so only an explicit
+      // negation is forwarded — anything else stays `undefined` and lets the
+      // user's config (`deadCode: false`, `noScore: true`) win the merge.
+      const deadCode = options.deadCode === false ? false : undefined;
+      const noScore = options.score === false ? true : undefined;
+      // Piped / redirected / CI / Node < 22 (Ink 7's floor): the interactive
+      // Ink report can't own the terminal (raw-mode stdin, cursor control, a
+      // live viewport), so degrade to the static non-interactive scan — and
+      // skip paying Ink's startup cost entirely. `--score false` maps to
+      // `--no-score`; the score-only mode (`flags.score === true`) isn't
+      // reachable from the TUI command's flags.
+      const nodeMajorVersion = Number(process.versions.node.split(".")[0]);
+      if (
+        process.stdout.isTTY !== true ||
+        process.stdin.isTTY !== true ||
+        isNonInteractiveEnvironment() ||
+        nodeMajorVersion < TUI_MIN_NODE_MAJOR_VERSION
+      ) {
         await inspectAction(directory, {
-          deadCode: options.deadCode,
+          deadCode,
           score: options.score === false ? false : undefined,
           project: options.project,
           yes: options.yes,
@@ -432,12 +445,15 @@ program
         return;
       }
       const { runScanApp } = await import("./ink/run-scan-app.js");
-      await runScanApp({
+      const { errorCount } = await runScanApp({
         directory,
-        options: { deadCode: options.deadCode ?? true, noScore: options.score === false },
+        options: { deadCode, noScore },
         projectFlag: options.project,
         skipPrompts: options.yes ?? false,
       });
+      // Parity with the static path's default `error` blocking level: scripts
+      // wrapping the TUI still see a non-zero exit when errors were found.
+      if (errorCount > 0) process.exitCode = 1;
     },
   );
 

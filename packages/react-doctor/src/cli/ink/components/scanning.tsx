@@ -1,6 +1,7 @@
 import { Box, Text } from "ink";
 import Spinner from "ink-spinner";
 import type { Diagnostic as LiveDiagnostic } from "@react-doctor/core/schemas";
+import { formatDiagnosticSite } from "../../utils/format-diagnostic-site.js";
 import { severityVariant } from "../lib/severity-variants.js";
 
 export interface ScanningProps {
@@ -27,8 +28,7 @@ export const Scanning = ({ progressText, liveCount, recent }: ScanningProps) => 
       </Text>
       {recent.map((diagnostic, index) => {
         const variant = severityVariant(diagnostic.severity === "error" ? "error" : "warning");
-        const location =
-          diagnostic.line > 0 ? `${diagnostic.filePath}:${diagnostic.line}` : diagnostic.filePath;
+        const location = formatDiagnosticSite(diagnostic);
         return (
           <Text key={`${diagnostic.filePath}:${diagnostic.line}:${index}`} wrap="truncate-end">
             {"  "}

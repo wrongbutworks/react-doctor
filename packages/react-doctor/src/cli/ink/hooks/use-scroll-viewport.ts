@@ -13,8 +13,6 @@ export interface UseScrollViewportOptions {
   readonly itemCount: number;
   readonly height: number;
   readonly isActive?: boolean;
-  /** Fired on Enter for the selected index. */
-  readonly onActivate?: (index: number) => void;
   /**
    * When set, navigation only ever lands on indices for which this returns true
    * — used to skip non-selectable rows like category headers in a grouped list.
@@ -28,12 +26,12 @@ const HALF = 2;
 
 /**
  * Headless scroll + selection over a uniform-height list, with a vim/less-style
- * keymap (↑↓ / j k, PgUp·PgDn, Ctrl-u·d half-page, gg·G, Enter). Owns no
+ * keymap (↑↓ / j k, PgUp·PgDn, Ctrl-u·d half-page, gg·G). Owns no
  * rendering — components read the visible window and the selected index. This is
  * the cmdk-style "logic, not chrome" core the `<DiagnosticList>` builds on.
  */
 export const useScrollViewport = (options: UseScrollViewportOptions): ScrollViewport => {
-  const { itemCount, height, isActive = true, onActivate, isSelectable } = options;
+  const { itemCount, height, isActive = true, isSelectable } = options;
 
   const canSelect = (index: number): boolean =>
     index >= 0 && index < itemCount && (isSelectable ? isSelectable(index) : true);
@@ -94,9 +92,7 @@ export const useScrollViewport = (options: UseScrollViewportOptions): ScrollView
       }
       if (input === "g") {
         awaitingSecondG.current = true;
-        return;
       }
-      if (key.return && onActivate) onActivate(clampIndex(selectedIndex));
     },
     { isActive },
   );

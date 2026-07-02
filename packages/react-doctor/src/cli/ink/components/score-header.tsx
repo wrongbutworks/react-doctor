@@ -1,13 +1,8 @@
 import { Box, Text, useStdout } from "ink";
 import { useMemo } from "react";
-import {
-  PERFECT_SCORE,
-  SCORE_BAR_WIDTH_CHARS,
-  SCORE_GOOD_THRESHOLD,
-  SCORE_OK_THRESHOLD,
-  TOP_ERRORS_DISPLAY_COUNT,
-} from "@react-doctor/core";
+import { PERFECT_SCORE, SCORE_BAR_WIDTH_CHARS, TOP_ERRORS_DISPLAY_COUNT } from "@react-doctor/core";
 import type { ScoreResult } from "@react-doctor/core";
+import { doctorFace } from "../../utils/doctor-face.js";
 import { canAnimateOnboarding } from "../../utils/onboarding-pacing.js";
 import { useAnimatedScore } from "../hooks/use-animated-score.js";
 import { useStdoutDimensions } from "../hooks/use-stdout-dimensions.js";
@@ -28,13 +23,6 @@ export interface ScoreHeaderProps {
 // 7-char box + 2-space gap), mirroring the CLI's SCORE_RIGHT_COLUMN_OFFSET.
 const FACE_COLUMN_OFFSET = 11;
 const RIGHT_EDGE_SAFETY = 2;
-
-// The same three doctor faces the CLI draws (`render-score-header.ts`).
-const doctorFace = (score: number): readonly [string, string] => {
-  if (score >= SCORE_GOOD_THRESHOLD) return ["◠ ◠", " ▽ "];
-  if (score >= SCORE_OK_THRESHOLD) return ["• •", " ─ "];
-  return ["x x", " ▽ "];
-};
 
 const BRANDING = "https://react.doctor";
 

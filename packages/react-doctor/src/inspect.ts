@@ -15,10 +15,10 @@ import {
   restoreLegacyThrow,
   runInspect as runInspectEffect,
 } from "@react-doctor/core";
+import type * as Layer from "effect/Layer";
+import type { Progress, Reporter } from "@react-doctor/core";
 import { applyObservability } from "./cli/utils/apply-observability.js";
 import { buildRuntimeLayers } from "./cli/utils/build-runtime-layers.js";
-import { progressLayerForStore, reporterLayerForStore } from "./cli/ink/scan-bridge-layers.js";
-import type { ScanStore } from "./cli/ink/scan-store.js";
 import {
   recordSentryProjectContext,
   resetSentryRunState,
@@ -56,6 +56,7 @@ import { buildRulePriorityMap } from "./cli/utils/diagnostic-grouping.js";
 import { filterDiagnosticsByCategories } from "./cli/utils/filter-diagnostics-by-categories.js";
 import { printDiagnostics } from "./cli/utils/render-diagnostics.js";
 import { shouldRenderHyperlinks } from "./cli/utils/should-render-hyperlinks.js";
+import { shouldShowShareLink } from "./cli/utils/should-show-share-link.js";
 import { isNonInteractiveEnvironment } from "./cli/utils/is-non-interactive-environment.js";
 import {
   canAnimateOnboarding,
@@ -137,14 +138,22 @@ const buildChangedLineMatcher = (
   };
 };
 
+/**
+ * CLI-only: layer overrides an interactive UI supplies so the scan streams
+ * live diagnostics (and optionally progress) into it instead of the console.
+ * When present, all console rendering is suppressed — the UI owns the screen
+ * and reads the returned result. The scan engine never learns the UI's
+ * concrete store type; it only sees these generic service layers.
+ */
+export interface InspectUiLayers {
+  readonly reporter: Layer.Layer<Reporter>;
+  readonly progress?: Layer.Layer<Progress>;
+}
+
 export interface ReactDoctorInspectOptions extends InspectOptions {
   categoryFilters?: string[];
-  /**
-   * CLI-only: when present, the scan streams live diagnostics + progress into
-   * this store (for the interactive Ink UI) and suppresses all console
-   * rendering — the Ink app owns the screen and reads the returned result.
-   */
-  uiStore?: ScanStore;
+  /** See {@link InspectUiLayers}. */
+  uiLayers?: InspectUiLayers;
 }
 
 export interface ResolvedInspectOptions {
@@ -183,8 +192,8 @@ export interface ResolvedInspectOptions {
   changedLineRanges: ReadonlyArray<ChangedFileLineRanges> | null;
   /** See `InspectOptions.supplyChainManifestChanged`. */
   supplyChainManifestChanged: boolean;
-  /** Interactive Ink UI store, or `null` for the static console path. */
-  uiStore: ScanStore | null;
+  /** Interactive UI layer overrides, or `null` for the static console path. */
+  uiLayers: InspectUiLayers | null;
 }
 
 const buildIgnoredTags = (userConfig: ReactDoctorConfig | null): ReadonlySet<string> => {
@@ -219,10 +228,10 @@ const mergeInspectOptions = (
   adoptExistingLintConfig: userConfig?.adoptExistingLintConfig ?? true,
   ignoredTags: buildIgnoredTags(userConfig),
   outputSurface: inputOptions.outputSurface ?? "cli",
-  // The Ink UI owns the screen, so it suppresses console rendering exactly like
-  // a multi-project batch does — the difference is the live store feed.
-  suppressRendering: (inputOptions.suppressRendering ?? false) || inputOptions.uiStore != null,
-  uiStore: inputOptions.uiStore ?? null,
+  // An attached UI owns the screen, so it suppresses console rendering exactly
+  // like a multi-project batch does — the difference is the live layer feed.
+  suppressRendering: (inputOptions.suppressRendering ?? false) || inputOptions.uiLayers != null,
+  uiLayers: inputOptions.uiLayers ?? null,
   concurrentScan: inputOptions.concurrentScan ?? false,
   concurrency: inputOptions.concurrency,
   baseline: inputOptions.baseline ?? null,
@@ -575,14 +584,8 @@ const runInspectWithRuntime = async (
     shouldComputeScore: !options.noScore,
     shouldShowProgressSpinners,
     oxlintConcurrency: options.concurrency,
-    reporterLayer: options.uiStore ? reporterLayerForStore(options.uiStore) : undefined,
-    // In a concurrent batch the parent loop owns the shared progress line (the
-    // "x/N projects" counter), so per-project progress stays a no-op while the
-    // live diagnostic stream is still forwarded. A lone scan drives both.
-    progressLayer:
-      options.uiStore && !options.concurrentScan
-        ? progressLayerForStore(options.uiStore)
-        : undefined,
+    reporterLayer: options.uiLayers?.reporter,
+    progressLayer: options.uiLayers?.progress,
   });
 
   const program = runInspectEffect(
@@ -658,7 +661,7 @@ const runInspectWithRuntime = async (
   // `message.includes(...)`).
   if (
     !options.scoreOnly &&
-    !options.uiStore &&
+    !options.uiLayers &&
     !lintBindingMissing &&
     output.didLintFail &&
     lintFailureReason !== null
@@ -1078,7 +1081,7 @@ const finalizeAndRender = (input: FinalizeInput): Effect.Effect<InspectResult> =
         )
       : null;
 
-    const shouldShowShareLink = !options.noScore && options.share && !options.isCi;
+    const showShareLink = shouldShowShareLink(options);
     yield* pause;
     yield* printSummary({
       diagnostics: [...printedDiagnostics],
@@ -1105,7 +1108,7 @@ const finalizeAndRender = (input: FinalizeInput): Effect.Effect<InspectResult> =
       diagnostics: [...printedDiagnostics],
       scoreResult: score,
       projectName: project.projectName,
-      isOffline: !shouldShowShareLink,
+      isOffline: !showShareLink,
     });
 
     return buildResult();

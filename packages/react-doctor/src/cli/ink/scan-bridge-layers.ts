@@ -29,14 +29,11 @@ export const reporterLayerForStore = (store: ScanStore): Layer.Layer<Reporter> =
 export const progressHandleForStore =
   (store: ScanStore) =>
   (text: string): ProgressHandle => {
-    store.setProgress({ text, status: "active" });
+    store.setProgress(text);
     return {
-      update: (displayText) =>
-        Effect.sync(() => store.setProgress({ text: displayText, status: "active" })),
-      succeed: (displayText) =>
-        Effect.sync(() => store.setProgress({ text: displayText, status: "succeeded" })),
-      fail: (displayText) =>
-        Effect.sync(() => store.setProgress({ text: displayText, status: "failed" })),
+      update: (displayText) => Effect.sync(() => store.setProgress(displayText)),
+      succeed: (displayText) => Effect.sync(() => store.setProgress(displayText)),
+      fail: (displayText) => Effect.sync(() => store.setProgress(displayText)),
       stop: () => Effect.sync(() => store.setProgress(null)),
     };
   };

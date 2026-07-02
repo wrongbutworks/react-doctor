@@ -3,6 +3,7 @@ import type { CliAgentId } from "../utils/launch-agent.js";
 import { Report } from "./components/report.js";
 import { Scanning } from "./components/scanning.js";
 import { Summary } from "./components/summary.js";
+import { useExitOnCtrlC } from "./hooks/use-exit-on-ctrl-c.js";
 import { useScanStore } from "./hooks/use-scan-store.js";
 import type { ScanStore, TuiHandoffRequest } from "./scan-store.js";
 
@@ -30,6 +31,10 @@ export const ScanApp = ({
 }: ScanAppProps) => {
   const snapshot = useScanStore(store);
   const { exit } = useApp();
+  // At the root so Ctrl-C terminates from every phase — including mid-scan,
+  // where the in-flight inspect() promise would otherwise keep the process
+  // alive after Ink unmounts.
+  useExitOnCtrlC();
 
   if (snapshot.phase === "summary" && snapshot.summary) {
     return (
@@ -59,7 +64,7 @@ export const ScanApp = ({
 
   return (
     <Scanning
-      progressText={snapshot.progress?.text ?? null}
+      progressText={snapshot.progress}
       liveCount={snapshot.liveCount}
       recent={snapshot.liveDiagnostics.slice(-RECENT_LIVE_COUNT)}
     />

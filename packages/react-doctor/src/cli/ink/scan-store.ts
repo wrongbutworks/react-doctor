@@ -4,9 +4,10 @@ import type { Diagnostic, ScoreResult } from "@react-doctor/core";
 // nested-array readonly-ness. The settled `report` keeps the index type.
 import type { Diagnostic as LiveDiagnostic } from "@react-doctor/core/schemas";
 
+import { TUI_LIVE_FEED_MAX_ENTRIES } from "../utils/constants.js";
 import type { CliAgentId } from "../utils/launch-agent.js";
 
-export type ScanPhase = "scanning" | "report" | "summary" | "done";
+export type ScanPhase = "scanning" | "report" | "summary";
 
 /**
  * A request to hand the selected issue's fix prompt to a CLI agent. Produced by
@@ -16,13 +17,6 @@ export type ScanPhase = "scanning" | "report" | "summary" | "done";
 export interface TuiHandoffRequest {
   readonly agentId: CliAgentId;
   readonly prompt: string;
-}
-
-export type ProgressStatus = "active" | "succeeded" | "failed";
-
-export interface ProgressState {
-  readonly text: string;
-  readonly status: ProgressStatus;
 }
 
 /** The settled single-project scan output the report view renders. */
@@ -61,11 +55,14 @@ export interface MultiProjectSummary {
 
 export interface ScanStoreSnapshot {
   readonly phase: ScanPhase;
-  /** Diagnostics as the orchestrator emits them, before the final sort/score. */
+  /**
+   * The most recent diagnostics as the orchestrator emits them (bounded tail;
+   * `liveCount` carries the true total), before the final sort/score.
+   */
   readonly liveDiagnostics: ReadonlyArray<LiveDiagnostic>;
   readonly liveCount: number;
   /** Latest scan-progress line, or `null` once the scan stops without a result. */
-  readonly progress: ProgressState | null;
+  readonly progress: string | null;
   /** Settled single-project output, present once a single-project scan resolves. */
   readonly report: ScanReport | null;
   /** Settled monorepo output, present once a multi-project scan resolves. */
@@ -83,10 +80,9 @@ export interface ScanStore {
   readonly subscribe: (listener: () => void) => () => void;
   readonly getSnapshot: () => ScanStoreSnapshot;
   readonly emitDiagnostic: (diagnostic: LiveDiagnostic) => void;
-  readonly setProgress: (progress: ProgressState | null) => void;
+  readonly setProgress: (progress: string | null) => void;
   readonly setReport: (report: ScanReport) => void;
   readonly setSummary: (summary: MultiProjectSummary) => void;
-  readonly setPhase: (phase: ScanPhase) => void;
 }
 
 const INITIAL_SNAPSHOT: ScanStoreSnapshot = {
@@ -118,12 +114,13 @@ export const createScanStore = (): ScanStore => {
     emitDiagnostic: (diagnostic) =>
       commit({
         ...snapshot,
-        liveDiagnostics: [...snapshot.liveDiagnostics, diagnostic],
+        liveDiagnostics: [...snapshot.liveDiagnostics, diagnostic].slice(
+          -TUI_LIVE_FEED_MAX_ENTRIES,
+        ),
         liveCount: snapshot.liveCount + 1,
       }),
     setProgress: (progress) => commit({ ...snapshot, progress }),
     setReport: (report) => commit({ ...snapshot, report, phase: "report" }),
     setSummary: (summary) => commit({ ...snapshot, summary, phase: "summary" }),
-    setPhase: (phase) => commit({ ...snapshot, phase }),
   };
 };

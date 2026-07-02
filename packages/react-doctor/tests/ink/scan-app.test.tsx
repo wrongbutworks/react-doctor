@@ -34,7 +34,7 @@ const widenTerminal = (stdout: { emit: (event: string) => void }): void => {
 describe("ScanApp", () => {
   it("renders the live scan view before a report settles", () => {
     const store = createScanStore();
-    store.setProgress({ text: "Linting source files", status: "active" });
+    store.setProgress("Linting source files");
     store.emitDiagnostic(makeDiagnostic({ rule: "rules-of-hooks", severity: "error" }));
 
     const { lastFrame, unmount } = render(<ScanApp store={store} />);

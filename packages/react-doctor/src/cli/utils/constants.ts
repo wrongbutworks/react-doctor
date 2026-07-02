@@ -53,6 +53,14 @@ export const HANDOFF_MAX_FILES_PER_RULE = 3;
 // prompt, so a single rule with hundreds of sites still copies a tight prompt.
 export const TUI_ISSUE_PROMPT_MAX_SITES = 8;
 
+// Ink 7 (and its cli-truncate/slice-ansi deps) declare `node >= 22`; older
+// Nodes degrade to the static scan instead of crashing at the lazy import.
+export const TUI_MIN_NODE_MAJOR_VERSION = 22;
+
+// The live scan feed keeps only the most recent finds — the scanning view
+// shows a short tail, so an unbounded array is quadratic copying for nothing.
+export const TUI_LIVE_FEED_MAX_ENTRIES = 25;
+
 // Social proof for the "Add to CI" pitch (shown in the post-scan handoff
 // prompt and embedded in the agent-handoff prompt).
 export const CI_TRUST_COMPANIES = "PayPal, Rippling, and Alibaba";

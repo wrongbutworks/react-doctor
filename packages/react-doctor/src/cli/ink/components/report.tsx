@@ -2,7 +2,6 @@ import { Box, Text, useInput } from "ink";
 import { useMemo } from "react";
 import type { CliAgentId } from "../../utils/launch-agent.js";
 import type { ScanReport, TuiHandoffRequest } from "../scan-store.js";
-import { useExitOnCtrlC } from "../hooks/use-exit-on-ctrl-c.js";
 import { useStdoutDimensions } from "../hooks/use-stdout-dimensions.js";
 import { buildDiagnosticRows } from "../lib/diagnostic-rows.js";
 import { DiagnosticList } from "./diagnostic-list.js";
@@ -77,7 +76,6 @@ export const Report = ({
     [report.diagnostics, report.score],
   );
 
-  useExitOnCtrlC();
   // Only the empty-state view below owns q/Esc; once there are rows the
   // DiagnosticList handles input (Esc there means "leave the actions pane").
   useInput(
