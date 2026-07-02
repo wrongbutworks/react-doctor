@@ -394,4 +394,162 @@ describe("no-fetch-response-used-without-status-check", () => {
     );
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("stays quiet: canvas.toDataURL() data: URL fetched through a binding (canvas → Blob export)", () => {
+    const result = runRule(
+      noFetchResponseUsedWithoutStatusCheck,
+      `async function exportCanvasAsBlob(canvas: HTMLCanvasElement) {
+  const dataUrl = canvas.toDataURL('image/png');
+  const response = await fetch(dataUrl);
+  const pngBlob = await response.blob();
+  return pngBlob;
+}`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Inline canvas.toDataURL argument with double-await (dataURL → File helper)", () => {
+    const result = runRule(
+      noFetchResponseUsedWithoutStatusCheck,
+      `async function canvasToFile(canvas: HTMLCanvasElement, fileName: string) {
+  const blob = await (await fetch(canvas.toDataURL('image/png'))).blob();
+  return new File([blob], fileName, { type: 'image/png' });
+}`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: URL.createObjectURL blob: URL fetched and revoked in finally", () => {
+    const result = runRule(
+      noFetchResponseUsedWithoutStatusCheck,
+      `async function fileToArrayBuffer(file: File) {
+  const objectUrl = URL.createObjectURL(file);
+  try {
+    const response = await fetch(objectUrl);
+    const buffer = await response.arrayBuffer();
+    return buffer;
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: dataUrlToBlob helper taking the data URL as a parameter", () => {
+    const result = runRule(
+      noFetchResponseUsedWithoutStatusCheck,
+      `async function dataUrlToBlob(dataUrl: string) {
+  const response = await fetch(dataUrl);
+  return response.blob();
+}`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Effect fetch via inner async load() with load().catch() materializing into error state", () => {
+    const result = runRule(
+      noFetchResponseUsedWithoutStatusCheck,
+      `function useUsers(url: string) {
+  const [users, setUsers] = useState([]);
+  const [error, setError] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      const response = await fetch(url);
+      const data = await response.json();
+      if (!cancelled) setUsers(data);
+    };
+    load().catch((loadError) => {
+      if (!cancelled) setError(loadError);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [url]);
+  return { users, error };
+}`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Promise.all of .then(json) chains inside a try whose catch materializes", () => {
+    const result = runRule(
+      noFetchResponseUsedWithoutStatusCheck,
+      `async function loadAll() {
+  try {
+    const [user, posts] = await Promise.all([
+      fetch('/api/user').then((response) => response.json()),
+      fetch('/api/posts').then((response) => response.json()),
+    ]);
+    setUser(user);
+    setPosts(posts);
+  } catch (error) {
+    setError(error);
+  }
+}`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Promise.race timeout wrapper inside a materializing try/catch", () => {
+    const result = runRule(
+      noFetchResponseUsedWithoutStatusCheck,
+      `async function loadWithTimeout(url: string) {
+  try {
+    const rows = await Promise.race([
+      fetch(url).then((response) => response.json()),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Request timed out')), 5000),
+      ),
+    ]);
+    setRows(rows);
+  } catch (error) {
+    setError(error);
+  }
+}`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Cache-warming prefetch that discards the body with an explicit error swallow", () => {
+    const result = runRule(
+      noFetchResponseUsedWithoutStatusCheck,
+      `function prefetchThumbnail(url: string) {
+  fetch(url)
+    .then((response) => response.blob())
+    .catch(() => {});
+}`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags an http fetch consumed in a helper whose call site has no rejection handling", () => {
+    const result = runRule(
+      noFetchResponseUsedWithoutStatusCheck,
+      `function usePosts() {
+         const [posts, setPosts] = useState([]);
+         useEffect(() => {
+           const load = async () => {
+             const response = await fetch("/api/posts");
+             const data = await response.json();
+             setPosts(data);
+           };
+           load();
+         }, []);
+         return posts;
+       }`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags a discarded chain with no rejection handler at all", () => {
+    const result = runRule(
+      noFetchResponseUsedWithoutStatusCheck,
+      `function warmCache(url) {
+         fetch(url).then((response) => response.blob());
+       }`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
 });

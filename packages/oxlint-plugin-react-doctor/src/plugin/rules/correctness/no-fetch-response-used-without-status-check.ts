@@ -54,11 +54,42 @@ const resolveStaticUrlPrefix = (argument: EsTreeNode, depth: number): string | n
   return null;
 };
 
+// data:/blob: URLs produced by calls rather than literals —
+// `canvas.toDataURL(...)`, `URL.createObjectURL(...)` — or carried by a
+// binding/parameter named for the scheme (`dataUrl`, `objectUrl`,
+// `blobUrl`). Decoding them is local: no HTTP status exists to check.
+const INERT_URL_PRODUCER_METHOD_NAMES = new Set(["toDataURL", "createObjectURL"]);
+const INERT_URL_BINDING_NAME_PATTERN = /^(?:data|object|blob)_?ur[il]$/i;
+
+const isInertUrlProducer = (argument: EsTreeNode, depth: number): boolean => {
+  if (depth > MAX_URL_BINDING_RESOLUTION_DEPTH) return false;
+  const expression = stripGroupingParens(argument);
+  if (isNodeOfType(expression, "CallExpression")) {
+    const callee = stripGroupingParens(expression.callee as EsTreeNode);
+    if (
+      isNodeOfType(callee, "MemberExpression") &&
+      !callee.computed &&
+      isNodeOfType(callee.property, "Identifier")
+    ) {
+      return INERT_URL_PRODUCER_METHOD_NAMES.has(callee.property.name);
+    }
+    return isNodeOfType(callee, "Identifier") && callee.name === "createObjectURL";
+  }
+  if (isNodeOfType(expression, "Identifier")) {
+    if (INERT_URL_BINDING_NAME_PATTERN.test(expression.name)) return true;
+    const binding = findVariableInitializer(expression, expression.name);
+    if (!binding?.initializer || binding.initializer === expression) return false;
+    return isInertUrlProducer(binding.initializer, depth + 1);
+  }
+  return false;
+};
+
 const fetchesInertUrlScheme = (node: EsTreeNodeOfType<"CallExpression">): boolean => {
   const firstArgument = node.arguments?.[0];
   if (!firstArgument) return false;
   const urlPrefix = resolveStaticUrlPrefix(firstArgument as EsTreeNode, 0);
-  return urlPrefix !== null && INERT_URL_SCHEME_PATTERN.test(urlPrefix);
+  if (urlPrefix !== null && INERT_URL_SCHEME_PATTERN.test(urlPrefix)) return true;
+  return isInertUrlProducer(firstArgument as EsTreeNode, 0);
 };
 
 const nearestFunctionOrProgram = (node: EsTreeNode): EsTreeNode | null => {
@@ -367,18 +398,140 @@ const enclosingTryMaterializesErrors = (node: EsTreeNode): boolean => {
   return false;
 };
 
+const PROMISE_COMBINATOR_NAMES = new Set(["all", "race", "any", "allSettled"]);
+
 // `await fetch(...).then(...)` inside a materializing try-catch: the
 // await routes the chain's rejection into the catch clause, so the
 // failure is covered the same way the awaited-declarator shapes are.
 // Without the await the try never sees the rejection, so it exempts
-// nothing.
+// nothing. A chain sitting as an ELEMENT of `Promise.all([...])` /
+// `Promise.race([...])` is covered the same way when the combinator's
+// await sits under the materializing try — the combinator forwards the
+// element's rejection.
 const awaitedChainCoveredByMaterializingTry = (fetchCall: EsTreeNode): boolean => {
-  const chainConsumer = getMeaningfulParent(outermostPromiseChainCall(fetchCall));
+  let chainConsumer = getMeaningfulParent(outermostPromiseChainCall(fetchCall));
+  if (chainConsumer && isNodeOfType(chainConsumer, "ArrayExpression")) {
+    const combinatorCall = getMeaningfulParent(chainConsumer);
+    if (
+      combinatorCall &&
+      isNodeOfType(combinatorCall, "CallExpression") &&
+      isNodeOfType(combinatorCall.callee, "MemberExpression") &&
+      !combinatorCall.callee.computed &&
+      isNodeOfType(combinatorCall.callee.object, "Identifier") &&
+      combinatorCall.callee.object.name === "Promise" &&
+      isNodeOfType(combinatorCall.callee.property, "Identifier") &&
+      PROMISE_COMBINATOR_NAMES.has(combinatorCall.callee.property.name)
+    ) {
+      chainConsumer = getMeaningfulParent(outermostPromiseChainCall(combinatorCall));
+    }
+  }
   return Boolean(
     chainConsumer &&
     isNodeOfType(chainConsumer, "AwaitExpression") &&
     enclosingTryMaterializesErrors(chainConsumer),
   );
+};
+
+// The fetch lives in a named local async helper whose CALL SITE routes the
+// rejection — `load().catch((e) => setError(e))` or `await load()` under a
+// materializing try. The failure routing is identical to an inline .catch,
+// just one function hop away.
+const enclosingHelperCallSiteHandlesRejection = (fetchNode: EsTreeNode): boolean => {
+  const enclosing = nearestFunctionOrProgram(fetchNode);
+  if (!enclosing || !isFunctionLike(enclosing) || !enclosing.async) return false;
+  let helperName: string | null = null;
+  if (isNodeOfType(enclosing, "FunctionDeclaration") && isNodeOfType(enclosing.id, "Identifier")) {
+    helperName = enclosing.id.name;
+  } else {
+    const declarator = enclosing.parent;
+    if (
+      isNodeOfType(declarator, "VariableDeclarator") &&
+      isNodeOfType(declarator.id, "Identifier")
+    ) {
+      helperName = declarator.id.name;
+    }
+  }
+  if (!helperName) return false;
+  const outerScope = nearestFunctionOrProgram(enclosing);
+  if (!outerScope) return false;
+  let isHandled = false;
+  walkAst(outerScope, (child: EsTreeNode) => {
+    if (isHandled) return false;
+    if (!isNodeOfType(child, "CallExpression")) return;
+    const callee = stripGroupingParens(child.callee as EsTreeNode);
+    if (!isNodeOfType(callee, "Identifier") || callee.name !== helperName) return;
+    if (chainMaterializesRejection(child)) {
+      isHandled = true;
+      return false;
+    }
+    const consumer = getMeaningfulParent(outermostPromiseChainCall(child));
+    if (
+      consumer &&
+      isNodeOfType(consumer, "AwaitExpression") &&
+      enclosingTryMaterializesErrors(consumer)
+    ) {
+      isHandled = true;
+      return false;
+    }
+  });
+  return isHandled;
+};
+
+// A `.then` handler that only DRAINS the body — an expression-bodied arrow
+// returning `param.blob()`/`param.json()`/… or the bare param — never acts
+// on the parsed value, so a bad status cannot masquerade as success.
+const isPureDrainHandler = (handlerExpression: EsTreeNode): boolean => {
+  const handler = stripGroupingParens(handlerExpression);
+  if (!isFunctionLike(handler) || isNodeOfType(handler.body, "BlockStatement")) return false;
+  const firstParam = handler.params?.[0];
+  if (!firstParam || !isNodeOfType(firstParam as EsTreeNode, "Identifier")) return false;
+  const parameterName = (firstParam as EsTreeNodeOfType<"Identifier">).name;
+  const body = stripGroupingParens(handler.body as EsTreeNode);
+  if (isNodeOfType(body, "Identifier") && body.name === parameterName) return true;
+  return isBodyConsumeCall(body, parameterName);
+};
+
+// A fire-and-forget prefetch: the whole chain is a discarded statement
+// expression, every `.then` handler only drains the body, and a rejection
+// handler exists (even an empty swallow). The parsed value never reaches
+// state or logic, so draining an error body is harmless — the fetch itself
+// is the point (cache warming).
+const isDiscardedChainWithRejectionHandler = (fetchCall: EsTreeNode): boolean => {
+  const outermost = outermostPromiseChainCall(fetchCall);
+  const consumer = getMeaningfulParent(outermost);
+  if (consumer && !isNodeOfType(consumer, "ExpressionStatement")) return false;
+  let sawRejectionHandler = false;
+  let chainLink: EsTreeNode = fetchCall;
+  while (true) {
+    const member = getMeaningfulParent(chainLink);
+    if (
+      !member ||
+      !isNodeOfType(member, "MemberExpression") ||
+      stripGroupingParens(member.object as EsTreeNode) !== chainLink ||
+      member.computed ||
+      !isNodeOfType(member.property, "Identifier") ||
+      !PROMISE_CHAIN_METHODS.has(member.property.name)
+    ) {
+      return sawRejectionHandler;
+    }
+    const chainCall = getMeaningfulParent(member);
+    if (
+      !chainCall ||
+      !isNodeOfType(chainCall, "CallExpression") ||
+      stripGroupingParens(chainCall.callee as EsTreeNode) !== member
+    ) {
+      return sawRejectionHandler;
+    }
+    const chainArguments = chainCall.arguments ?? [];
+    if (member.property.name === "then") {
+      if (chainArguments[0] && !isPureDrainHandler(chainArguments[0] as EsTreeNode)) {
+        return false;
+      }
+      if (chainArguments[1]) sawRejectionHandler = true;
+    }
+    if (member.property.name === "catch" && chainArguments[0]) sawRejectionHandler = true;
+    chainLink = chainCall;
+  }
 };
 
 interface UnguardedReportInput {
@@ -453,6 +606,8 @@ export const noFetchResponseUsedWithoutStatusCheck = defineRule({
           if (!firstParam || !isNodeOfType(firstParam as EsTreeNode, "Identifier")) return;
           if (chainMaterializesRejection(node as EsTreeNode)) return;
           if (awaitedChainCoveredByMaterializingTry(node as EsTreeNode)) return;
+          if (isDiscardedChainWithRejectionHandler(node as EsTreeNode)) return;
+          if (enclosingHelperCallSiteHandlesRejection(node as EsTreeNode)) return;
           reportUnguarded({
             context,
             reportNode: node as EsTreeNode,
@@ -488,6 +643,7 @@ export const noFetchResponseUsedWithoutStatusCheck = defineRule({
             BODY_CONSUMER_METHODS.has(afterAwait.property.name)
           ) {
             if (enclosingTryMaterializesErrors(parent)) return;
+            if (enclosingHelperCallSiteHandlesRejection(node as EsTreeNode)) return;
             context.report({ node: node as EsTreeNode, message: MESSAGE });
             return;
           }
@@ -509,6 +665,7 @@ export const noFetchResponseUsedWithoutStatusCheck = defineRule({
           }
           if (!responseName) return;
           if (enclosingTryMaterializesErrors(parent)) return;
+          if (enclosingHelperCallSiteHandlesRejection(node as EsTreeNode)) return;
           const scope = nearestFunctionOrProgram(afterAwait);
           if (!scope) return;
           reportUnguarded({
