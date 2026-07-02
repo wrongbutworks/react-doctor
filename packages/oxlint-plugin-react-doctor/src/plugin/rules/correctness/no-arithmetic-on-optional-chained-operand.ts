@@ -12,7 +12,12 @@ const MESSAGE =
   "Multiplying or dividing an optional-chained value yields NaN when the chain short-circuits to undefined, and NaN spreads silently into formatting and comparisons. Add a `?? fallback` or guard the value before the math.";
 
 const MULTIPLICATIVE_OPERATORS = new Set(["*", "/", "%"]);
-const COMPARISON_OPERATORS = new Set(["<", ">", "<=", ">=", "==", "!=", "===", "!=="]);
+// `==`/`===` are deliberately absent: `NaN === x` is false for every x, so an
+// equality consumer degrades to the "no match" outcome — the same behavior as
+// absent data — and the suggested `?? 0` fallback would wrongly make a
+// `x % 4 === 0` flag true. Negated equality misbehaves the opposite way
+// (`NaN !== x` is always true), so `!=`/`!==` still count.
+const NAN_OBSERVING_COMPARISON_OPERATORS = new Set(["<", ">", "<=", ">=", "!=", "!=="]);
 const NUMERIC_FORMAT_METHOD_NAMES = new Set([
   "toFixed",
   "toString",
@@ -225,7 +230,7 @@ const isDirectNumericConsumer = (
   }
   if (
     isNodeOfType(consumer, "BinaryExpression") &&
-    COMPARISON_OPERATORS.has(consumer.operator) &&
+    NAN_OBSERVING_COMPARISON_OPERATORS.has(consumer.operator) &&
     (consumer.left === consumed || consumer.right === consumed)
   ) {
     return treatTestComparisonAsGuard ? !isComparisonInTestPosition(consumer) : true;

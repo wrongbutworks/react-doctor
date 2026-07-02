@@ -28,6 +28,45 @@ describe("no-arithmetic-on-optional-chained-operand", () => {
     expect(result.diagnostics).toHaveLength(1);
   });
 
+  it("flags negated equality on the result (NaN !== x is always true)", () => {
+    const result = runRule(
+      noArithmeticOnOptionalChainedOperand,
+      `const isOffCycle = contestRound?.week_number % 4 !== 0;`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("does not flag strict-equality flags on the result (NaN-benign class toggle)", () => {
+    const result = runRule(
+      noArithmeticOnOptionalChainedOperand,
+      `const classes = cn({
+        "bg-purple-100/70": contestRound?.week_number % 4 === 0,
+        "bg-blue-100/70": contestRound?.week_number % 4 === 1,
+      });`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag loose-equality flags on the result", () => {
+    const result = runRule(
+      noArithmeticOnOptionalChainedOperand,
+      `const isEvenRow = row?.index % 2 == 0;`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag an equality consumer reached through the result binding", () => {
+    const result = runRule(
+      noArithmeticOnOptionalChainedOperand,
+      `const remainder = slot?.position % columns; const isLead = remainder === 0;`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
   it("flags an optional-chained operand inside a Math call argument", () => {
     const result = runRule(
       noArithmeticOnOptionalChainedOperand,
