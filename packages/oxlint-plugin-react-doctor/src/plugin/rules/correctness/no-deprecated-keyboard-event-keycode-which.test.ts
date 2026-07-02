@@ -303,4 +303,125 @@ describe("no-deprecated-keyboard-event-keycode-which", () => {
     );
     expect(result.diagnostics).toHaveLength(1);
   });
+
+  it("stays quiet: Destructured { key } feature-guard with keyCode fallback (the rule's own blessed idiom, via destructuring)", () => {
+    const result = runRule(
+      noDeprecatedKeyboardEventKeycodeWhich,
+      `const onKeyDown = (event: KeyboardEvent) => {
+  const { key } = event;
+  if (key !== undefined) {
+    if (key === '/') openSearch();
+    return;
+  }
+  if (event.keyCode === 191) openSearch();
+};`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: 'key' in event feature detection guarding the keyCode fallback", () => {
+    const result = runRule(
+      noDeprecatedKeyboardEventKeycodeWhich,
+      `const onKeyDown = (event: KeyboardEvent) => {
+  if ('key' in event) {
+    handleByKey(event);
+    return;
+  }
+  if (event.keyCode === 191) openSearch();
+};`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Relational range check over layout-invariant arrow keys 37-40", () => {
+    const result = runRule(
+      noDeprecatedKeyboardEventKeycodeWhich,
+      `const onKeyDown = (e: KeyboardEvent) => {
+  if (e.keyCode >= 37 && e.keyCode <= 40) {
+    e.preventDefault();
+    moveFocus(e.keyCode);
+  }
+};`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Scroll-lock preventDefault over navigation keys 32-40", () => {
+    const result = runRule(
+      noDeprecatedKeyboardEventKeycodeWhich,
+      `const onKeyDown = (e: KeyboardEvent) => {
+  if (e.keyCode >= 32 && e.keyCode <= 40) {
+    e.preventDefault();
+  }
+};`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Skip bare modifier presses (16-18) while recording a hotkey", () => {
+    const result = runRule(
+      noDeprecatedKeyboardEventKeycodeWhich,
+      `const onKeyDown = (e: KeyboardEvent) => {
+  if (e.keyCode >= 16 && e.keyCode <= 18) return;
+  recordHotkey(e.key);
+};`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Android/legacy IME guard: keyCode === 229 || keyCode === 0", () => {
+    const result = runRule(
+      noDeprecatedKeyboardEventKeycodeWhich,
+      `const onKeyDown = (event: KeyboardEvent) => {
+  if (event.keyCode === 229 || event.keyCode === 0) return;
+  commitPendingText();
+};`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Session-replay log matcher on a stored keystroke record (not a KeyboardEvent)", () => {
+    const result = runRule(
+      noDeprecatedKeyboardEventKeycodeWhich,
+      `interface ReplayKeystroke { keyCode: number; ctrlKey: boolean; }
+const labelKeyDownEntry = (entry: ReplayKeystroke) =>
+  entry.keyCode === 90 && entry.ctrlKey ? 'undo' : 'other';`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags a relational range that includes letter codes", () => {
+    const result = runRule(
+      noDeprecatedKeyboardEventKeycodeWhich,
+      `const onKeyDown = (e: KeyboardEvent) => {
+         if (e.keyCode >= 65 && e.keyCode <= 90) {
+           handleLetter(e.keyCode);
+         }
+       };`,
+    );
+    expect(result.diagnostics.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("still flags a one-sided relational check with no invariant upper bound", () => {
+    const result = runRule(
+      noDeprecatedKeyboardEventKeycodeWhich,
+      `const onKeyDown = (e: KeyboardEvent) => {
+         if (e.keyCode >= 48) {
+           handlePrintable(e.keyCode);
+         }
+       };`,
+    );
+    expect(result.diagnostics.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("still flags when a destructured binding reads an unrelated property", () => {
+    const result = runRule(
+      noDeprecatedKeyboardEventKeycodeWhich,
+      `const onKeyDown = (event: KeyboardEvent) => {
+         const { shiftKey } = event;
+         if (event.keyCode === 65 && shiftKey) selectAll();
+       };`,
+    );
+    expect(result.diagnostics.length).toBeGreaterThanOrEqual(1);
+  });
 });

@@ -1,3 +1,4 @@
+import { collectPatternNames } from "../../utils/collect-pattern-names.js";
 import { defineRule } from "../../utils/define-rule.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
@@ -20,6 +21,10 @@ const COMPARISON_OPERATORS = new Set(["===", "!==", "==", "!=", "<", ">", "<=", 
 const RELATIONAL_OPERATORS = new Set(["<", ">", "<=", ">="]);
 const MOUSE_BUTTON_LITERALS = new Set([1, 2, 3, 4]);
 const IME_COMPOSITION_KEYCODE = 229;
+// keyCode 0 is the legacy "unidentified"/IME-in-progress marker some
+// engines emit alongside 229 — comparing against either is the
+// progressive IME guard, not layout-sensitive branching.
+const LEGACY_IME_KEYCODES = new Set([0, IME_COMPOSITION_KEYCODE]);
 // Control/navigation/activation keyCodes (Backspace, Tab, Enter,
 // modifiers, Escape, Space, PageUp/Down, End/Home, arrows, Insert,
 // Delete, Meta, F1-F12, locks) are identical across keyboard layouts,
@@ -74,7 +79,7 @@ const getComparison = (memberNode: EsTreeNode): DeprecatedReadComparison | null 
 };
 
 const isLayoutSensitiveCode = (value: number): boolean =>
-  value !== IME_COMPOSITION_KEYCODE && !LAYOUT_INVARIANT_CONTROL_KEYCODES.has(value);
+  !LEGACY_IME_KEYCODES.has(value) && !LAYOUT_INVARIANT_CONTROL_KEYCODES.has(value);
 
 const switchTargetsLayoutSensitiveCode = (conditionRoot: EsTreeNode): boolean => {
   const parent = conditionRoot.parent ?? null;
@@ -189,6 +194,16 @@ const readFeedsLogic = (readNode: EsTreeNode): boolean => {
   return false;
 };
 
+// An explicit param type that is a TSTypeReference to something OTHER than
+// KeyboardEvent (a stored keystroke record, a replay-log entry) says the
+// receiver is plain data — the handler-name heuristic must not override it.
+const typeReferenceNamesOtherType = (typeAnnotation: EsTreeNode | null | undefined): boolean => {
+  if (!typeAnnotation || !isNodeOfType(typeAnnotation, "TSTypeAnnotation")) return false;
+  const typeNode = typeAnnotation.typeAnnotation as EsTreeNode;
+  if (!isNodeOfType(typeNode, "TSTypeReference")) return false;
+  return !typeReferenceIsKeyboardEvent(typeAnnotation);
+};
+
 const typeReferenceIsKeyboardEvent = (typeAnnotation: EsTreeNode | null | undefined): boolean => {
   if (!typeAnnotation || !isNodeOfType(typeAnnotation, "TSTypeAnnotation")) return false;
   const typeNode = typeAnnotation.typeAnnotation as EsTreeNode;
@@ -285,6 +300,128 @@ const receiverReadsAnyProperty = (
   return found;
 };
 
+// `const { key } = event` reads the standard member through destructuring —
+// the same progressive-enhancement signal receiverReadsAnyProperty sees for
+// `event.key`, one syntax over.
+const receiverDestructuresAnyProperty = (
+  scopeNode: EsTreeNode,
+  receiverName: string,
+  propertyNames: Set<string>,
+): boolean => {
+  let found = false;
+  walkAst(scopeNode, (child) => {
+    if (found) return false;
+    if (
+      isNodeOfType(child, "VariableDeclarator") &&
+      child.init &&
+      isNodeOfType(stripGroupingParens(child.init as EsTreeNode), "Identifier") &&
+      (stripGroupingParens(child.init as EsTreeNode) as EsTreeNodeOfType<"Identifier">).name ===
+        receiverName &&
+      isNodeOfType(child.id, "ObjectPattern")
+    ) {
+      const boundNames = new Set<string>();
+      collectPatternNames(child.id as EsTreeNode, boundNames);
+      for (const propertyName of propertyNames) {
+        if (boundNames.has(propertyName)) {
+          found = true;
+          return false;
+        }
+      }
+    }
+  });
+  return found;
+};
+
+// `'key' in event` is explicit feature detection — the most direct spelling
+// of the guard the rule already exempts as `event.key !== undefined`.
+const receiverFeatureDetectedWithIn = (
+  scopeNode: EsTreeNode,
+  receiverName: string,
+  propertyNames: Set<string>,
+): boolean => {
+  let found = false;
+  walkAst(scopeNode, (child) => {
+    if (found) return false;
+    if (
+      isNodeOfType(child, "BinaryExpression") &&
+      child.operator === "in" &&
+      isNodeOfType(child.left, "Literal") &&
+      typeof child.left.value === "string" &&
+      propertyNames.has(child.left.value) &&
+      isNodeOfType(child.right, "Identifier") &&
+      child.right.name === receiverName
+    ) {
+      found = true;
+      return false;
+    }
+  });
+  return found;
+};
+
+const MAX_RELATIONAL_RANGE_SPAN = 100;
+
+// `e.keyCode >= 37 && e.keyCode <= 40` — when BOTH endpoints of the range
+// resolve and every code inside is layout-invariant (arrows, modifiers,
+// space..arrows navigation block), the range is exactly as layout-safe as
+// the equality comparisons the rule already exempts.
+const relationalRangeIsLayoutInvariant = (
+  memberNode: EsTreeNode,
+  receiverName: string,
+  propertyName: string,
+): boolean => {
+  const comparisonNode = getMeaningfulParent(memberNode);
+  if (!comparisonNode || !isNodeOfType(comparisonNode, "BinaryExpression")) return false;
+  let logicalRoot: EsTreeNode = comparisonNode;
+  while (logicalRoot.parent && isNodeOfType(logicalRoot.parent, "LogicalExpression")) {
+    logicalRoot = logicalRoot.parent;
+  }
+  let lowerBound: number | null = null;
+  let upperBound: number | null = null;
+  walkAst(logicalRoot, (child) => {
+    if (!isNodeOfType(child, "BinaryExpression") || !RELATIONAL_OPERATORS.has(child.operator)) {
+      return;
+    }
+    const matchesRead = (side: EsTreeNode): boolean => {
+      const stripped = stripGroupingParens(side);
+      return (
+        isNodeOfType(stripped, "MemberExpression") &&
+        !stripped.computed &&
+        isNodeOfType(stripped.object, "Identifier") &&
+        stripped.object.name === receiverName &&
+        isNodeOfType(stripped.property, "Identifier") &&
+        stripped.property.name === propertyName
+      );
+    };
+    const left = child.left as EsTreeNode;
+    const right = child.right as EsTreeNode;
+    let operator = child.operator;
+    let valueSide: EsTreeNode | null = null;
+    if (matchesRead(left)) {
+      valueSide = right;
+    } else if (matchesRead(right)) {
+      valueSide = left;
+      operator = operator === "<" ? ">" : operator === ">" ? "<" : operator === "<=" ? ">=" : "<=";
+    }
+    if (!valueSide) return;
+    const value = resolveNumericValue(stripGroupingParens(valueSide));
+    if (value === null) return;
+    if (operator === ">=") lowerBound = lowerBound === null ? value : Math.max(lowerBound, value);
+    if (operator === ">") {
+      lowerBound = lowerBound === null ? value + 1 : Math.max(lowerBound, value + 1);
+    }
+    if (operator === "<=") upperBound = upperBound === null ? value : Math.min(upperBound, value);
+    if (operator === "<") {
+      upperBound = upperBound === null ? value - 1 : Math.min(upperBound, value - 1);
+    }
+  });
+  if (lowerBound === null || upperBound === null) return false;
+  if (upperBound < lowerBound || upperBound - lowerBound > MAX_RELATIONAL_RANGE_SPAN) return false;
+  for (let code = lowerBound; code <= upperBound; code++) {
+    if (isLayoutSensitiveCode(code)) return false;
+  }
+  return true;
+};
+
 // Flags branching on a KeyboardEvent's deprecated numeric `keyCode` /
 // `which` / `charCode` where the targeted code is genuinely layout- or
 // IME-sensitive: any `charCode` read, relational character-range checks,
@@ -327,6 +464,12 @@ export const noDeprecatedKeyboardEventKeycodeWhich = defineRule({
       const signalTypedKeyboardEvent = typeReferenceIsKeyboardEvent(
         (firstParamIdentifier.typeAnnotation as EsTreeNode) ?? null,
       );
+      if (
+        !signalTypedKeyboardEvent &&
+        typeReferenceNamesOtherType((firstParamIdentifier.typeAnnotation as EsTreeNode) ?? null)
+      ) {
+        return;
+      }
       const signalHandlerContext = functionIsKeyboardHandler(enclosingFunction);
       if (!signalTypedKeyboardEvent && !signalHandlerContext) return;
 
@@ -339,7 +482,7 @@ export const noDeprecatedKeyboardEventKeycodeWhich = defineRule({
 
       const comparison = getComparison(node as EsTreeNode);
       const comparedValue = comparison ? comparison.comparedValue : null;
-      if (comparedValue === IME_COMPOSITION_KEYCODE) return;
+      if (comparedValue !== null && LEGACY_IME_KEYCODES.has(comparedValue)) return;
       if (
         propertyName === "which" &&
         comparedValue !== null &&
@@ -359,14 +502,18 @@ export const noDeprecatedKeyboardEventKeycodeWhich = defineRule({
           receiverName,
           STANDARD_KEY_MEMBERS,
           readFeedsLogic,
-        )
+        ) ||
+        receiverDestructuresAnyProperty(enclosingFunction, receiverName, STANDARD_KEY_MEMBERS) ||
+        receiverFeatureDetectedWithIn(enclosingFunction, receiverName, STANDARD_KEY_MEMBERS)
       ) {
         return;
       }
 
       if (propertyName !== "charCode") {
         const isRelationalRangeCheck = Boolean(
-          comparison && RELATIONAL_OPERATORS.has(comparison.operator),
+          comparison &&
+          RELATIONAL_OPERATORS.has(comparison.operator) &&
+          !relationalRangeIsLayoutInvariant(node as EsTreeNode, receiverName, propertyName),
         );
         const comparesLayoutSensitiveCode =
           comparedValue !== null && isLayoutSensitiveCode(comparedValue);
