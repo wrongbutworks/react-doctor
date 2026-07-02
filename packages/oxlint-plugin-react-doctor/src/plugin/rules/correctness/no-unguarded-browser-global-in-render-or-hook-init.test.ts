@@ -371,4 +371,40 @@ describe("no-unguarded-browser-global-in-render-or-hook-init", () => {
     );
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("does not flag after an import.meta.env.SSR early return", () => {
+    const result = runRule(
+      noUnguardedBrowserGlobalInRenderOrHookInit,
+      `export const Widget = () => {
+        if (import.meta.env.SSR) return null;
+        const width = window.innerWidth;
+        return <div style={{ width }} />;
+      };`,
+      { filename: "widget.tsx" },
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a typeof globalThis.window guard", () => {
+    const result = runRule(
+      noUnguardedBrowserGlobalInRenderOrHookInit,
+      `export const Widget = () => {
+        if (typeof globalThis.window === "undefined") return null;
+        return <div style={{ width: window.innerWidth }} />;
+      };`,
+      { filename: "widget.tsx" },
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a useSyncExternalStore client snapshot", () => {
+    const result = runRule(
+      noUnguardedBrowserGlobalInRenderOrHookInit,
+      `export const useWidth = () =>
+        useSyncExternalStore(subscribeToResize, () => window.innerWidth, () => 0);`,
+      { filename: "use-width.ts" },
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
 });

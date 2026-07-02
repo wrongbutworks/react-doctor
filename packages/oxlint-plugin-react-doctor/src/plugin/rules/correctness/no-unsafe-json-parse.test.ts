@@ -143,4 +143,22 @@ describe("no-unsafe-json-parse", () => {
     });
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("does not flag a statically valid string-literal argument", () => {
+    const result = runRule(
+      noUnsafeJsonParse,
+      `const { version } = JSON.parse('{"version":"1.0.0","features":[]}');`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag the stringify-clone idiom through a binding", () => {
+    const result = runRule(
+      noUnsafeJsonParse,
+      `const snapshot = JSON.stringify(state);
+      const { items } = JSON.parse(snapshot);`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
 });

@@ -11,6 +11,11 @@ const NORMALIZED_DOM_GUARD_NAMES = new Set([
   "isbrowserenv",
   "isclient",
   "haswindow",
+  // `import.meta.env.SSR` (Vite/TanStack Start) and `isServer` flags —
+  // the server-side spelling of the same environment check.
+  "ssr",
+  "isssr",
+  "isserver",
 ]);
 
 export const isDomGuardIdentifierName = (name: string): boolean =>

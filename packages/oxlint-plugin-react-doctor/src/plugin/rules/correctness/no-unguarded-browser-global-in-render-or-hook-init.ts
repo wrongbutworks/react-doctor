@@ -112,6 +112,10 @@ const isOnRenderTimePath = (node: EsTreeNode): boolean => {
   return false;
 };
 
+// Roots through which a typeof check still reaches the global:
+// `typeof globalThis.window`, `typeof window.matchMedia`, `typeof self.document`.
+const GLOBAL_ROOT_NAMES = new Set(["globalThis", "window", "self"]);
+
 const containsTypeofBrowserGlobalCheck = (node: EsTreeNode): boolean => {
   let found = false;
   walkAst(node, (child) => {
@@ -119,6 +123,17 @@ const containsTypeofBrowserGlobalCheck = (node: EsTreeNode): boolean => {
     if (isNodeOfType(child, "UnaryExpression") && child.operator === "typeof") {
       const argument = stripParenExpression(child.argument);
       if (isNodeOfType(argument, "Identifier") && BROWSER_GLOBAL_NAMES.has(argument.name)) {
+        found = true;
+        return false;
+      }
+      if (
+        isNodeOfType(argument, "MemberExpression") &&
+        !argument.computed &&
+        isNodeOfType(argument.object, "Identifier") &&
+        GLOBAL_ROOT_NAMES.has(argument.object.name) &&
+        isNodeOfType(argument.property, "Identifier") &&
+        BROWSER_GLOBAL_NAMES.has(argument.property.name)
+      ) {
         found = true;
         return false;
       }

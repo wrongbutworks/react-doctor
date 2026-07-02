@@ -34,6 +34,27 @@ const hasFallbackArgument = (argument: EsTreeNode): boolean =>
   isNodeOfType(argument, "LogicalExpression") &&
   (argument.operator === "??" || argument.operator === "||");
 
+// A string/template literal that parses at lint time cannot throw at
+// runtime (`JSON.parse('{"version":"1.0.0"}')` inline fixtures).
+const isStaticallyValidJsonLiteral = (argument: EsTreeNode): boolean => {
+  let literalText: string | null = null;
+  if (isNodeOfType(argument, "Literal") && typeof argument.value === "string") {
+    literalText = argument.value;
+  } else if (
+    isNodeOfType(argument, "TemplateLiteral") &&
+    (argument.expressions?.length ?? 0) === 0
+  ) {
+    literalText = argument.quasis[0]?.value.cooked ?? null;
+  }
+  if (literalText === null) return false;
+  try {
+    JSON.parse(literalText);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
 const skipParenthesizedParents = (node: EsTreeNode): EsTreeNode => {
   let current = node;
   while (current.parent && current.parent.type === PARENTHESIZED_EXPRESSION_TYPE) {
@@ -110,9 +131,23 @@ export const noUnsafeJsonParse = defineRule({
       if (firstArgument) {
         const unwrappedArgument = stripParenExpression(firstArgument);
         // `JSON.parse(JSON.stringify(x))` is the deep-clone idiom; stringify
-        // output is always valid JSON.
+        // output is always valid JSON — directly or through a one-hop
+        // binding (`const snapshot = JSON.stringify(state)`).
         if (isJsonMethodCall(unwrappedArgument, "stringify")) return;
+        if (isNodeOfType(unwrappedArgument, "Identifier")) {
+          const argumentBinding = findVariableInitializer(
+            unwrappedArgument,
+            unwrappedArgument.name,
+          );
+          if (
+            argumentBinding?.initializer &&
+            isJsonMethodCall(stripParenExpression(argumentBinding.initializer), "stringify")
+          ) {
+            return;
+          }
+        }
         if (hasFallbackArgument(unwrappedArgument)) return;
+        if (isStaticallyValidJsonLiteral(unwrappedArgument)) return;
       }
       if (!isResultImmediatelyRead(node as EsTreeNode)) return;
       if (
