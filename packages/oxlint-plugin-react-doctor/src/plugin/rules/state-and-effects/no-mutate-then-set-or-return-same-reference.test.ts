@@ -271,4 +271,163 @@ describe("no-mutate-then-set-or-return-same-reference", () => {
     );
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("stays quiet: dayjs clamp updater: .add returns a new instance, `return prev` is the documented bailout", () => {
+    const result = runRule(
+      noMutateThenSetOrReturnSameReference,
+      `const Calendar = () => {
+  const [date, setDate] = useState(dayjs());
+  const goToNextDay = () => {
+    setDate((prev) => {
+      const next = prev.add(1, "day");
+      if (next.isAfter(maxDate)) return prev;
+      return next;
+    });
+  };
+};`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Luxon DateTime.set updater with a min-time clamp", () => {
+    const result = runRule(
+      noMutateThenSetOrReturnSameReference,
+      `const TimeField = () => {
+  const [selected, setSelected] = useState(DateTime.now());
+  const commitTime = (hour, minute) => {
+    setSelected((prev) => {
+      const next = prev.set({ hour, minute });
+      if (next < minTime) return prev;
+      return next;
+    });
+  };
+};`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Immutable.js Map .delete after a .has bailout", () => {
+    const result = runRule(
+      noMutateThenSetOrReturnSameReference,
+      `const Filters = () => {
+  const [filters, setFilters] = useState(ImmutableMap());
+  const removeFilter = (key) => {
+    setFilters((prev) => {
+      if (!prev.has(key)) return prev;
+      return prev.delete(key);
+    });
+  };
+};`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Immutable.js List .push with a size-cap bailout", () => {
+    const result = runRule(
+      noMutateThenSetOrReturnSameReference,
+      `const HistoryPanel = () => {
+  const [history, setHistory] = useState(ImmutableList());
+  const record = (entry) => {
+    setHistory((prev) => {
+      if (prev.size >= MAX_HISTORY_ENTRIES) return prev;
+      return prev.push(entry);
+    });
+  };
+};`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Temporal.PlainDate .add clamp — immutable by ECMAScript spec", () => {
+    const result = runRule(
+      noMutateThenSetOrReturnSameReference,
+      `const DueDatePicker = () => {
+  const [dueDate, setDueDate] = useState(() => Temporal.Now.plainDateISO());
+  const postponeOneDay = () => {
+    setDueDate((prev) => {
+      const next = prev.add({ days: 1 });
+      if (Temporal.PlainDate.compare(next, maxDue) > 0) return prev;
+      return next;
+    });
+  };
+};`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Cross-pair range clamp: setEnd(start) while start.add() (dayjs, immutable) is in the same handler", () => {
+    const result = runRule(
+      noMutateThenSetOrReturnSameReference,
+      `const DateRangePicker = () => {
+  const [start, setStart] = useState(dayjs());
+  const [end, setEnd] = useState(dayjs().add(1, "day"));
+  const onEndChange = (candidate) => {
+    const minEnd = start.add(1, "hour");
+    if (candidate.isBefore(minEnd)) {
+      setEnd(start);
+      return;
+    }
+    setEnd(candidate);
+  };
+};`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Updater reassigns the param to a fresh copy before mutating", () => {
+    const result = runRule(
+      noMutateThenSetOrReturnSameReference,
+      `const UploadQueue = () => {
+  const [queue, setQueue] = useState([]);
+  const enqueue = (job) => {
+    setQueue((prev) => {
+      prev = prev.slice();
+      prev.push(job);
+      return prev;
+    });
+  };
+};`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags a discard-position push then return prev", () => {
+    const result = runRule(
+      noMutateThenSetOrReturnSameReference,
+      `const Queue = () => {
+         const [jobs, setJobs] = useState([]);
+         const enqueue = (job) => {
+           setJobs((prev) => {
+             prev.push(job);
+             return prev;
+           });
+         };
+       };`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags a bound mutator result on a proven Set state", () => {
+    const result = runRule(
+      noMutateThenSetOrReturnSameReference,
+      `const Tags = () => {
+         const [tags, setTags] = useState(new Set());
+         const addTag = (tag) => {
+           setTags((prev) => {
+             const next = prev.add(tag);
+             if (next.size > MAX_TAGS) return prev;
+             return next;
+           });
+         };
+       };`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
 });

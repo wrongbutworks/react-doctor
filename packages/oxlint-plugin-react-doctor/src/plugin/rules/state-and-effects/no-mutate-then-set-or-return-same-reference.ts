@@ -183,7 +183,11 @@ const isSelfReturningMutatorCallOn = (
 // mutating method call rooted at it (`rows.sort()`, `form.tags.push()`),
 // or an index/property write to it. Nested functions are pruned so a
 // mutation inside a handler isn't attributed to the render path.
-const containsInPlaceMutationOf = (root: EsTreeNode, name: string): boolean => {
+const containsInPlaceMutationOf = (
+  root: EsTreeNode,
+  name: string,
+  stateKind: StateCollectionKind | null,
+): boolean => {
   let mutated = false;
   walkAst(root, (child) => {
     if (mutated || (child !== root && isFunctionLike(child))) return false;
@@ -191,7 +195,17 @@ const containsInPlaceMutationOf = (root: EsTreeNode, name: string): boolean => {
     let receiver: EsTreeNode | null = null;
     if (isNodeOfType(child, "CallExpression") && isNodeOfType(child.callee, "MemberExpression")) {
       const method = getStaticMemberPropertyName(child.callee);
-      if (method && IN_PLACE_MUTATOR_METHODS.has(method)) receiver = child.callee.object;
+      if (method && IN_PLACE_MUTATOR_METHODS.has(method)) {
+        // A mutator-NAMED call whose result is consumed (bound, returned,
+        // passed on) is how immutable APIs chain — dayjs .add, Luxon .set,
+        // Immutable.js .push/.delete all RETURN a new value. Without a
+        // proven native collection kind, only discard-position calls
+        // (`prev.push(x);`) prove in-place mutation.
+        const resultIsDiscarded =
+          isNodeOfType(child.parent, "ExpressionStatement") ||
+          isNodeOfType(child.parent, "SequenceExpression");
+        if (resultIsDiscarded || stateKind !== null) receiver = child.callee.object;
+      }
     } else if (
       isNodeOfType(child, "AssignmentExpression") ||
       isNodeOfType(child, "UpdateExpression")
@@ -243,8 +257,24 @@ const isMutateThenReturnSameUpdater = (
   if (!isNodeOfType(body, "BlockStatement")) {
     return isSelfReturningMutatorCallOn(body, prevName, stateKind);
   }
+  // `prev = prev.slice(); prev.push(job); return prev;` — reassigning the
+  // param first means the returned reference is a fresh copy, not the
+  // incoming state.
+  let paramIsReassigned = false;
+  walkAst(body, (child) => {
+    if (paramIsReassigned || (child !== body && isFunctionLike(child))) return false;
+    if (
+      isNodeOfType(child, "AssignmentExpression") &&
+      isNodeOfType(child.left, "Identifier") &&
+      child.left.name === prevName
+    ) {
+      paramIsReassigned = true;
+      return false;
+    }
+  });
+  if (paramIsReassigned) return false;
   return (
-    containsInPlaceMutationOf(body, prevName) &&
+    containsInPlaceMutationOf(body, prevName, stateKind) &&
     blockReturnsSameReference(body, prevName, stateKind)
   );
 };
@@ -307,7 +337,11 @@ export const noMutateThenSetOrReturnSameReference = defineRule({
           }
           cursor = cursor.parent ?? null;
         }
-        if (scope && containsInPlaceMutationOf(scope, argument.name)) {
+        const argumentStateDeclarator = findNearestStateHookDeclarator(argument, argument.name, 0);
+        const argumentStateKind = argumentStateDeclarator
+          ? stateInitializerCollectionKind(argumentStateDeclarator)
+          : null;
+        if (scope && containsInPlaceMutationOf(scope, argument.name, argumentStateKind)) {
           context.report({ node, message: MESSAGE });
         }
         return;
