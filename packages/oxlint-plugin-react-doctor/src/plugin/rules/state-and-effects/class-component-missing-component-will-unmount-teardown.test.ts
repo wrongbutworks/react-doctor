@@ -302,4 +302,161 @@ describe("class-component-missing-component-will-unmount-teardown", () => {
     );
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("stays quiet: setTimeout deferring a focus nudge through a named instance method", () => {
+    const result = runRule(
+      classComponentMissingComponentWillUnmountTeardown,
+      `class SearchModal extends React.Component {
+  inputRef = React.createRef();
+  focusInput = () => {
+    this.inputRef.current?.focus();
+  };
+  componentDidMount() {
+    setTimeout(() => this.focusInput(), 0);
+  }
+  render() {
+    return <input ref={this.inputRef} />;
+  }
+}`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: setTimeout deferring scroll-to-bottom through an instance method (chat UI)", () => {
+    const result = runRule(
+      classComponentMissingComponentWillUnmountTeardown,
+      `class MessageList extends React.Component {
+  bottomRef = React.createRef();
+  scrollToBottom = () => {
+    this.bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  };
+  componentDidMount() {
+    setTimeout(() => this.scrollToBottom(), 0);
+  }
+  render() {
+    return <div ref={this.bottomRef} />;
+  }
+}`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: d3 fluent chain binding DOM events inside the component's own svg", () => {
+    const result = runRule(
+      classComponentMissingComponentWillUnmountTeardown,
+      `class BarChart extends React.Component {
+  svgRef = React.createRef();
+  componentDidMount() {
+    d3.select(this.svgRef.current)
+      .selectAll("rect")
+      .data(this.props.data)
+      .enter()
+      .append("rect")
+      .on("mouseover", (event, datum) => this.props.onBarHover(datum));
+  }
+  render() {
+    return <svg ref={this.svgRef} />;
+  }
+}`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Destructured mount-local emitter that never escapes", () => {
+    const result = runRule(
+      classComponentMissingComponentWillUnmountTeardown,
+      `class AddressField extends React.Component {
+  componentDidMount() {
+    const { autocomplete } = initPlaces({ container: this.input });
+    autocomplete.on("change", (event) => this.props.onChange(event.suggestion));
+  }
+  render() {
+    return null;
+  }
+}`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Listener added and synchronously removed in the same mount body (passive-support detection)", () => {
+    const result = runRule(
+      classComponentMissingComponentWillUnmountTeardown,
+      `class ScrollArea extends React.Component {
+  noop = () => {};
+  componentDidMount() {
+    let supportsPassive = false;
+    try {
+      const options = Object.defineProperty({}, "passive", {
+        get() {
+          supportsPassive = true;
+          return true;
+        },
+      });
+      window.addEventListener("test-passive", this.noop, options);
+      window.removeEventListener("test-passive", this.noop, options);
+    } catch (error) {}
+    this.supportsPassive = supportsPassive;
+  }
+  render() {
+    return null;
+  }
+}`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Self-removing { once: true } listener whose options object lives in a variable", () => {
+    const result = runRule(
+      classComponentMissingComponentWillUnmountTeardown,
+      `class SplashScreen extends React.Component {
+  reveal = () => this.setState({ visible: true });
+  componentDidMount() {
+    const listenerOptions = { once: true };
+    window.addEventListener("animationend", this.reveal, listenerOptions);
+  }
+  render() {
+    return null;
+  }
+}`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags a setTimeout whose instance method sets state", () => {
+    const result = runRule(
+      classComponentMissingComponentWillUnmountTeardown,
+      `class Banner extends React.Component {
+         show = () => this.setState({ visible: true });
+         componentDidMount() {
+           setTimeout(() => this.show(), 3000);
+         }
+         render() {
+           return null;
+         }
+       }`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags a window listener added with no removal anywhere", () => {
+    const result = runRule(
+      classComponentMissingComponentWillUnmountTeardown,
+      `class Tracker extends React.Component {
+         onScroll = () => this.setState({ y: window.scrollY });
+         componentDidMount() {
+           window.addEventListener("scroll", this.onScroll);
+         }
+         render() {
+           return null;
+         }
+       }`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
 });

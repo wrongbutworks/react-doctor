@@ -230,6 +230,169 @@ const ownedNodeListLoopBinding = (
   return declarator.id;
 };
 
+const CLEANUP_EFFECT_HOOKS = new Set(["useEffect", "useLayoutEffect", "useInsertionEffect"]);
+
+const enclosingFunctionOf = (node: EsTreeNode): EsTreeNode | null => {
+  let cursor: EsTreeNode | null | undefined = node.parent;
+  while (cursor) {
+    if (
+      isNodeOfType(cursor, "FunctionDeclaration") ||
+      isNodeOfType(cursor, "FunctionExpression") ||
+      isNodeOfType(cursor, "ArrowFunctionExpression")
+    ) {
+      return cursor;
+    }
+    cursor = cursor.parent ?? null;
+  }
+  return null;
+};
+
+// A mutation inside an effect CLEANUP restores/clears state on teardown —
+// that is the rule's remediation, not the hazard.
+const isInsideEffectCleanup = (node: EsTreeNode): boolean => {
+  let cursor: EsTreeNode | null = enclosingFunctionOf(node);
+  while (cursor) {
+    const maybeReturn = cursor.parent;
+    if (maybeReturn && isNodeOfType(maybeReturn, "ReturnStatement")) {
+      const effectCallback = enclosingFunctionOf(maybeReturn);
+      const effectCall = effectCallback?.parent;
+      if (
+        effectCallback &&
+        effectCall &&
+        isNodeOfType(effectCall, "CallExpression") &&
+        isNodeOfType(effectCall.callee, "Identifier") &&
+        CLEANUP_EFFECT_HOOKS.has(effectCall.callee.name) &&
+        effectCall.arguments?.[0] === effectCallback
+      ) {
+        return true;
+      }
+    }
+    cursor = enclosingFunctionOf(cursor);
+  }
+  return false;
+};
+
+const OPPOSITE_CLASS_METHOD: Record<string, string> = { add: "remove", remove: "add" };
+
+const receiverIdentifierName = (receiver: EsTreeNode): string | null => {
+  const stripped = stripParenExpression(receiver);
+  return isNodeOfType(stripped, "Identifier") ? stripped.name : null;
+};
+
+// `sheet.classList.add('print-expanded'); window.print();
+// sheet.classList.remove('print-expanded')` — a balanced add/remove of the
+// SAME class in the same function (or an effect + its cleanup) is a
+// temporary toggle React never observes mid-render.
+const hasBalancedClassToggle = (mutationCall: EsTreeNodeOfType<"CallExpression">): boolean => {
+  const callee = mutationCall.callee;
+  if (!isNodeOfType(callee, "MemberExpression") || !isNodeOfType(callee.property, "Identifier")) {
+    return false;
+  }
+  const methodName = callee.property.name;
+  const oppositeMethod = OPPOSITE_CLASS_METHOD[methodName];
+  if (!oppositeMethod) return false;
+  const receiver = classListMutationReceiver(callee);
+  const receiverName = receiver ? receiverIdentifierName(receiver) : null;
+  if (!receiverName) return false;
+  const classArgument = mutationCall.arguments?.[0];
+  if (
+    !classArgument ||
+    !isNodeOfType(classArgument, "Literal") ||
+    typeof classArgument.value !== "string"
+  ) {
+    return false;
+  }
+  const className = classArgument.value;
+  const scope = enclosingFunctionOf(mutationCall);
+  if (!scope) return false;
+  let balanced = false;
+  walkAst(scope, (child: EsTreeNode) => {
+    if (balanced) return false;
+    if (child === mutationCall || !isNodeOfType(child, "CallExpression")) return;
+    const childCallee = child.callee;
+    if (
+      !isNodeOfType(childCallee, "MemberExpression") ||
+      !isNodeOfType(childCallee.property, "Identifier") ||
+      childCallee.property.name !== oppositeMethod
+    ) {
+      return;
+    }
+    const childReceiver = classListMutationReceiver(childCallee);
+    if (!childReceiver || receiverIdentifierName(childReceiver) !== receiverName) return;
+    const childArgument = child.arguments?.[0];
+    if (
+      childArgument &&
+      isNodeOfType(childArgument, "Literal") &&
+      childArgument.value === className
+    ) {
+      balanced = true;
+      return false;
+    }
+  });
+  return balanced;
+};
+
+// `const prev = node.style.boxShadow; node.style.boxShadow = 'none';
+// ... node.style.boxShadow = prev` — the property is saved before and
+// restored after (try/finally export snapshots, auto-fit measurement).
+const hasStyleSaveRestore = (assignment: EsTreeNodeOfType<"AssignmentExpression">): boolean => {
+  const target = assignment.left;
+  if (
+    !isNodeOfType(target, "MemberExpression") ||
+    target.computed ||
+    !isNodeOfType(target.property, "Identifier")
+  ) {
+    return false;
+  }
+  const propertyName = target.property.name;
+  const receiver = styleAssignmentReceiver(target);
+  const receiverName = receiver ? receiverIdentifierName(receiver) : null;
+  if (!receiverName) return false;
+  const scope = enclosingFunctionOf(assignment);
+  if (!scope) return false;
+  const matchesStyleRead = (candidate: EsTreeNode): boolean => {
+    if (!isNodeOfType(candidate, "MemberExpression") || candidate.computed) return false;
+    if (!isNodeOfType(candidate.property, "Identifier")) return false;
+    if (candidate.property.name !== propertyName) return false;
+    const readReceiver = styleAssignmentReceiver(candidate);
+    return (
+      Boolean(readReceiver) && receiverIdentifierName(readReceiver as EsTreeNode) === receiverName
+    );
+  };
+  const savedNames = new Set<string>();
+  walkAst(scope, (child: EsTreeNode) => {
+    if (
+      isNodeOfType(child, "VariableDeclarator") &&
+      isNodeOfType(child.id, "Identifier") &&
+      child.init &&
+      matchesStyleRead(stripParenExpression(child.init as EsTreeNode))
+    ) {
+      savedNames.add(child.id.name);
+    }
+  });
+  if (savedNames.size === 0) return false;
+  // The restore assignment itself (`node.style.x = previousX`) is exempt
+  // directly — its right-hand side IS the saved value.
+  const ownValue = stripParenExpression(assignment.right as EsTreeNode);
+  if (isNodeOfType(ownValue, "Identifier") && savedNames.has(ownValue.name)) return true;
+  let restored = false;
+  walkAst(scope, (child: EsTreeNode) => {
+    if (restored) return false;
+    if (
+      isNodeOfType(child, "AssignmentExpression") &&
+      child !== assignment &&
+      matchesStyleRead(child.left as EsTreeNode)
+    ) {
+      const value = stripParenExpression(child.right as EsTreeNode);
+      if (isNodeOfType(value, "Identifier") && savedNames.has(value.name)) {
+        restored = true;
+        return false;
+      }
+    }
+  });
+  return restored;
+};
+
 export const noMutateQueriedDomNodeInComponent = defineRule({
   id: "no-mutate-queried-dom-node-in-component",
   title: "Mutating a queried DOM node this component renders",
@@ -317,6 +480,7 @@ export const noMutateQueriedDomNodeInComponent = defineRule({
         if (isNodeOfType(node, "AssignmentExpression")) {
           const receiver = styleAssignmentReceiver(node.left);
           if (receiver && receiverIsOwnedQuery(receiver, ownedQueryVariables, owned)) {
+            if (isInsideEffectCleanup(node) || hasStyleSaveRestore(node)) return;
             reportMutation(node, "style");
           }
           return;
@@ -327,11 +491,13 @@ export const noMutateQueriedDomNodeInComponent = defineRule({
             classListReceiver &&
             receiverIsOwnedQuery(classListReceiver, ownedQueryVariables, owned)
           ) {
+            if (isInsideEffectCleanup(node) || hasBalancedClassToggle(node)) return;
             reportMutation(node, "classList");
             return;
           }
           const styleReceiver = stylePropertyCallReceiver(node.callee);
           if (styleReceiver && receiverIsOwnedQuery(styleReceiver, ownedQueryVariables, owned)) {
+            if (isInsideEffectCleanup(node)) return;
             reportMutation(node, "style");
           }
         }

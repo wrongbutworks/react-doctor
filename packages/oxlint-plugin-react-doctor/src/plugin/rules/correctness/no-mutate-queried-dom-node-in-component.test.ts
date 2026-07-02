@@ -275,4 +275,146 @@ describe("no-mutate-queried-dom-node-in-component", () => {
     );
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("stays quiet: Print-mode class toggled around synchronous window.print()", () => {
+    const result = runRule(
+      noMutateQueriedDomNodeInComponent,
+      `function InvoicePage({ invoice }) {
+  const handlePrint = () => {
+    const sheet = document.getElementById('invoice-sheet');
+    if (!sheet) return;
+    sheet.classList.add('print-expanded');
+    window.print();
+    sheet.classList.remove('print-expanded');
+  };
+  return (
+    <div>
+      <button onClick={handlePrint}>Print</button>
+      <div id="invoice-sheet">{invoice.total}</div>
+    </div>
+  );
+}`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Style saved and restored in try/finally around an html2canvas export", () => {
+    const result = runRule(
+      noMutateQueriedDomNodeInComponent,
+      `function ChartCard({ data }) {
+  const exportPng = async () => {
+    const node = document.getElementById('revenue-chart');
+    if (!node) return;
+    const previousShadow = node.style.boxShadow;
+    node.style.boxShadow = 'none';
+    try {
+      const canvas = await html2canvas(node);
+      triggerDownload(canvas.toDataURL('image/png'));
+    } finally {
+      node.style.boxShadow = previousShadow;
+    }
+  };
+  return (
+    <section>
+      <div id="revenue-chart">{data.length}</div>
+      <button onClick={exportPng}>Export</button>
+    </section>
+  );
+}`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Synchronous measure with temporary style override then restore", () => {
+    const result = runRule(
+      noMutateQueriedDomNodeInComponent,
+      `function ColumnHeader({ onAutoFit }) {
+  const autoFitColumn = () => {
+    const cell = document.getElementById('col-title');
+    if (!cell) return;
+    const previousWidth = cell.style.width;
+    cell.style.width = 'auto';
+    const naturalWidth = cell.getBoundingClientRect().width;
+    cell.style.width = previousWidth;
+    onAutoFit(naturalWidth);
+  };
+  return <th id="col-title" onDoubleClick={autoFitColumn}>Title</th>;
+}`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Portal host rendered by a sibling component, class toggled with balanced effect cleanup", () => {
+    const result = runRule(
+      noMutateQueriedDomNodeInComponent,
+      `export const ModalHost = () => <div id="modal-host" />;
+
+export const Modal = ({ open, children }) => {
+  useEffect(() => {
+    if (!open) return;
+    const host = document.getElementById('modal-host');
+    if (!host) return;
+    host.classList.add('has-dialog');
+    return () => host.classList.remove('has-dialog');
+  }, [open]);
+  if (!open) return null;
+  return createPortal(children, document.getElementById('modal-host'));
+};`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Effect cleanup clearing inline styles a third-party player left behind", () => {
+    const result = runRule(
+      noMutateQueriedDomNodeInComponent,
+      `function VideoStage({ src }) {
+  useEffect(() => {
+    const player = window.jwplayer('video-stage');
+    player.setup({ file: src });
+    return () => {
+      player.remove();
+      const stage = document.getElementById('video-stage');
+      if (stage) stage.style.cssText = '';
+    };
+  }, [src]);
+  return <div id="video-stage" className="stage" />;
+}`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags an unbalanced class add on an owned node", () => {
+    const result = runRule(
+      noMutateQueriedDomNodeInComponent,
+      `function Banner() {
+         const highlight = () => {
+           const banner = document.getElementById('promo-banner');
+           if (!banner) return;
+           banner.classList.add('highlighted');
+         };
+         return <div id="promo-banner" onMouseEnter={highlight} />;
+       }`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags a style write that is never restored", () => {
+    const result = runRule(
+      noMutateQueriedDomNodeInComponent,
+      `function Chart() {
+         const emphasize = () => {
+           const node = document.getElementById('chart');
+           if (!node) return;
+           node.style.border = '2px solid red';
+         };
+         return <div id="chart" onClick={emphasize} />;
+       }`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
 });

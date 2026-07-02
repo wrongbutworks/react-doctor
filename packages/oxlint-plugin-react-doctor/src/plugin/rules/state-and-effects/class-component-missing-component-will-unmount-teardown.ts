@@ -1,3 +1,5 @@
+import { collectPatternNames } from "../../utils/collect-pattern-names.js";
+import { findVariableInitializer } from "../../utils/find-variable-initializer.js";
 import { defineRule } from "../../utils/define-rule.js";
 import { getCallMethodName } from "../../utils/get-call-method-name.js";
 import { isEs6Component } from "../../utils/is-es6-component.js";
@@ -57,7 +59,55 @@ const getTimerCalleeName = (node: EsTreeNode): string | null => {
 // component — `this.setState(...)`, `runInAction(...)`, or any direct
 // `this.<action>(...)` call. A one-shot field write (`this.x = true`) or a
 // ref/focus nudge (`this.inputRef.current?.focus()`) leaks nothing.
-const timeoutCallbackMutatesComponent = (callback: EsTreeNode): boolean => {
+const classMemberFunction = (
+  classBody: EsTreeNode | null,
+  memberName: string,
+): EsTreeNode | null => {
+  if (!classBody || !isNodeOfType(classBody, "ClassBody")) return null;
+  for (const member of classBody.body ?? []) {
+    const candidate = member as EsTreeNode;
+    if (
+      (isNodeOfType(candidate, "MethodDefinition") ||
+        isNodeOfType(candidate, "PropertyDefinition")) &&
+      !candidate.computed &&
+      isNodeOfType(candidate.key, "Identifier") &&
+      candidate.key.name === memberName &&
+      candidate.value &&
+      isFunctionLike(candidate.value as EsTreeNode)
+    ) {
+      return candidate.value as EsTreeNode;
+    }
+  }
+  return null;
+};
+
+const functionSetsComponentState = (functionNode: EsTreeNode): boolean => {
+  let mutates = false;
+  walkAst(functionNode, (node: EsTreeNode) => {
+    if (mutates) return false;
+    if (getBareCalleeName(node) === "runInAction") {
+      mutates = true;
+      return false;
+    }
+    if (
+      isNodeOfType(node, "CallExpression") &&
+      isNodeOfType(node.callee, "MemberExpression") &&
+      isNodeOfType(node.callee.object, "ThisExpression") &&
+      !node.callee.computed &&
+      isNodeOfType(node.callee.property, "Identifier") &&
+      node.callee.property.name === "setState"
+    ) {
+      mutates = true;
+      return false;
+    }
+  });
+  return mutates;
+};
+
+const timeoutCallbackMutatesComponent = (
+  callback: EsTreeNode,
+  classBody: EsTreeNode | null,
+): boolean => {
   if (!isFunctionLike(callback)) return false;
   const body = callback.body;
   if (!body) return false;
@@ -73,6 +123,15 @@ const timeoutCallbackMutatesComponent = (callback: EsTreeNode): boolean => {
       isNodeOfType(node.callee, "MemberExpression") &&
       isNodeOfType(node.callee.object, "ThisExpression")
     ) {
+      // `this.focusInput()` — resolve the instance method; a ref/DOM nudge
+      // that never calls setState/runInAction mutates nothing when it
+      // fires after unmount.
+      const memberName =
+        !node.callee.computed && isNodeOfType(node.callee.property, "Identifier")
+          ? node.callee.property.name
+          : null;
+      const memberFunction = memberName ? classMemberFunction(classBody, memberName) : null;
+      if (memberFunction && !functionSetsComponentState(memberFunction)) return;
       mutates = true;
     }
   });
@@ -82,8 +141,15 @@ const timeoutCallbackMutatesComponent = (callback: EsTreeNode): boolean => {
 // `addEventListener(..., { once: true })` self-removes after firing, so there
 // is usually nothing left to release on unmount.
 const isOneShotListenerOptions = (optionsArgument: EsTreeNode | undefined): boolean => {
-  if (!optionsArgument || !isNodeOfType(optionsArgument, "ObjectExpression")) return false;
-  return (optionsArgument.properties ?? []).some(
+  if (!optionsArgument) return false;
+  let optionsObject: EsTreeNode = optionsArgument;
+  // `const listenerOptions = { once: true }` — resolve the binding.
+  if (isNodeOfType(optionsObject, "Identifier")) {
+    const binding = findVariableInitializer(optionsObject, optionsObject.name);
+    if (binding?.initializer) optionsObject = binding.initializer;
+  }
+  if (!isNodeOfType(optionsObject, "ObjectExpression")) return false;
+  return (optionsObject.properties ?? []).some(
     (property: EsTreeNode) =>
       isNodeOfType(property, "Property") &&
       !property.computed &&
@@ -102,8 +168,8 @@ const collectMountLocalReceiverNames = (mountBody: EsTreeNode): Set<string> => {
   const declaredNames = new Set<string>();
   const escapedNames = new Set<string>();
   walkMountBody(mountBody, (node) => {
-    if (isNodeOfType(node, "VariableDeclarator") && isNodeOfType(node.id, "Identifier")) {
-      declaredNames.add(node.id.name);
+    if (isNodeOfType(node, "VariableDeclarator")) {
+      collectPatternNames(node.id as EsTreeNode, declaredNames);
     }
     if (
       isNodeOfType(node, "AssignmentExpression") &&
@@ -117,7 +183,32 @@ const collectMountLocalReceiverNames = (mountBody: EsTreeNode): Set<string> => {
   return declaredNames;
 };
 
-const isMountHazard = (node: EsTreeNode, localReceiverNames: Set<string>): boolean => {
+// `addEventListener` immediately paired with `removeEventListener` for the
+// same event in the same mount body (passive-support detection) leaves
+// nothing registered.
+const collectSynchronouslyRemovedEventNames = (mountBody: EsTreeNode): Set<string> => {
+  const removedEventNames = new Set<string>();
+  walkMountBody(mountBody, (node) => {
+    if (!isNodeOfType(node, "CallExpression")) return;
+    if (getCallMethodName(node.callee) !== "removeEventListener") return;
+    const eventArgument = node.arguments?.[0];
+    if (
+      eventArgument &&
+      isNodeOfType(eventArgument, "Literal") &&
+      typeof eventArgument.value === "string"
+    ) {
+      removedEventNames.add(eventArgument.value);
+    }
+  });
+  return removedEventNames;
+};
+
+const isMountHazard = (
+  node: EsTreeNode,
+  localReceiverNames: Set<string>,
+  removedEventNames: Set<string>,
+  classBody: EsTreeNode | null,
+): boolean => {
   if (!isNodeOfType(node, "CallExpression")) return false;
   const methodName = getCallMethodName(node.callee);
   if (
@@ -127,9 +218,33 @@ const isMountHazard = (node: EsTreeNode, localReceiverNames: Set<string>): boole
   ) {
     const callArguments = node.arguments ?? [];
     const isFunctionFactoryOnce = methodName === "once" && callArguments.length < 2;
-    let receiverBase = node.callee.object;
+    let receiverBase: EsTreeNode = node.callee.object as EsTreeNode;
     let receiverIsRefOwnedNode = false;
-    while (isNodeOfType(receiverBase, "MemberExpression")) {
+    // Descend member chains AND fluent call chains (d3's
+    // `select(this.svgRef.current).selectAll(...).on(...)`): a ref-owned
+    // node anywhere in the chain (as receiver or call argument) means the
+    // listeners die with the component's own DOM.
+    while (
+      isNodeOfType(receiverBase, "MemberExpression") ||
+      isNodeOfType(receiverBase, "CallExpression")
+    ) {
+      if (isNodeOfType(receiverBase, "CallExpression")) {
+        for (const argument of receiverBase.arguments ?? []) {
+          let argumentCursor: EsTreeNode = argument as EsTreeNode;
+          while (isNodeOfType(argumentCursor, "MemberExpression")) {
+            if (
+              !argumentCursor.computed &&
+              isNodeOfType(argumentCursor.property, "Identifier") &&
+              argumentCursor.property.name === "current"
+            ) {
+              receiverIsRefOwnedNode = true;
+            }
+            argumentCursor = argumentCursor.object as EsTreeNode;
+          }
+        }
+        receiverBase = receiverBase.callee as EsTreeNode;
+        continue;
+      }
       if (
         !receiverBase.computed &&
         isNodeOfType(receiverBase.property, "Identifier") &&
@@ -141,8 +256,16 @@ const isMountHazard = (node: EsTreeNode, localReceiverNames: Set<string>): boole
     }
     const isLocalReceiver =
       isNodeOfType(receiverBase, "Identifier") && localReceiverNames.has(receiverBase.name);
+    const firstArgument = callArguments[0];
+    const isSynchronouslyRemoved =
+      methodName === "addEventListener" &&
+      Boolean(firstArgument) &&
+      isNodeOfType(firstArgument as EsTreeNode, "Literal") &&
+      typeof (firstArgument as EsTreeNodeOfType<"Literal">).value === "string" &&
+      removedEventNames.has(String((firstArgument as EsTreeNodeOfType<"Literal">).value));
     const isSelfRemovingListener =
-      methodName === "addEventListener" && isOneShotListenerOptions(callArguments[2]);
+      (methodName === "addEventListener" && isOneShotListenerOptions(callArguments[2])) ||
+      isSynchronouslyRemoved;
     // A listener on a ref-owned DOM node (`this.containerRef.current`) dies
     // with the node when the component unmounts, so it needs no teardown.
     return (
@@ -156,7 +279,7 @@ const isMountHazard = (node: EsTreeNode, localReceiverNames: Set<string>): boole
   const timerCalleeName = getTimerCalleeName(node);
   if (timerCalleeName === "setInterval") return true;
   if (timerCalleeName === "setTimeout" && node.arguments?.[0]) {
-    return timeoutCallbackMutatesComponent(node.arguments[0]);
+    return timeoutCallbackMutatesComponent(node.arguments[0], classBody);
   }
   return false;
 };
@@ -216,10 +339,13 @@ export const classComponentMissingComponentWillUnmountTeardown = defineRule({
         if (!body) continue;
 
         const localReceiverNames = collectMountLocalReceiverNames(body);
+        const removedEventNames = collectSynchronouslyRemovedEventNames(body);
         let hazardNode: EsTreeNode | null = null;
         walkMountBody(body, (candidate) => {
           if (hazardNode) return;
-          if (isMountHazard(candidate, localReceiverNames)) hazardNode = candidate;
+          if (isMountHazard(candidate, localReceiverNames, removedEventNames, node)) {
+            hazardNode = candidate;
+          }
         });
         if (hazardNode) {
           context.report({ node: hazardNode, message: MESSAGE });
