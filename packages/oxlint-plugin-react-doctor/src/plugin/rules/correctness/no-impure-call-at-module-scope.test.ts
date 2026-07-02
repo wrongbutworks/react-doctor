@@ -183,4 +183,118 @@ describe("no-impure-call-at-module-scope", () => {
     });
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("stays quiet: Math.random()-based per-process tab/client id (the crypto.randomUUID idiom the rule explicitly spares)", () => {
+    const result = runRule(
+      noImpureCallAtModuleScope,
+      `const tabId = Math.random().toString(36).slice(2);
+const channel = new BroadcastChannel("cart-sync");
+export const broadcastCartChange = (payload: unknown) => {
+  channel.postMessage({ sourceId: tabId, payload });
+};
+export const isOwnMessage = (message: { sourceId: string }) => message.sourceId === tabId;`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Mutable external-store seed refreshed on demand (unkey query-time-provider — a literal wild hit)", () => {
+    const result = runRule(
+      noImpureCallAtModuleScope,
+      `let lastRefreshedAt = Date.now();
+const listeners = new Set<() => void>();
+export const refreshQueryTime = () => {
+  lastRefreshedAt = Date.now();
+  listeners.forEach((notify) => notify());
+};
+export const getQueryTimeSnapshot = () => lastRefreshedAt;
+export const subscribeQueryTime = (notify: () => void) => {
+  listeners.add(notify);
+  return () => listeners.delete(notify);
+};`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: SSR-guarded ternary where the server branch is a deterministic constant", () => {
+    const result = runRule(
+      noImpureCallAtModuleScope,
+      `const hydrationBaselineMs = typeof window === "undefined" ? 0 : performance.now();
+export const timeSinceHydration = () => performance.now() - hydrationBaselineMs;`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Module epoch used only as an origin for elapsed-time deltas", () => {
+    const result = runRule(
+      noImpureCallAtModuleScope,
+      `const moduleEpoch = Date.now();
+export const uptimeMs = () => Date.now() - moduleEpoch;`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Per-process PRNG seed feeding a seeded generator (umami src/lib/generate.ts — a literal wild hit)", () => {
+    const result = runRule(
+      noImpureCallAtModuleScope,
+      `import prand from "pure-rand";
+const seed = Date.now() ^ (Math.random() * 0x100000000);
+const rng = prand.xoroshiro128plus(seed);
+export const randomIntBetween = (min: number, max: number) =>
+  prand.unsafeUniformIntDistribution(min, max, rng);`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Module-level cache expiry seeded as already-expired", () => {
+    const result = runRule(
+      noImpureCallAtModuleScope,
+      `const CACHE_TTL_MS = 60_000;
+let cachedRates: Record<string, number> | null = null;
+let cacheExpiresAt = Date.now();
+export const getExchangeRates = async () => {
+  if (cachedRates && Date.now() < cacheExpiresAt) return cachedRates;
+  cachedRates = await fetchRates();
+  cacheExpiresAt = Date.now() + CACHE_TTL_MS;
+  return cachedRates;
+};`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Module-init duration telemetry — the measurement IS of module load", () => {
+    const result = runRule(
+      noImpureCallAtModuleScope,
+      `const initStartMs = performance.now();
+export const searchIndex = buildSearchIndex(documents);
+const indexInitDurationMs = performance.now() - initStartMs;
+reportTiming("search-index-init", indexInitDurationMs);`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: react-email PreviewProps fixture defaults (trigger.dev emails — a literal wild hit)", () => {
+    const result = runRule(
+      noImpureCallAtModuleScope,
+      `const previewDefaults = {
+  environment: "production",
+  organization: "My Organization",
+  failedAt: new Date().toISOString(),
+};
+export const DeploymentFailureEmail = ({ failedAt, environment }: DeploymentFailureProps) => (
+  <p>Deployment to {environment} failed at {failedAt}</p>
+);
+DeploymentFailureEmail.PreviewProps = previewDefaults;`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags a frozen const wall-clock read with a value-shaped name", () => {
+    const result = runRule(
+      noImpureCallAtModuleScope,
+      `const currentYear = new Date().getFullYear ? new Date() : new Date();
+       export const copyrightDate = Date.now();
+       export const Footer = () => <span>{copyrightDate}</span>;`,
+    );
+    expect(result.diagnostics.length).toBeGreaterThanOrEqual(1);
+  });
 });

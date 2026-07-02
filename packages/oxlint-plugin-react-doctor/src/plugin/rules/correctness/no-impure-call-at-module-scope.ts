@@ -3,6 +3,7 @@ import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
 import { findVariableInitializer } from "../../utils/find-variable-initializer.js";
 import { isFunctionLike } from "../../utils/is-function-like.js";
+import { walkAst } from "../../utils/walk-ast.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
 import type { RuleContext } from "../../utils/rule-context.js";
 
@@ -32,6 +33,28 @@ const PER_PROCESS_NAME_KEYWORDS = new Set([
   "process",
   "server",
   "build",
+  // per-process ids and time origins (tabId, moduleEpoch, uptimeMs,
+  // hydrationBaselineMs, sessionSeed) — the correct-by-design class the
+  // crypto.* carve-out already spares
+  "uptime",
+  "epoch",
+  "origin",
+  "baseline",
+  "session",
+  "seed",
+  "id",
+  "tab",
+  "client",
+  // mutable cache/refresh seeds (lastRefreshedAt, cacheExpiresAt)
+  "expires",
+  "expiry",
+  "refreshed",
+  // static preview/fixture data (react-email PreviewProps defaults)
+  "preview",
+  "fixture",
+  "mock",
+  "defaults",
+  "placeholder",
 ]);
 
 const isPerProcessBindingName = (bindingName: string): boolean =>
@@ -68,6 +91,23 @@ const impureBuiltinLabel = (node: EsTreeNode): string | null => {
   return `${callee.object.name}.${callee.property.name}()`;
 };
 
+const testChecksTypeofWindow = (test: EsTreeNode): boolean => {
+  let found = false;
+  walkAst(test, (node: EsTreeNode) => {
+    if (found) return false;
+    if (
+      isNodeOfType(node, "UnaryExpression") &&
+      node.operator === "typeof" &&
+      isNodeOfType(node.argument, "Identifier") &&
+      (node.argument.name === "window" || node.argument.name === "document")
+    ) {
+      found = true;
+      return false;
+    }
+  });
+  return found;
+};
+
 interface ModuleScopeBinding {
   readonly bindingName: string | null;
 }
@@ -93,6 +133,17 @@ const resolveModuleScopeBinding = (impureNode: EsTreeNode): ModuleScopeBinding |
       return null;
     }
 
+    // `typeof window === "undefined" ? 0 : performance.now()` — the branch
+    // visible to the server render is the deterministic constant; the
+    // impure read only ever runs in the browser.
+    if (
+      isNodeOfType(cursor, "ConditionalExpression") &&
+      cursor.test !== child &&
+      testChecksTypeofWindow(cursor.test as EsTreeNode)
+    ) {
+      return null;
+    }
+
     if (isNodeOfType(cursor, "PropertyDefinition")) {
       if (cursor.static !== true || cursor.key === child) return null;
       staticFieldBinding = {
@@ -103,6 +154,11 @@ const resolveModuleScopeBinding = (impureNode: EsTreeNode): ModuleScopeBinding |
     if (isNodeOfType(cursor, "VariableDeclarator")) {
       const declaration = cursor.parent;
       if (!declaration || !isNodeOfType(declaration, "VariableDeclaration")) return null;
+      // A `let`/`var` seed is a deliberate MUTABLE per-process value the
+      // module refreshes later (`let lastRefreshedAt = Date.now()`), the
+      // same intent the factory-argument exemption spares — the frozen-
+      // forever hazard is specific to `const`.
+      if (declaration.kind !== "const") return null;
       let declarationParent = declaration.parent ?? null;
       if (declarationParent && isNodeOfType(declarationParent, "ExportNamedDeclaration")) {
         declarationParent = declarationParent.parent ?? null;
