@@ -473,6 +473,11 @@ export const noEnterSubmitWithoutImeCompositionGuard = defineRule({
   severity: "warn",
   category: "Correctness",
   tags: ["react-jsx-only"],
+  // Gated on the `i18n` capability: the missing guard only misbehaves for
+  // composed (IME) input, so the rule stays silent on projects with no
+  // internationalization library — where flagging every plain-Enter submit
+  // is noise, not protection.
+  requires: ["i18n"],
   recommendation:
     "Bail on IME composition before acting on Enter: `if (e.nativeEvent.isComposing) return;` (or track composition with `onCompositionStart`/`onCompositionEnd`). Otherwise Enter fires mid-composition and commits a half-typed value for CJK users.",
   create: (context: RuleContext) => ({

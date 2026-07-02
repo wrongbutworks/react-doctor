@@ -17,6 +17,7 @@ const projectInfo: ProjectInfo = {
   framework: "nextjs",
   hasTypeScript: true,
   hasReactCompiler: false,
+  hasI18nLibrary: false,
   tanstackQueryVersion: "^5.66.0",
   mobxVersion: null,
   styledComponentsVersion: null,

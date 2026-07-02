@@ -23,6 +23,16 @@ export interface ProjectInfo {
   hasTypeScript: boolean;
   hasReactCompiler: boolean;
   /**
+   * `true` when the project declares an internationalization library
+   * (i18next, react-intl, next-intl, Lingui, …). Drives the `i18n`
+   * capability in `buildCapabilities`, which gates rules that only pay
+   * for themselves on localized apps — e.g. the IME composition guard on
+   * Enter-to-submit handlers, which protects CJK text entry. A project
+   * with no i18n tooling is overwhelmingly single-locale, where a plain
+   * Enter submit is idiomatic and the rule would be noise.
+   */
+  hasI18nLibrary: boolean;
+  /**
    * The declared TanStack Query version spec (`@tanstack/react-query`,
    * `@tanstack/query-core`, or the legacy `react-query`), or `null` when
    * absent. Drives the `tanstack-query` capability in `buildCapabilities`,

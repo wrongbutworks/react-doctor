@@ -36,6 +36,7 @@ const sampleProject: ProjectInfo = {
   framework: "vite",
   hasTypeScript: true,
   hasReactCompiler: false,
+  hasI18nLibrary: false,
   hasTanStackQuery: false,
   nextjsVersion: null,
   nextjsMajorVersion: null,

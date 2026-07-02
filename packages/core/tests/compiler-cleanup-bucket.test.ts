@@ -16,6 +16,7 @@ const buildProject = (overrides: Partial<ProjectInfo> = {}): ProjectInfo => ({
   framework: "unknown",
   hasTypeScript: true,
   hasReactCompiler: true,
+  hasI18nLibrary: false,
   tanstackQueryVersion: null,
   mobxVersion: null,
   styledComponentsVersion: null,

@@ -13,6 +13,7 @@ const baseProject: ProjectInfo = {
   framework: "unknown",
   hasTypeScript: false,
   hasReactCompiler: false,
+  hasI18nLibrary: false,
   tanstackQueryVersion: null,
   mobxVersion: null,
   styledComponentsVersion: null,

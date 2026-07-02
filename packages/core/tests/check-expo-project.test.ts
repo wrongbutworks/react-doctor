@@ -43,6 +43,7 @@ const buildExpoProject = (
   framework: "expo",
   hasTypeScript: true,
   hasReactCompiler: false,
+  hasI18nLibrary: false,
   tanstackQueryVersion: null,
   mobxVersion: null,
   styledComponentsVersion: null,

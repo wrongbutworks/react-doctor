@@ -21,6 +21,7 @@ import { findNextjsVersion } from "./find-nextjs-version.js";
 import { getPreactVersion } from "./get-preact-version.js";
 import { getTanStackQueryVersion } from "./get-tanstack-query-version.js";
 import { getMobxVersion } from "./get-mobx-version.js";
+import { hasI18nDependency } from "./has-i18n-dependency.js";
 import { getStyledComponentsVersion } from "./get-styled-components-version.js";
 import { someWorkspacePackageJson } from "./some-workspace-package-json.js";
 import { isPackageJsonReanimatedAware } from "./utils/is-package-json-reanimated-aware.js";
@@ -96,6 +97,7 @@ const discoverProjectWithoutPackageJson = (directory: string): ProjectInfo => {
     framework: "unknown",
     hasTypeScript: hasOwnTsConfig,
     hasReactCompiler: false,
+    hasI18nLibrary: false,
     tanstackQueryVersion: null,
     mobxVersion: null,
     styledComponentsVersion: null,
@@ -315,6 +317,7 @@ export const discoverProject = (directory: string): ProjectInfo => {
     framework,
     hasTypeScript,
     hasReactCompiler: detectReactCompiler(directory, packageJson),
+    hasI18nLibrary: hasI18nDependency(packageJson),
     tanstackQueryVersion: getTanStackQueryVersion(packageJson),
     mobxVersion: getMobxVersion(packageJson),
     styledComponentsVersion: getStyledComponentsVersion(packageJson),

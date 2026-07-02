@@ -66,6 +66,34 @@ describe("discoverProject", () => {
     expect(projectInfo.tailwindVersion).toBe("^3.4.1");
   });
 
+  it("detects an i18n library from any dependency group", () => {
+    const projectDirectory = path.join(tempDirectory, "i18n-app");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "i18n-app",
+        dependencies: { react: "^19.0.0", "react-i18next": "^15.0.0" },
+      }),
+    );
+
+    expect(discoverProject(projectDirectory).hasI18nLibrary).toBe(true);
+  });
+
+  it("reports no i18n library when none is declared", () => {
+    const projectDirectory = path.join(tempDirectory, "single-locale-app");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "single-locale-app",
+        dependencies: { react: "^19.0.0" },
+      }),
+    );
+
+    expect(discoverProject(projectDirectory).hasI18nLibrary).toBe(false);
+  });
+
   it("prefers runtime React dependencies over conflicting devDependencies", () => {
     const projectDirectory = path.join(tempDirectory, "react-runtime-over-dev-deps");
     fs.mkdirSync(projectDirectory, { recursive: true });

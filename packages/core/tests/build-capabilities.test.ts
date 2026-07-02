@@ -13,6 +13,7 @@ const baseProject: ProjectInfo = {
   framework: "vite",
   hasTypeScript: true,
   hasReactCompiler: false,
+  hasI18nLibrary: false,
   tanstackQueryVersion: null,
   mobxVersion: null,
   styledComponentsVersion: null,
@@ -248,6 +249,11 @@ describe("buildCapabilities", () => {
   it("emits the `mobx` capability only when the project declares MobX", () => {
     expect(buildCapabilities({ ...baseProject, mobxVersion: "^6.12.0" }).has("mobx")).toBe(true);
     expect(buildCapabilities({ ...baseProject, mobxVersion: null }).has("mobx")).toBe(false);
+  });
+
+  it("emits the `i18n` capability only when the project declares an i18n library", () => {
+    expect(buildCapabilities({ ...baseProject, hasI18nLibrary: true }).has("i18n")).toBe(true);
+    expect(buildCapabilities({ ...baseProject, hasI18nLibrary: false }).has("i18n")).toBe(false);
   });
 
   it("emits the `styled-components` capability only when the project declares styled-components", () => {

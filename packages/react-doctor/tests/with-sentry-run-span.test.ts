@@ -22,6 +22,7 @@ const projectInfo: ProjectInfo = {
   framework: "vite",
   hasTypeScript: true,
   hasReactCompiler: true,
+  hasI18nLibrary: false,
   tanstackQueryVersion: null,
   mobxVersion: null,
   styledComponentsVersion: null,

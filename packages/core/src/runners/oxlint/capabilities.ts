@@ -136,6 +136,12 @@ export const buildCapabilities = (project: ProjectInfo): ReadonlySet<string> => 
       capabilities.add("styled-components:6");
     }
   }
+  // `i18n` marks projects that ship an internationalization library — the
+  // package.json signal that CJK/IME text entry is in scope. Gates rules
+  // whose smell only bites composed input (an Enter-to-submit handler
+  // without an `isComposing` guard), keeping them silent on the
+  // overwhelmingly single-locale projects where plain Enter is idiomatic.
+  if (project.hasI18nLibrary) capabilities.add("i18n");
   if (project.hasTypeScript) capabilities.add("typescript");
   // Keyed off `preactVersion`, not `framework === "preact"`, so the
   // dominant Preact-on-Vite setup (which classifies as `vite` for
