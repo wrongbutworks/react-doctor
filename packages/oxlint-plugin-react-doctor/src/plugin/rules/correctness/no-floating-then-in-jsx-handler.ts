@@ -99,11 +99,18 @@ const subtreeContainsThrow = (root: EsTreeNode): boolean => {
 const isNonRejectingPromiseConstruction = (root: EsTreeNode): boolean => {
   if (!isNodeOfType(root, "NewExpression")) return false;
   if (!isNodeOfType(root.callee, "Identifier") || root.callee.name !== "Promise") return false;
-  const executor = root.arguments?.[0];
-  if (!executor || !isFunctionLike(executor as EsTreeNode)) return false;
-  const executorFunction = executor as EsTreeNode;
-  if ((executorFunction.params?.length ?? 0) >= 2) return false;
-  return !subtreeContainsThrow(executorFunction);
+  const executor = root.arguments?.[0]
+    ? stripParenExpression(root.arguments[0] as EsTreeNode)
+    : null;
+  if (
+    !executor ||
+    (!isNodeOfType(executor, "ArrowFunctionExpression") &&
+      !isNodeOfType(executor, "FunctionExpression"))
+  ) {
+    return false;
+  }
+  if ((executor.params?.length ?? 0) >= 2) return false;
+  return !subtreeContainsThrow(executor);
 };
 
 const isPromiseResolveCall = (node: EsTreeNode): boolean =>

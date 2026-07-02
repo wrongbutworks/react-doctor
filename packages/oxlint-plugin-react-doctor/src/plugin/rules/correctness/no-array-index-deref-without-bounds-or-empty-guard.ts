@@ -401,7 +401,7 @@ const isInsideFilteredIterationCallback = (node: EsTreeNode, splitCall: EsTreeNo
     stripParenExpression(splitCall.callee.object),
   );
   if (!splitValueIdentifier) return false;
-  const callback = nearestEnclosingFunction(node);
+  const callback = findEnclosingFunction(node);
   if (
     !callback ||
     (!isNodeOfType(callback, "ArrowFunctionExpression") &&
