@@ -262,4 +262,155 @@ describe("no-arithmetic-on-optional-chained-operand", () => {
     );
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("stays quiet: Derive-first, guard-second ordering (hooks-before-early-returns forces it)", () => {
+    const result = runRule(
+      noArithmeticOnOptionalChainedOperand,
+      `function Chart({ data }) {
+        const scaled = data?.value * SCALE;
+        const [hovered, setHovered] = useState(false);
+        if (!data) return null;
+        return <div onMouseEnter={() => setHovered(true)}>{scaled.toFixed(1)}</div>;
+      }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Ternary root-guard at the consumer (compute eagerly, consume conditionally)", () => {
+    const result = runRule(
+      noArithmeticOnOptionalChainedOperand,
+      `function ShareBadge({ entry, total }) {
+        const share = entry?.points / total;
+        return <span>{entry ? share.toFixed(2) : "—"}</span>;
+      }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Truthiness early-return on the RESULT binding (NaN is falsy)", () => {
+    const result = runRule(
+      noArithmeticOnOptionalChainedOperand,
+      `function DiscountBadge({ coupon }) {
+        const discount = coupon?.percent / 100;
+        if (!discount) return null;
+        return <span>{discount.toFixed(2)}</span>;
+      }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Consumer inside a root-guarded if block", () => {
+    const result = runRule(
+      noArithmeticOnOptionalChainedOperand,
+      `function ProgressLabel({ upload }) {
+        const pct = upload?.progress * 100;
+        if (upload) {
+          return <span>{pct.toFixed(0)}%</span>;
+        }
+        return null;
+      }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Comparison-guard on the result binding (NaN > 0 is false)", () => {
+    const result = runRule(
+      noArithmeticOnOptionalChainedOperand,
+      `function Discount({ coupon }) {
+        const discount = coupon?.percent / 100;
+        if (discount > 0) {
+          return <em>{discount.toFixed(2)}</em>;
+        }
+        return null;
+      }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: switch on the chain discriminant narrows the root", () => {
+    const result = runRule(
+      noArithmeticOnOptionalChainedOperand,
+      `function OrderTotal({ order, taxRate }) {
+        switch (order?.status) {
+          case "paid": {
+            const total = order?.amount * taxRate;
+            return <b>{total.toFixed(2)}</b>;
+          }
+          default:
+            return null;
+        }
+      }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Math consumer inside a root-guarded ternary branch", () => {
+    const result = runRule(
+      noArithmeticOnOptionalChainedOperand,
+      `function ZoomedWidth({ image, zoom }) {
+        const scaled = image?.naturalWidth / zoom;
+        const width = image ? Math.round(scaled) : 0;
+        return <div style={{ width }} />;
+      }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: JSX && root-guard at the consumer", () => {
+    const result = runRule(
+      noArithmeticOnOptionalChainedOperand,
+      `function Meter({ stats }) {
+        const ratio = stats?.score / stats?.max;
+        return <div>{stats && <b>{ratio.toFixed(1)}</b>}</div>;
+      }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Alias operand with a nullish ternary guard at the consumer", () => {
+    const result = runRule(
+      noArithmeticOnOptionalChainedOperand,
+      `function PlanSize({ plan }) {
+        const bytes = plan?.storageBytes;
+        const gigabytes = bytes / BYTES_PER_GB;
+        return <span>{bytes != null ? gigabytes.toFixed(1) : "Unlimited"}</span>;
+      }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Else-branch early exit narrows the root for following statements", () => {
+    const result = runRule(
+      noArithmeticOnOptionalChainedOperand,
+      `function Gauge({ metrics, limit }) {
+        if (metrics) {
+          console.debug("rendering gauge");
+        } else {
+          return null;
+        }
+        const used = metrics?.used % limit;
+        return <span>{used.toFixed(1)}</span>;
+      }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags an unguarded consumer before any guard appears", () => {
+    const result = runRule(
+      noArithmeticOnOptionalChainedOperand,
+      `const Row = ({ data }) => {
+         const scaled = data?.value * 100;
+         return <span>{scaled.toFixed(2)}</span>;
+       };`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags a comparison consumer outside a test position", () => {
+    const result = runRule(
+      noArithmeticOnOptionalChainedOperand,
+      `const sorted = rows.sort((a, b) => a?.price * rate < b?.price * rate);`,
+    );
+    expect(result.diagnostics.length).toBeGreaterThanOrEqual(1);
+  });
 });

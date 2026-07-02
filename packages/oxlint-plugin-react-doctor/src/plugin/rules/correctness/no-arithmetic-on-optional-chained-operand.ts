@@ -168,9 +168,50 @@ const unwrapUpwards = (node: EsTreeNode): { consumed: EsTreeNode; consumer: EsTr
   return { consumed, consumer };
 };
 
+// A comparison sitting (through parens, `!`, and `&&`/`||` chains) in a
+// branching TEST position is NaN-SAFE by construction — `NaN > 0` is false,
+// so the guarded branch simply doesn't run. Only comparisons whose result is
+// consumed as a value (a sort callback return, an assignment) spread NaN.
+const BRANCH_TEST_PARENT_TYPES = new Set<string>([
+  "IfStatement",
+  "ConditionalExpression",
+  "WhileStatement",
+  "DoWhileStatement",
+  "ForStatement",
+]);
+
+const isComparisonInTestPosition = (comparisonNode: EsTreeNode): boolean => {
+  let child: EsTreeNode = comparisonNode;
+  let parent = child.parent ?? null;
+  while (parent) {
+    if (
+      TRANSPARENT_WRAPPER_TYPES.has(parent.type) ||
+      isNodeOfType(parent, "LogicalExpression") ||
+      (isNodeOfType(parent, "UnaryExpression") && parent.operator === "!")
+    ) {
+      child = parent;
+      parent = parent.parent ?? null;
+      continue;
+    }
+    if (isNodeOfType(parent, "JSXExpressionContainer")) return true;
+    if (BRANCH_TEST_PARENT_TYPES.has(parent.type)) {
+      return (parent as { test?: EsTreeNode }).test === child;
+    }
+    return false;
+  }
+  return false;
+};
+
 // The arithmetic result reaches a numeric consumer directly: `.toFixed()` etc.,
-// a comparison, or a `Math.*` argument.
-const isDirectNumericConsumer = (valueNode: EsTreeNode): boolean => {
+// a comparison, or a `Math.*` argument. `treatTestComparisonAsGuard` applies
+// only on the binding-reference path: `if (discount > 0) { …discount… }`
+// gates the RESULT's own consumers (a guard), while a direct
+// `if (a?.b * f < t)` comparison IS the silent NaN misbehavior the rule
+// exists to catch.
+const isDirectNumericConsumer = (
+  valueNode: EsTreeNode,
+  treatTestComparisonAsGuard = false,
+): boolean => {
   const { consumed, consumer } = unwrapUpwards(valueNode);
   if (!consumer) return false;
   if (
@@ -187,7 +228,7 @@ const isDirectNumericConsumer = (valueNode: EsTreeNode): boolean => {
     COMPARISON_OPERATORS.has(consumer.operator) &&
     (consumer.left === consumed || consumer.right === consumed)
   ) {
-    return true;
+    return treatTestComparisonAsGuard ? !isComparisonInTestPosition(consumer) : true;
   }
   if (
     isNodeOfType(consumer, "CallExpression") &&
@@ -269,8 +310,16 @@ const isReferenceToBinding = (
 // A numeric consumer reached through an intermediate binding:
 // `const share = a?.b / total; share.toFixed(2)`. Order-aware: a NaN check or
 // plain reassignment suppresses only the consumers that come after it — a
-// consumer that reads the binding first already received the NaN.
-const flowsIntoNumericConsumerViaBinding = (binaryNode: EsTreeNode): boolean => {
+// consumer that reads the binding first already received the NaN. Each
+// consumer SITE is also checked against the guards individually: the
+// hooks-before-early-returns ordering React forces ("derive first, guard
+// second") puts the guard between the arithmetic and the consumer, and the
+// RESULT binding itself is a valid guard subject because NaN is falsy
+// (`if (!discount) return null;` catches the short-circuited case).
+const flowsIntoNumericConsumerViaBinding = (
+  binaryNode: EsTreeNode,
+  guardNames: string[],
+): boolean => {
   const { consumed, consumer } = unwrapUpwards(binaryNode);
   if (
     !consumer ||
@@ -281,6 +330,7 @@ const flowsIntoNumericConsumerViaBinding = (binaryNode: EsTreeNode): boolean => 
     return false;
   }
   const bindingIdentifier = consumer.id;
+  const consumerSiteGuardNames = [...guardNames, bindingIdentifier.name];
   const scopeOwner = findScopeOwner(binaryNode);
   if (!scopeOwner) return false;
   let firstConsumerOffset: number | null = null;
@@ -301,7 +351,9 @@ const flowsIntoNumericConsumerViaBinding = (binaryNode: EsTreeNode): boolean => 
       }
       return;
     }
-    if (isDirectNumericConsumer(child)) {
+    if (isDirectNumericConsumer(child, true)) {
+      if (isGuardedByEnclosingTest(child, consumerSiteGuardNames)) return;
+      if (isGuardedByPrecedingEarlyExit(child, consumerSiteGuardNames)) return;
       const consumerOffset = nodeStartOffset(child);
       if (firstConsumerOffset === null || consumerOffset < firstConsumerOffset) {
         firstConsumerOffset = consumerOffset;
@@ -312,8 +364,8 @@ const flowsIntoNumericConsumerViaBinding = (binaryNode: EsTreeNode): boolean => 
   return firstNanHandledOffset === null || firstConsumerOffset < firstNanHandledOffset;
 };
 
-const isNumericConsumerContext = (binaryNode: EsTreeNode): boolean =>
-  isDirectNumericConsumer(binaryNode) || flowsIntoNumericConsumerViaBinding(binaryNode);
+const isNumericConsumerContext = (binaryNode: EsTreeNode, guardNames: string[]): boolean =>
+  isDirectNumericConsumer(binaryNode) || flowsIntoNumericConsumerViaBinding(binaryNode, guardNames);
 
 const subtreeReferencesName = (node: EsTreeNode | null | undefined, name: string): boolean => {
   if (!node) return false;
@@ -374,6 +426,17 @@ const isGuardedByEnclosingTest = (binaryNode: EsTreeNode, guardNames: string[]):
     ) {
       return true;
     }
+    // A non-default `case` narrows the chain: when the root is nullish the
+    // discriminant `order?.status` is undefined, which matches no literal case.
+    if (
+      isNodeOfType(ancestor, "SwitchCase") &&
+      ancestor.test !== null &&
+      ancestor.parent &&
+      isNodeOfType(ancestor.parent, "SwitchStatement") &&
+      subtreeReferencesAnyName(ancestor.parent.discriminant, guardNames)
+    ) {
+      return true;
+    }
     child = ancestor;
     ancestor = ancestor.parent ?? null;
   }
@@ -391,10 +454,13 @@ const isGuardedByPrecedingEarlyExit = (binaryNode: EsTreeNode, guardNames: strin
       const statements = ancestor.body;
       const childStatementIndex = statements.findIndex((statement) => statement === child);
       for (const precedingStatement of statements.slice(0, Math.max(childStatementIndex, 0))) {
+        if (!isNodeOfType(precedingStatement, "IfStatement")) continue;
+        if (!subtreeReferencesAnyName(precedingStatement.test, guardNames)) continue;
+        // `if (!x) return;` — and the inverted spelling `if (x) {...} else
+        // { return; }` — both narrow the guard for everything that follows.
         if (
-          isNodeOfType(precedingStatement, "IfStatement") &&
-          isEarlyExitStatement(precedingStatement.consequent) &&
-          subtreeReferencesAnyName(precedingStatement.test, guardNames)
+          isEarlyExitStatement(precedingStatement.consequent) ||
+          isEarlyExitStatement(precedingStatement.alternate)
         ) {
           return true;
         }
@@ -426,7 +492,7 @@ export const noArithmeticOnOptionalChainedOperand = defineRule({
         if (!guardNames) continue;
         if (isGuardedByEnclosingTest(node as EsTreeNode, guardNames)) continue;
         if (isGuardedByPrecedingEarlyExit(node as EsTreeNode, guardNames)) continue;
-        if (!isNumericConsumerContext(node as EsTreeNode)) continue;
+        if (!isNumericConsumerContext(node as EsTreeNode, guardNames)) continue;
         context.report({ node, message: MESSAGE });
         return;
       }
