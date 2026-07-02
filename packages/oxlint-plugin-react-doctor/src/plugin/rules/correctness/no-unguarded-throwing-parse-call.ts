@@ -317,11 +317,18 @@ const isValidUrlStringSource = (node: EsTreeNode): boolean => {
   if (!isNodeOfType(node.property, "Identifier")) return false;
   const propertyName = node.property.name;
   if (propertyName === "href") return isLocationObjectReference(node.object);
+  // `location.origin` is a spec-guaranteed valid `scheme://host[:port]`.
+  if (propertyName === "origin") return isLocationObjectReference(node.object);
   if (propertyName === "URL") {
     return isNodeOfType(node.object, "Identifier") && node.object.name === "document";
   }
   if (propertyName === "url") {
     if (isNodeOfType(node.object, "MetaProperty")) return true;
+    return isNodeOfType(node.object, "Identifier") && REQUEST_URL_ROOTS.has(node.object.name);
+  }
+  // Next.js middleware's `request.nextUrl` is a NextURL — a URL-shaped object
+  // whose stringification is the already-parsed incoming request URL.
+  if (propertyName === "nextUrl") {
     return isNodeOfType(node.object, "Identifier") && REQUEST_URL_ROOTS.has(node.object.name);
   }
   return false;
@@ -360,7 +367,34 @@ const isUntrustedUrlArgument = (argument: EsTreeNode, traceDepth: number): boole
   const inner = stripParenExpression(argument);
   if (isCompileTimeOrModuleConst(inner)) return false;
   if (isAlwaysValidUrlArgument(inner)) return false;
+  if (isNodeOfType(inner, "AwaitExpression")) {
+    return isUntrustedUrlArgument(inner.argument as EsTreeNode, traceDepth + 1);
+  }
+  // A conditional is untrusted only when one of its BRANCHES is — the test
+  // (`/^https?:/.test(file.url) ? file.url : fallback`) never flows into the
+  // parsed value.
+  if (isNodeOfType(inner, "ConditionalExpression")) {
+    return (
+      isUntrustedUrlArgument(inner.consequent as EsTreeNode, traceDepth + 1) ||
+      isUntrustedUrlArgument(inner.alternate as EsTreeNode, traceDepth + 1)
+    );
+  }
   if (isNodeOfType(inner, "TemplateLiteral")) {
+    // `${location.origin}/${rest}` — a template that STARTS with a valid
+    // origin source followed by a literal `/` is a valid absolute URL no
+    // matter what the remaining expressions hold (percent-encoded, never
+    // rejected), mirroring ABSOLUTE_ORIGIN_PREFIX_PATTERN for literals.
+    const firstQuasiRaw = inner.quasis[0]?.value?.raw ?? "";
+    const firstExpression = inner.expressions[0];
+    const followingQuasiRaw = inner.quasis[1]?.value?.raw ?? "";
+    if (
+      firstQuasiRaw === "" &&
+      firstExpression &&
+      isAlwaysValidUrlArgument(stripParenExpression(firstExpression as EsTreeNode)) &&
+      followingQuasiRaw.startsWith("/")
+    ) {
+      return false;
+    }
     return inner.expressions.some((expression) =>
       isUntrustedUrlArgument(expression as EsTreeNode, traceDepth + 1),
     );
@@ -378,6 +412,13 @@ const isUntrustedUrlArgument = (argument: EsTreeNode, traceDepth: number): boole
   }
   const rootName = getRootIdentifierName(inner, { followCallChains: true });
   if (rootName && URL_UNTRUSTED_ROOT_NAMES.has(rootName)) return true;
+  // A call's RETURN value is a different value from its arguments — do not
+  // taint `resolveUrl(client, params.x)` because `params` appears in an
+  // argument. Only the callee chain (`params.get(...)`, covered by the root
+  // check above) carries taint through a call.
+  if (isNodeOfType(inner, "CallExpression")) {
+    return subtreeReferencesIdentifierName(inner.callee as EsTreeNode, URL_ROUTE_SOURCE_ROOTS);
+  }
   return subtreeReferencesIdentifierName(inner, URL_ROUTE_SOURCE_ROOTS);
 };
 

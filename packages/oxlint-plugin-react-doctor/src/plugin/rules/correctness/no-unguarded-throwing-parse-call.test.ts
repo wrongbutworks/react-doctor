@@ -484,4 +484,66 @@ describe("no-unguarded-throwing-parse-call", () => {
     );
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("stays quiet on new URL(request.nextUrl) in Next.js middleware (postiz shape)", () => {
+    const result = runRule(
+      noUnguardedThrowingParseCall,
+      `export const proxy = (request) => {
+         const nextUrl = request.nextUrl;
+         const target = new URL(nextUrl);
+         return target.search;
+       };`,
+      { filename: "src/proxy.ts" },
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet on a location.origin-prefixed template (nocobase shape)", () => {
+    const result = runRule(
+      noUnguardedThrowingParseCall,
+      `const FilePreview = ({ file }) => {
+         const absoluteUrl = /^https?:/.test(file.url)
+           ? file.url
+           : \`\${location.origin}/\${file.url.replace(/^\\//, "")}\`;
+         const parsed = new URL(absoluteUrl);
+         return <a href={parsed.href}>{file.name}</a>;
+       };`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not taint a helper's return value through its call arguments (AFFiNE shape)", () => {
+    const result = runRule(
+      noUnguardedThrowingParseCall,
+      `async function connect(client, params) {
+         const discoveryUrl = await resolveDiscoveryUrl(client, params.serverId);
+         const base = new URL(discoveryUrl);
+         return base.host;
+       }`,
+      { filename: "src/providers/caldav.ts" },
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags new URL over a query-param accessor chain", () => {
+    const result = runRule(
+      noUnguardedThrowingParseCall,
+      `const Redirect = () => {
+         const target = new URL(searchParams.get("returnTo"));
+         return <a href={target.href}>Continue</a>;
+       };`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags a template whose origin position holds an untrusted value", () => {
+    const result = runRule(
+      noUnguardedThrowingParseCall,
+      `const Redirect = () => {
+         const target = new URL(\`\${params.origin}/\${params.path}\`);
+         return <a href={target.href}>Continue</a>;
+       };`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
 });
