@@ -11,6 +11,7 @@ import {
   parseReactMajorMinor,
   parseTailwindMajorMinor,
 } from "../../project-info/index.js";
+import { getLowestDependencyMajor } from "../../project-info/utils/dependency-version-spec.js";
 
 // Frameworks that evaluate application modules outside the browser — a
 // server render (Next.js / Remix / TanStack Start) or a static build
@@ -123,7 +124,18 @@ export const buildCapabilities = (project: ProjectInfo): ReadonlySet<string> => 
   if (project.hasReactCompiler) capabilities.add("react-compiler");
   if (project.tanstackQueryVersion !== null) capabilities.add("tanstack-query");
   if (project.mobxVersion !== null) capabilities.add("mobx");
-  if (project.styledComponentsVersion !== null) capabilities.add("styled-components");
+  if (project.styledComponentsVersion !== null) {
+    capabilities.add("styled-components");
+    // `styled-components:6` gates rules about v6-only behavior — v6 removed
+    // the automatic @emotion/is-prop-valid filtering, so forwarding a custom
+    // prop to the DOM is only a real problem there. Conservative-on-null
+    // (unlike tailwind's optimistic HACK): v5 is still widespread, so an
+    // unparseable spec must NOT enable v6-only rules.
+    const styledComponentsMajor = getLowestDependencyMajor(project.styledComponentsVersion);
+    if (styledComponentsMajor !== null && styledComponentsMajor >= 6) {
+      capabilities.add("styled-components:6");
+    }
+  }
   if (project.hasTypeScript) capabilities.add("typescript");
   // Keyed off `preactVersion`, not `framework === "preact"`, so the
   // dominant Preact-on-Vite setup (which classifies as `vite` for

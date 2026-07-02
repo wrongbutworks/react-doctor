@@ -261,6 +261,20 @@ describe("buildCapabilities", () => {
     ).toBe(false);
   });
 
+  it("emits `styled-components:6` for v6 but not for v5 or unparseable specs", () => {
+    expect(
+      buildCapabilities({ ...baseProject, styledComponentsVersion: "^6.1.0" }).has(
+        "styled-components:6",
+      ),
+    ).toBe(true);
+    const v5 = buildCapabilities({ ...baseProject, styledComponentsVersion: "^5.3.11" });
+    expect(v5.has("styled-components")).toBe(true);
+    expect(v5.has("styled-components:6")).toBe(false);
+    const unparseable = buildCapabilities({ ...baseProject, styledComponentsVersion: "latest" });
+    expect(unparseable.has("styled-components")).toBe(true);
+    expect(unparseable.has("styled-components:6")).toBe(false);
+  });
+
   it("emits `pre-es2023` when the project target predates ES2023", () => {
     const capabilities = buildCapabilities({
       ...baseProject,

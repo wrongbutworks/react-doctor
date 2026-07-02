@@ -101,7 +101,10 @@ export const styledComponentsNonTransientCustomPropOnIntrinsicElement = defineRu
   id: "styled-components-non-transient-custom-prop-on-intrinsic-element",
   title: "Non-transient custom prop on styled intrinsic element",
   severity: "warn",
-  requires: ["styled-components"],
+  // v6-only: styled-components 5.1+ auto-filters unknown props via
+  // @emotion/is-prop-valid, so non-transient custom props never reach the
+  // DOM there — flagging v5 projects (outline, taskcafe) is a false positive.
+  requires: ["styled-components:6"],
   recommendation:
     "Prefix custom styled-components props with `$` (e.g. `$active`) so styled-components v6 keeps them off the DOM node instead of forwarding them as invalid attributes.",
   create: (context) => ({
