@@ -790,6 +790,38 @@ describe("listWorkspacePackages", () => {
     expect(projectInfo.expoVersion, "expo dependency still flags the project").toBe("~51.0.0");
   });
 
+  it("classifies a Remix app that ships Vite as `remix`, not `vite`", () => {
+    const projectDirectory = path.join(tempDirectory, "remix-with-vite");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "remix-with-vite",
+        dependencies: { "@remix-run/react": "^2.9.0", react: "^18.2.0" },
+        devDependencies: { vite: "^5.1.0" },
+      }),
+    );
+
+    const projectInfo = discoverProject(projectDirectory);
+    expect(projectInfo.framework, "the framework package outranks its bundler").toBe("remix");
+  });
+
+  it("classifies a Gatsby app that also lists Vite as `gatsby`, not `vite`", () => {
+    const projectDirectory = path.join(tempDirectory, "gatsby-with-vite");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "gatsby-with-vite",
+        dependencies: { gatsby: "^5.13.0", react: "^18.2.0" },
+        devDependencies: { vite: "^5.1.0" },
+      }),
+    );
+
+    const projectInfo = discoverProject(projectDirectory);
+    expect(projectInfo.framework, "the framework package outranks its bundler").toBe("gatsby");
+  });
+
   it("flags a web-rooted monorepo with an Expo workspace as an Expo project", () => {
     const rootDirectory = path.join(tempDirectory, "expo-workspace-monorepo");
     const mobileDirectory = path.join(rootDirectory, "apps", "mobile");

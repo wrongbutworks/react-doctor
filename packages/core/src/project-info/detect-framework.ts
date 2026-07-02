@@ -1,12 +1,16 @@
 import type { Framework } from "../types/index.js";
 
+// Entry order is match priority: framework-defining packages must precede
+// `vite`, the bundler they ship with (a Remix or TanStack Start manifest
+// always lists `vite` too), or the app misclassifies as a client-only SPA
+// and loses SSR-gated rules.
 const FRAMEWORK_PACKAGES: Record<string, Framework> = {
   next: "nextjs",
   "@tanstack/react-start": "tanstack-start",
-  vite: "vite",
-  "react-scripts": "cra",
   "@remix-run/react": "remix",
   gatsby: "gatsby",
+  vite: "vite",
+  "react-scripts": "cra",
   expo: "expo",
   "react-native": "react-native",
 };
