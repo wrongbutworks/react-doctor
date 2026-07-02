@@ -202,7 +202,7 @@ export const noAsyncEventHandlerWithoutReentryGuard = defineRule({
   title: "Async mutating handler without re-entry guard",
   severity: "warn",
   recommendation:
-    "An async onClick/onSubmit/onPress handler that awaits a mutating request and sets state only afterward stays interactive across the await, so a double-click fires the write twice. Add a leading `if (busy) return` guard, or set a flag before the await and disable the control.",
+    "An async onClick/onSubmit/onPress handler that awaits a mutating request and sets state only afterward stays interactive across the await, so a double-click fires the write twice. Add a leading `if (busy) return` guard, or set a flag before the await inside `try` and reset it in `finally` while the control is disabled.",
   create: (context: RuleContext) => {
     const analyzedFunctions = new WeakSet<EsTreeNode>();
     return {

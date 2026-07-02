@@ -290,7 +290,7 @@ export const debounceNoCleanup = defineRule({
   severity: "warn",
   category: "Bugs",
   recommendation:
-    "A debounced/throttled callback holds a pending timer that still fires after unmount, so add `useEffect(() => () => debounced.cancel(), [])` to cancel the trailing invocation when the component tears down.",
+    "A debounced/throttled callback holds a pending timer that still fires after unmount, so add `useEffect(() => () => debounced.cancel(), [debounced])` to cancel the trailing invocation when the component tears down.",
   create: (context: RuleContext) => ({
     CallExpression(node: EsTreeNodeOfType<"CallExpression">) {
       if (!isHookCall(node, DEBOUNCE_WRAPPER_HOOK_NAMES)) return;

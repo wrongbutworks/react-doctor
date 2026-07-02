@@ -131,7 +131,7 @@ export const noWholeObjectDepWithMemberReads = defineRule({
   title: "Whole props object in deps while only members are read",
   severity: "warn",
   recommendation:
-    "Depend on the specific fields you read (e.g. `props.onChange`) instead of the whole `props` object. Props are a fresh object whenever the parent re-renders, so a whole-props dependency defeats the memoization.",
+    "Destructure the fields you read (`const { onChange } = props`) and depend on those bindings instead of the whole `props` object. Props are a fresh object whenever the parent re-renders, so a whole-props dependency defeats the memoization.",
   create: (context: RuleContext) => ({
     CallExpression(node: EsTreeNodeOfType<"CallExpression">) {
       if (!isHookCall(node, IDENTITY_SENSITIVE_HOOKS_WITH_DEPS)) return;

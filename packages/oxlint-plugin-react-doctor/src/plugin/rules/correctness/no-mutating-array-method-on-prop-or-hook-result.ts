@@ -271,7 +271,7 @@ export const noMutatingArrayMethodOnPropOrHookResult = defineRule({
   title: "In-place array mutation on a prop or hook result",
   severity: "warn",
   recommendation:
-    "`sort`, `reverse`, and `splice` mutate in place, so calling them on a prop or hook result corrupts shared state. Copy the array first (`[...array]`) or use the immutable `toSorted`/`toReversed`/`toSpliced`.",
+    "`sort`, `reverse`, and `splice` mutate in place, so calling them on a prop or hook result corrupts shared state. Use the immutable `toSorted`/`toReversed`/`toSpliced`, or copy the array first (`[...array].sort()`) when targeting pre-ES2023 runtimes.",
   create: (context: RuleContext) => ({
     CallExpression(node: EsTreeNodeOfType<"CallExpression">) {
       const callee = node.callee;

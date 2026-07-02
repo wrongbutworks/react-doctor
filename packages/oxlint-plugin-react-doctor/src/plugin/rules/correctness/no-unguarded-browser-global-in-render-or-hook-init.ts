@@ -268,7 +268,7 @@ export const noUnguardedBrowserGlobalInRenderOrHookInit = defineRule({
   category: "Correctness",
   requires: ["ssr"],
   recommendation:
-    'Reading `window`/`document`/`navigator`/`localStorage`/`sessionStorage` during render or in a useState/useReducer/useRef initializer crashes the server render and causes hydration mismatches. Seed a stable default and read the browser global inside a useEffect after mount, or guard with `typeof window !== "undefined"`.',
+    'Reading `window`/`document`/`navigator`/`localStorage`/`sessionStorage` during render or in a useState/useReducer/useRef initializer crashes the server render and causes hydration mismatches. Guard the read with `typeof window !== "undefined"` (e.g. a lazy initializer that falls back on the server), or read the browser global inside a useEffect after mount.',
   create: (context: RuleContext) => {
     const reportRead = (readNode: EsTreeNode, globalName: string): void => {
       if (!isOnRenderTimePath(readNode)) return;
