@@ -399,9 +399,11 @@ export const runInspect = <HooksR = never>(
 
     const project = yield* projectService.discover(scanDirectory);
     if (!isAnalyzableProject(project)) {
-      return yield* new ReactDoctorError({
-        reason: new NoReactDependency({ directory: scanDirectory }),
-      });
+      return yield* Effect.fail(
+        new ReactDoctorError({
+          reason: new NoReactDependency({ directory: scanDirectory }),
+        }),
+      );
     }
     const [repo, sha, defaultBranch] = yield* Effect.all(
       [
@@ -1005,14 +1007,14 @@ export const runInspect = <HooksR = never>(
       Effect.flatMap(ScanDeadlineMs, (scanDeadlineMs) =>
         scanProgram.pipe(
           Effect.timeout(scanDeadlineMs),
-          Effect.catchTag(
-            "TimeoutError",
-            () =>
+          Effect.catchTag("TimeoutError", () =>
+            Effect.fail(
               new ReactDoctorError({
                 reason: new ScanDeadlineExceeded({
                   detail: `${scanDeadlineMs / MILLISECONDS_PER_SECOND}s elapsed`,
                 }),
               }),
+            ),
           ),
         ),
       ),

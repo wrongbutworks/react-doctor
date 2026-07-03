@@ -57,6 +57,7 @@ const warnIfAiTrainingEnvironment = (): void => {
 // stack is built once here rather than duplicated per variant.
 const buildDiagnoseLayer = (
   config: ReactDoctorConfig | null,
+  layerOptions: DiagnoseLayerOptions,
   configOverrideTarget?: Pick<ResolvedScanTarget, "resolvedDirectory" | "configSourceDirectory">,
 ) => {
   const configLayer =
@@ -67,20 +68,29 @@ const buildDiagnoseLayer = (
           resolvedDirectory: configOverrideTarget.resolvedDirectory,
           configSourceDirectory: configOverrideTarget.configSourceDirectory,
         });
+  const deadCodeLayer = layerOptions.shouldRunDeadCode ? DeadCode.layerNode : DeadCode.layerOf([]);
+  const linterLayer = layerOptions.shouldRunLint ? Linter.layerOxlint : Linter.layerOf([]);
+  const scoreLayer = layerOptions.shouldComputeScore ? Score.layerHttp : Score.layerOf(null);
   return Layer.mergeAll(
     Project.layerNode,
     configLayer,
-    DeadCode.layerNode,
+    deadCodeLayer,
     Files.layerNode,
     Git.layerNode,
-    Linter.layerOxlint,
+    linterLayer,
     LintPartialFailures.layerLive,
     Progress.layerNoop,
     Reporter.layerNoop,
-    Score.layerHttp,
+    scoreLayer,
     config?.supplyChain?.enabled !== false ? SupplyChain.layerNode : SupplyChain.layerOf([]),
   );
 };
+
+interface DiagnoseLayerOptions {
+  readonly shouldComputeScore: boolean;
+  readonly shouldRunDeadCode: boolean;
+  readonly shouldRunLint: boolean;
+}
 
 const buildInspectProgram = (
   scanTarget: ResolvedScanTarget,
@@ -89,20 +99,30 @@ const buildInspectProgram = (
 ) => {
   const effectiveConfig = configOverride ?? scanTarget.userConfig;
   const includePaths = options.includePaths ?? [];
+  const shouldRunDeadCode = options.deadCode ?? effectiveConfig?.deadCode ?? true;
+  const shouldRunLint = options.lint ?? effectiveConfig?.lint ?? true;
+  const shouldComputeScore = effectiveConfig?.noScore !== true;
 
-  return runInspect({
-    directory: scanTarget.resolvedDirectory,
-    includePaths,
-    customRulesOnly: effectiveConfig?.customRulesOnly ?? false,
-    respectInlineDisables:
-      options.respectInlineDisables ?? effectiveConfig?.respectInlineDisables ?? true,
-    warnings: options.warnings ?? effectiveConfig?.warnings ?? DEFAULT_SHOW_WARNINGS,
-    adoptExistingLintConfig: effectiveConfig?.adoptExistingLintConfig ?? true,
-    ignoredTags: new Set(effectiveConfig?.ignore?.tags ?? []),
-    runDeadCode: options.deadCode ?? effectiveConfig?.deadCode ?? true,
-    isCi: false,
-    resolveLocalGithubViewerPermission: true,
-  });
+  return {
+    program: runInspect({
+      directory: scanTarget.resolvedDirectory,
+      includePaths,
+      customRulesOnly: effectiveConfig?.customRulesOnly ?? false,
+      respectInlineDisables:
+        options.respectInlineDisables ?? effectiveConfig?.respectInlineDisables ?? true,
+      warnings: options.warnings ?? effectiveConfig?.warnings ?? DEFAULT_SHOW_WARNINGS,
+      adoptExistingLintConfig: effectiveConfig?.adoptExistingLintConfig ?? true,
+      ignoredTags: new Set(effectiveConfig?.ignore?.tags ?? []),
+      runDeadCode: shouldRunDeadCode,
+      isCi: false,
+      resolveLocalGithubViewerPermission: shouldComputeScore,
+    }),
+    layerOptions: {
+      shouldComputeScore,
+      shouldRunDeadCode,
+      shouldRunLint,
+    },
+  };
 };
 
 const outputToDiagnoseResult = (
@@ -136,12 +156,12 @@ const diagnoseDirectory = async (
   warnIfAiTrainingEnvironment();
   const startTime = globalThis.performance.now();
   const scanTarget = await resolveScanTarget(directory);
-  const program = buildInspectProgram(scanTarget, options);
+  const { layerOptions, program } = buildInspectProgram(scanTarget, options);
 
   const output: InspectOutput = await Effect.runPromise(
     restoreLegacyThrow(
       program.pipe(
-        Effect.provide(buildDiagnoseLayer(scanTarget.userConfig)),
+        Effect.provide(buildDiagnoseLayer(scanTarget.userConfig, layerOptions)),
         Effect.provide(layerOtlp),
       ),
     ),
@@ -183,7 +203,7 @@ const diagnoseProject = async (
       projectConfig,
     );
 
-    const program = buildInspectProgram(
+    const { layerOptions, program } = buildInspectProgram(
       scanTarget,
       { ...baseOptions, ...perProjectOptions },
       effectiveConfig ?? undefined,
@@ -195,6 +215,7 @@ const diagnoseProject = async (
       batchConfig?.plugins !== undefined || projectConfig?.plugins !== undefined;
     const layer = buildDiagnoseLayer(
       effectiveConfig,
+      layerOptions,
       didOverrideConfig
         ? {
             resolvedDirectory: scanTarget.resolvedDirectory,

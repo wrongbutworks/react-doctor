@@ -68,7 +68,10 @@ const resolveTextBoundaryName = (
 
 const isTextHandlingComponent = (elementName: string): boolean => {
   if (REACT_NATIVE_TEXT_COMPONENTS.has(elementName)) return true;
-  return [...REACT_NATIVE_TEXT_COMPONENT_KEYWORDS].some((keyword) => elementName.includes(keyword));
+  for (const keyword of REACT_NATIVE_TEXT_COMPONENT_KEYWORDS) {
+    if (elementName.includes(keyword)) return true;
+  }
+  return false;
 };
 
 const isTransparentTextWrapper = (elementName: string | null): boolean =>

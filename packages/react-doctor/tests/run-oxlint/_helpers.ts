@@ -43,6 +43,7 @@ export const describeRules = (
       it(`${ruleName} (${testCase.fixture} → ${testCase.ruleSource})`, () => {
         const issues = findDiagnosticsByRule(getDiagnostics(), ruleName);
         expect(issues.length).toBeGreaterThan(0);
+        expect(issues.some((issue) => issue.filePath.includes(testCase.fixture))).toBe(true);
         if (testCase.severity) expect(issues[0].severity).toBe(testCase.severity);
         if (testCase.category) expect(issues[0].category).toBe(testCase.category);
       });

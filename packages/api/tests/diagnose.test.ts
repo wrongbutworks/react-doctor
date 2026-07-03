@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import os from "node:os";
 import * as path from "node:path";
-import { afterAll, describe, expect, it } from "vite-plus/test";
+import { afterAll, afterEach, describe, expect, it, vi } from "vite-plus/test";
 import {
   diagnose,
   NoReactDependencyError,
@@ -28,6 +28,10 @@ afterAll(() => {
   fs.rmSync(noReactTempDirectory, { recursive: true, force: true });
 });
 
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
 describe("diagnose", () => {
   it("returns a DiagnoseResult with the expected shape on basic-react", async () => {
     const result = await diagnose(path.join(FIXTURES_DIRECTORY, "basic-react"), {
@@ -41,6 +45,7 @@ describe("diagnose", () => {
     expect(result).toHaveProperty("elapsedMilliseconds");
     expect(result.project.reactMajorVersion).toBe(19);
     expect(Array.isArray(result.diagnostics)).toBe(true);
+    expect(result.diagnostics).toHaveLength(0);
   });
 
   it("throws NoReactDependencyError when the directory has package.json without react", async () => {
@@ -229,6 +234,21 @@ describe("diagnose({ projects })", () => {
 
     expect(result.projects).toHaveLength(1);
     expect(result.projects[0].ok).toBe(true);
+  });
+
+  it("honors batch noScore config without calling the score API", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      throw new Error("score API should not be called");
+    });
+    const result = await diagnose({
+      projects: [{ directory: path.join(FIXTURES_DIRECTORY, "basic-react") }],
+      config: { noScore: true },
+      deadCode: false,
+      lint: false,
+    });
+
+    expect(result.score).toBeNull();
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it("layers per-project configs on top of a batch-level config", async () => {

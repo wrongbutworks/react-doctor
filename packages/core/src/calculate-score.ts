@@ -3,6 +3,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { FETCH_TIMEOUT_MS, SCORE_API_URL } from "./constants.js";
 import type { Diagnostic, ProjectInfo, ScoreResult } from "./types/index.js";
+import { messageFromUnknown } from "./utils/message-from-unknown.js";
 
 // Score API response shape, including the optional per-rule `priority`/`tier`
 // payload. `Schema.Struct` ignores unknown fields, so extra keys (e.g.
@@ -39,8 +40,7 @@ const isAbortError = (error: unknown): boolean =>
 
 const describeFailure = (error: unknown): string => {
   if (isAbortError(error)) return `timed out after ${FETCH_TIMEOUT_MS / 1000}s`;
-  if (error instanceof Error && error.message) return error.message;
-  return String(error);
+  return messageFromUnknown(error);
 };
 
 export interface CalculateScoreOptions {

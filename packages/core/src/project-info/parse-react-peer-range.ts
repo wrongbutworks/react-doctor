@@ -4,11 +4,11 @@
 // of 17, so version-gated rules that require React 19+ are suppressed.
 import {
   getBranchLowestMajor,
-  getLowestDependencyMajor,
   hasUpperBoundComparator,
   normalizeDependencyVersion,
   splitDependencyVersionBranches,
 } from "./utils/dependency-version-spec.js";
+import { parseReactMajor } from "./parse-react-major.js";
 
 export const hasUpperBoundOnlyPeerRange = (range: string | null | undefined): boolean => {
   if (typeof range !== "string") return false;
@@ -24,7 +24,4 @@ export const hasUpperBoundOnlyPeerRange = (range: string | null | undefined): bo
   });
 };
 
-export const peerRangeMinMajor = (range: string | null | undefined): number | null => {
-  if (typeof range !== "string") return null;
-  return getLowestDependencyMajor(range);
-};
+export const peerRangeMinMajor = parseReactMajor;
