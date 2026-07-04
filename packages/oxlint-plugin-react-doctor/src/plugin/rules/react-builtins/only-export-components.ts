@@ -8,6 +8,7 @@ import { isEs6Component } from "../../utils/is-es6-component.js";
 import { isInsideFunctionScope } from "../../utils/is-inside-function-scope.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
 import { isReactComponentName } from "../../utils/is-react-component-name.js";
+import { stripParenExpression } from "../../utils/strip-paren-expression.js";
 import {
   ENTRY_POINT_BASENAMES,
   NON_FAST_REFRESH_PATH_SEGMENTS,
@@ -60,17 +61,6 @@ const resolveSettings = (
   };
 };
 
-const skipTsExpression = (expression: EsTreeNode): EsTreeNode => {
-  if (
-    expression.type === "TSAsExpression" ||
-    expression.type === "TSSatisfiesExpression" ||
-    expression.type === "TSNonNullExpression"
-  ) {
-    return skipTsExpression((expression as { expression: EsTreeNode }).expression);
-  }
-  return expression;
-};
-
 type ExportType =
   | { kind: "react-component" }
   | { kind: "non-component"; reportNode: EsTreeNode }
@@ -79,7 +69,7 @@ type ExportType =
 
 const isReactCreateContext = (initializer: EsTreeNode | null | undefined): boolean => {
   if (!initializer) return false;
-  const expression = skipTsExpression(initializer);
+  const expression = stripParenExpression(initializer);
   if (!isNodeOfType(expression, "CallExpression")) return false;
   const callee = expression.callee;
   if (isNodeOfType(callee, "Identifier") && callee.name === "createContext") return true;
@@ -156,7 +146,7 @@ const canBeReactFunctionComponent = (
   state: AnalyzerState,
 ): boolean => {
   if (!initializer) return false;
-  const expression = skipTsExpression(initializer);
+  const expression = stripParenExpression(initializer);
   if (
     isNodeOfType(expression, "ArrowFunctionExpression") ||
     isNodeOfType(expression, "FunctionExpression")
@@ -170,7 +160,7 @@ const canBeReactFunctionComponent = (
 };
 
 const isReactComponentInitializer = (expression: EsTreeNode, state: AnalyzerState): boolean => {
-  const stripped = skipTsExpression(expression);
+  const stripped = stripParenExpression(expression);
   if (isNodeOfType(stripped, "ArrowFunctionExpression")) return true;
   if (isNodeOfType(stripped, "FunctionExpression")) return Boolean(stripped.id);
   if (isNodeOfType(stripped, "Identifier")) return isReactComponentName(stripped.name);
@@ -193,7 +183,7 @@ const classifyExport = (
 ): ExportType => {
   // HoC-wrapped: `export const Foo = memo(...)` — treat as component.
   if (initializer) {
-    const expression = skipTsExpression(initializer);
+    const expression = stripParenExpression(initializer);
     // File-based-router route objects (`export const Route =
     // createFileRoute("/profile")({ component: ProfilePage })`) — the
     // router's bundler plugin owns HMR for these modules, so the route
@@ -235,7 +225,7 @@ const classifyExport = (
   // listing the hook in `allowExportNames` if their setup is older.
   if (/^use[A-Z]/.test(name)) return { kind: "allowed" };
   if (state.allowConstantExport && initializer) {
-    const expression = skipTsExpression(initializer);
+    const expression = stripParenExpression(initializer);
     if (
       isNodeOfType(expression, "Literal") ||
       isNodeOfType(expression, "TemplateLiteral") ||
@@ -252,7 +242,7 @@ const classifyExport = (
       : { kind: "non-component", reportNode };
   }
   if (initializer) {
-    const stripped = skipTsExpression(initializer);
+    const stripped = stripParenExpression(initializer);
     if (isNodeOfType(stripped, "CallExpression")) {
       if (isReactCreateContext(stripped)) {
         return { kind: "react-context", reportNode };
@@ -440,7 +430,7 @@ export const onlyExportComponents = defineRule({
           if (isNodeOfType(child, "ExportDefaultDeclaration")) {
             hasAnyExports = true;
             const declaration = child.declaration as EsTreeNode;
-            const stripped = skipTsExpression(declaration);
+            const stripped = stripParenExpression(declaration);
             if (
               isNodeOfType(stripped, "FunctionDeclaration") ||
               isNodeOfType(stripped, "FunctionExpression")
@@ -490,7 +480,7 @@ export const onlyExportComponents = defineRule({
                 Boolean(firstArg) &&
                 ((): boolean => {
                   if (!firstArg) return false;
-                  const expression = skipTsExpression(firstArg);
+                  const expression = stripParenExpression(firstArg);
                   if (isNodeOfType(expression, "Identifier")) return true;
                   if (isNodeOfType(expression, "FunctionExpression") && expression.id) return true;
                   if (

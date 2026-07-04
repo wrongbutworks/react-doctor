@@ -1,16 +1,9 @@
+import { LEGACY_SHADOW_STYLE_PROPERTIES } from "../../constants/react-native.js";
 import { defineRule } from "../../utils/define-rule.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { RuleContext } from "../../utils/rule-context.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
-
-const LEGACY_SHADOW_KEYS = new Set([
-  "shadowColor",
-  "shadowOffset",
-  "shadowOpacity",
-  "shadowRadius",
-  "elevation",
-]);
 
 const findLegacyShadowProperty = (
   objectExpression: EsTreeNodeOfType<"ObjectExpression">,
@@ -18,7 +11,7 @@ const findLegacyShadowProperty = (
   for (const property of objectExpression.properties ?? []) {
     if (!isNodeOfType(property, "Property")) continue;
     if (!isNodeOfType(property.key, "Identifier")) continue;
-    if (LEGACY_SHADOW_KEYS.has(property.key.name)) {
+    if (LEGACY_SHADOW_STYLE_PROPERTIES.has(property.key.name)) {
       return { keyName: property.key.name, node: property };
     }
   }

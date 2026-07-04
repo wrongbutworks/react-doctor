@@ -167,19 +167,9 @@ export const buildDiagnosticPipeline = (
     return getFileContext(diagnostic.filePath) !== "production";
   };
 
-  const isRuleIgnored = (ruleIdentifier: string): boolean => {
-    for (const ignored of ignoredRules) {
-      if (isSameRuleKey(ignored, ruleIdentifier)) return true;
-    }
-    return false;
-  };
-
-  // Alias-aware membership for the app-only set (mirrors `isRuleIgnored`): a
-  // future alias of `static-components` / `no-render-prop-children` is still
-  // caught by the library gate, where a raw `Set.has` would miss it.
-  const isAppOnlyRule = (ruleIdentifier: string): boolean => {
-    for (const appOnlyRuleKey of APP_ONLY_RULE_KEYS) {
-      if (isSameRuleKey(appOnlyRuleKey, ruleIdentifier)) return true;
+  const matchesRuleKey = (ruleIdentifier: string, candidates: Iterable<string>): boolean => {
+    for (const candidate of candidates) {
+      if (isSameRuleKey(candidate, ruleIdentifier)) return true;
     }
     return false;
   };
@@ -241,6 +231,7 @@ export const buildDiagnosticPipeline = (
           current = restampSeverity(current, explicitSeverityOverride);
         }
       }
+      const ruleIdentifier = `${current.plugin}/${current.rule}`;
 
       // App-only rules stay silent on library files unless the user opted the
       // rule in explicitly. Only a per-rule override counts: a broad category
@@ -248,8 +239,9 @@ export const buildDiagnosticPipeline = (
       // deliberate "I want static-components in my library" and must not leak
       // these rules back into published packages.
       if (explicitRuleOverride === undefined) {
-        const ruleKey = `${current.plugin}/${current.rule}`;
-        if (isAppOnlyRule(ruleKey) && isLibraryFile(current.filePath)) return null;
+        if (matchesRuleKey(ruleIdentifier, APP_ONLY_RULE_KEYS) && isLibraryFile(current.filePath)) {
+          return null;
+        }
       }
 
       // When the user opts out of warnings (`showWarnings` false), an
@@ -261,8 +253,7 @@ export const buildDiagnosticPipeline = (
       }
 
       if (userConfig) {
-        const ruleIdentifier = `${current.plugin}/${current.rule}`;
-        if (isRuleIgnored(ruleIdentifier)) return suppress(current, "config");
+        if (matchesRuleKey(ruleIdentifier, ignoredRules)) return suppress(current, "config");
         if (isFileIgnoredByPatterns(current.filePath, rootDirectory, ignoredFilePatterns)) {
           return null;
         }
@@ -276,7 +267,6 @@ export const buildDiagnosticPipeline = (
       if (respectInlineDisables && current.line > 0) {
         const lines = getFileLines(current.filePath);
         if (lines) {
-          const ruleIdentifier = `${current.plugin}/${current.rule}`;
           const diagnosticLineIndex = current.line - 1;
           const evaluation = evaluateSuppression(lines, diagnosticLineIndex, ruleIdentifier);
           if (evaluation.isSuppressed) return suppress(current, "inline");
