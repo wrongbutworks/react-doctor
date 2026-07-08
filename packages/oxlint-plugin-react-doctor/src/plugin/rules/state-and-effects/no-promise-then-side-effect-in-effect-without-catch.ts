@@ -29,7 +29,6 @@ const IMPORT_BINDING_TYPES = new Set([
   "ImportDefaultSpecifier",
   "ImportNamespaceSpecifier",
 ]);
-const NULLISH_EQUALITY_OPERATORS = new Set(["==", "==="]);
 const MAX_INITIATOR_RESOLUTION_DEPTH = 3;
 
 const MESSAGE =
@@ -291,19 +290,6 @@ const collectStateSideEffectNodes = (callback: EsTreeNode): EsTreeNode[] => {
     }
   });
   return sideEffectNodes;
-};
-
-const isNullishComparisonAgainstParam = (test: EsTreeNode, paramName: string): boolean => {
-  if (!isNodeOfType(test, "BinaryExpression")) return false;
-  if (!NULLISH_EQUALITY_OPERATORS.has(test.operator)) return false;
-  const left = stripParenExpression(test.left);
-  const right = stripParenExpression(test.right);
-  const isParamSide = (side: EsTreeNode): boolean =>
-    isNodeOfType(side, "Identifier") && side.name === paramName;
-  const isNullishSide = (side: EsTreeNode): boolean =>
-    (isNodeOfType(side, "Literal") && side.value === null) ||
-    (isNodeOfType(side, "Identifier") && side.name === "undefined");
-  return (isParamSide(left) && isNullishSide(right)) || (isNullishSide(left) && isParamSide(right));
 };
 
 // The guard test references the resolved param (through negation, member

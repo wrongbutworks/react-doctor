@@ -1,17 +1,18 @@
 // rule: no-array-index-as-key
 // weakness: ast-shape
-// source: cross-rule consistency audit (Irev-Dev/cadhub IdeConsole, ant-design ColorPresets)
-export const ConsoleMessages = ({ messages }: { messages: { message: string; time: Date }[] }) => (
+// source: cross-rule consistency audit (Irev-Dev/cadhub IdeConsole, ant-design ColorPresets).
+// NOTE: SAME-item composite keys (`${message} ${index}`) were re-litigated
+// in #1077 and now deliberately flag — reordering still remints every key.
+// Only identity rooted OUTSIDE the index-binding map, placeholder
+// constructions, and bounded numeric counters stay exempt.
+export const SectionRows = ({ sections }: { sections: { id: string; rows: string[] }[] }) => (
   <div>
-    {messages.map(({ message, time }, index) => (
-      <Entry key={`${message} ${index}`} time={time} />
-    ))}
-  </div>
-);
-export const ColorSwatches = ({ colors }: { colors: { toHexString: () => string }[] }) => (
-  <div>
-    {colors.map((presetColor, index) => (
-      <Swatch key={`preset-${index}-${presetColor.toHexString()}`} />
+    {sections.map((section) => (
+      <ul key={section.id}>
+        {section.rows.map((row, index) => (
+          <li key={`${section.id}-${index}`}>{row}</li>
+        ))}
+      </ul>
     ))}
   </div>
 );
@@ -29,5 +30,4 @@ export const PlaygroundGrid = ({ count }: { count: number }) => {
   }
   return <div>{cols}</div>;
 };
-declare const Entry: (props: { key?: string; time: Date }) => null;
 declare const Swatch: (props: { key?: string }) => null;

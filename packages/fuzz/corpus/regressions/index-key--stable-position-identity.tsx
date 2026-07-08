@@ -1,6 +1,9 @@
 // rule: no-array-index-as-key
 // weakness: library-idiom
-// source: FP-FIX history (string fragments: position IS the identity)
+// source: FP-FIX history (string characters: position IS the identity).
+// NOTE: `.split()` fragments were re-litigated in #1077 (bulwarkmail /
+// tracecat corpus misses) and now deliberately flag — only proven
+// single-string character slices stay exempt.
 export const MatchedName = ({ name }: { name: string }) => (
   <span>
     {[...name].map((char, index) => (
@@ -8,10 +11,10 @@ export const MatchedName = ({ name }: { name: string }) => (
     ))}
   </span>
 );
-export const Paragraphs = ({ body }: { body: string }) => (
-  <div>
-    {body.split("\n").map((line, index) => (
-      <p key={index}>{line}</p>
+export const Initials = ({ name }: { name: string }) => (
+  <span>
+    {Array.from(name).map((char, index) => (
+      <b key={index}>{char}</b>
     ))}
-  </div>
+  </span>
 );

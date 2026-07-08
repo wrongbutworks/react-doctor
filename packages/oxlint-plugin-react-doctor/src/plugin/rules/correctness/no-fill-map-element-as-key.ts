@@ -283,7 +283,7 @@ export const noFillMapElementAsKey = defineRule({
   title: "fill().map() first param is the element, not the index",
   severity: "warn",
   recommendation:
-    "After `.fill(value)` every element is identical, so a lone `.map((n) => …)` binds `n` to that value — whatever the parameter is named — and gives every child the same key. Add the index as the second parameter: `.map((_, index) => …)`.",
+    "After `.fill(value)` every element is identical, so a lone `.map((n) => ...)` binds `n` to that value (whatever the parameter is named) and gives every child the same key. Add the index as the second parameter: `.map((_, index) => ...)`.",
   create: (context: RuleContext) => ({
     JSXAttribute(node: EsTreeNodeOfType<"JSXAttribute">) {
       if (!isNodeOfType(node.name, "JSXIdentifier") || node.name.name !== "key") return;

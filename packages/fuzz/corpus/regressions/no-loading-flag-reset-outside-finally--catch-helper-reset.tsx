@@ -19,7 +19,7 @@ export const TemplateAttachment = () => {
       const result = await uploadMedia({ variables: { media: file } });
       setAttachmentURL(result.data.uploadMedia);
       setUploadingFile(false);
-    } catch (error) {
+    } catch {
       setNotification("File upload failed. Please try again.", "error");
       resetUploadState();
     }

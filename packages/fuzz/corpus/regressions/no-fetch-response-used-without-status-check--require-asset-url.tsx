@@ -5,7 +5,7 @@ export function loadHelpText(lang: string, setMarkdown: (text: string) => void) 
   let markdownPath = "";
   try {
     markdownPath = require(`../translations/${lang}.md`);
-  } catch (err) {
+  } catch {
     markdownPath = require("../translations/en-US.md");
   }
   fetch(markdownPath)
