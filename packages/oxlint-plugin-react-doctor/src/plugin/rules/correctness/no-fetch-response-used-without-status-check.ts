@@ -21,13 +21,6 @@ const MAX_URL_BINDING_RESOLUTION_DEPTH = 4;
 // Build-time scripts (Gatsby node APIs, *.config.* files) run once at
 // build and fail the build loudly on a bad response — not user-facing.
 const BUILD_SCRIPT_BASENAME_PATTERN = /^gatsby-(?:node|config|ssr|browser)\.|\.config\./i;
-// Docs-site demo files (`useHover.demo.tsx`) and test-utility directories
-// (`src/connector/testUtils/mockGremlinFetch.ts`) are non-production
-// surfaces the shared testlike-filename skip does not yet recognize —
-// mirrored locally until `.demo.` / `/testUtils/` are hoisted into
-// `is-testlike-filename.ts`.
-const DEMO_FILE_BASENAME_PATTERN = /\.demos?\./i;
-const TEST_UTILITY_PATH_SEGMENT_PATTERN = /\/(?:testutils|test-utils)\//i;
 
 const MESSAGE =
   "`fetch()` resolves (does not reject) on HTTP 4xx/5xx, so consuming this Response without checking `response.ok`/`response.status` parses an error body as success or crashes on a truthiness guard that is always true. Check `if (!response.ok) throw ...` before reading `.json()`/`.text()`/`.blob()`.";
@@ -99,9 +92,31 @@ const bindingIsAssignedFromRequire = (identifier: EsTreeNodeOfType<"Identifier">
   return assignedFromRequire;
 };
 
+// `new URL('./asset.ttf', import.meta.url)` — the bundler resolves the
+// relative specifier against the module's own emitted location (the next/og
+// font idiom), so the fetched bytes are the app's own bundled asset: no
+// meaningful HTTP status exists to branch on.
+const isImportMetaUrlAssetUrl = (expression: EsTreeNode): boolean => {
+  if (!isNodeOfType(expression, "NewExpression")) return false;
+  if (!isNodeOfType(expression.callee, "Identifier") || expression.callee.name !== "URL") {
+    return false;
+  }
+  const baseArgument = expression.arguments?.[1];
+  if (!baseArgument) return false;
+  const base = stripGroupingParens(baseArgument as EsTreeNode);
+  return (
+    isNodeOfType(base, "MemberExpression") &&
+    !base.computed &&
+    isNodeOfType(base.object, "MetaProperty") &&
+    isNodeOfType(base.property, "Identifier") &&
+    base.property.name === "url"
+  );
+};
+
 const isInertUrlProducer = (argument: EsTreeNode, depth: number): boolean => {
   if (depth > MAX_URL_BINDING_RESOLUTION_DEPTH) return false;
   const expression = stripGroupingParens(argument);
+  if (isImportMetaUrlAssetUrl(expression)) return true;
   if (isNodeOfType(expression, "CallExpression")) {
     const callee = stripGroupingParens(expression.callee as EsTreeNode);
     if (
@@ -669,8 +684,6 @@ export const noFetchResponseUsedWithoutStatusCheck = defineRule({
     const normalizedFilename = (context.filename ?? "").replaceAll("\\", "/");
     const basename = normalizedFilename.slice(normalizedFilename.lastIndexOf("/") + 1);
     if (BUILD_SCRIPT_BASENAME_PATTERN.test(basename)) return {};
-    if (DEMO_FILE_BASENAME_PATTERN.test(basename)) return {};
-    if (TEST_UTILITY_PATH_SEGMENT_PATTERN.test(normalizedFilename)) return {};
     return {
       CallExpression(node: EsTreeNodeOfType<"CallExpression">) {
         if (!isGlobalFetchCall(node)) return;

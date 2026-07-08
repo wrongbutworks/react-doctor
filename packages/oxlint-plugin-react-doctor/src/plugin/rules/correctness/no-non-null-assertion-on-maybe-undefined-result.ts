@@ -3,6 +3,7 @@ import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
 import { findEnclosingDeclarator } from "../../utils/find-enclosing-declarator.js";
 import { findVariableInitializer } from "../../utils/find-variable-initializer.js";
+import { getRootIdentifierName } from "../../utils/get-root-identifier-name.js";
 import { isAlwaysMatchingRegexPattern } from "../../utils/is-always-matching-regex-pattern.js";
 import { isAstNode } from "../../utils/is-ast-node.js";
 import { isEarlyExitStatement } from "../../utils/is-early-exit-statement.js";
@@ -10,6 +11,7 @@ import { isFunctionLike } from "../../utils/is-function-like.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
 import { isObjectOfMemberAccess } from "../../utils/is-object-of-member-access.js";
 import { isTestlikeFilename } from "../../utils/is-testlike-filename.js";
+import { singleExpressionPredicateBody } from "../../utils/single-expression-predicate-body.js";
 import { stripParenExpression } from "../../utils/strip-paren-expression.js";
 import { walkAst } from "../../utils/walk-ast.js";
 import type { RuleContext } from "../../utils/rule-context.js";
@@ -429,27 +431,6 @@ const isGuardedByPrecedingReceiverLengthExit = (
 // cannot miss by construction; abstain.
 const COLLECTION_PROJECTION_METHOD_NAMES = new Set(["map", "filter"]);
 
-const memberExpressionRootName = (expression: EsTreeNode): string | null => {
-  let current = expression;
-  while (isNodeOfType(current, "MemberExpression")) {
-    current = stripParenExpression(current.object as EsTreeNode);
-  }
-  return isNodeOfType(current, "Identifier") ? current.name : null;
-};
-
-const singleExpressionPredicateBody = (
-  predicate: EsTreeNodeOfType<"ArrowFunctionExpression"> | EsTreeNodeOfType<"FunctionExpression">,
-): EsTreeNode | null => {
-  let body: EsTreeNode = predicate.body;
-  if (isNodeOfType(body, "BlockStatement")) {
-    if (body.body.length !== 1) return null;
-    const onlyStatement = body.body[0];
-    if (!isNodeOfType(onlyStatement, "ReturnStatement") || !onlyStatement.argument) return null;
-    body = onlyStatement.argument;
-  }
-  return stripParenExpression(body);
-};
-
 const isEqualityLookupPredicate = (predicate: EsTreeNode): boolean => {
   if (
     !isNodeOfType(predicate, "ArrowFunctionExpression") &&
@@ -476,14 +457,14 @@ const isEqualityLookupPredicate = (predicate: EsTreeNode): boolean => {
   return sidePairs.some(([elementKeyRead, comparedValue]) => {
     if (
       !isNodeOfType(elementKeyRead, "MemberExpression") ||
-      memberExpressionRootName(elementKeyRead) !== parameter.name
+      getRootIdentifierName(elementKeyRead) !== parameter.name
     ) {
       return false;
     }
     if (isNodeOfType(comparedValue, "Identifier")) return comparedValue.name !== parameter.name;
     return (
       isNodeOfType(comparedValue, "MemberExpression") &&
-      memberExpressionRootName(comparedValue) !== parameter.name
+      getRootIdentifierName(comparedValue) !== parameter.name
     );
   });
 };

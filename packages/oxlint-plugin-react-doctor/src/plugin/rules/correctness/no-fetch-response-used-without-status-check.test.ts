@@ -679,4 +679,28 @@ describe("no-fetch-response-used-without-status-check", () => {
     );
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("stays quiet: bundled asset fetched via new URL(..., import.meta.url)", () => {
+    const result = runRule(
+      noFetchResponseUsedWithoutStatusCheck,
+      `export async function GET() {
+         const fontData = await fetch(
+           new URL('../../public/fonts/RobotoMono-Regular.ttf', import.meta.url),
+         ).then((res) => res.arrayBuffer());
+         return new ImageResponse(fontData);
+       }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags a new URL() fetch whose base is not import.meta.url", () => {
+    const result = runRule(
+      noFetchResponseUsedWithoutStatusCheck,
+      `export async function load(baseUrl) {
+         const data = await fetch(new URL('/api/items', baseUrl)).then((res) => res.json());
+         return data.items;
+       }`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
 });

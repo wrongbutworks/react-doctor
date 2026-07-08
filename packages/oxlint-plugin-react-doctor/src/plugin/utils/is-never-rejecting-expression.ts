@@ -7,7 +7,7 @@ import { stripParenExpression } from "./strip-paren-expression.js";
 import { walkAst } from "./walk-ast.js";
 import { walkOwnFunctionScope } from "./walk-own-function-scope.js";
 
-const subtreeContainsThrow = (root: EsTreeNode): boolean => {
+export const subtreeContainsThrow = (root: EsTreeNode): boolean => {
   let found = false;
   walkAst(root, (child: EsTreeNode) => {
     if (found) return false;
@@ -21,7 +21,10 @@ const subtreeContainsThrow = (root: EsTreeNode): boolean => {
 
 // A node is rejection-proof inside `functionBoundary` when it sits in a try
 // BLOCK whose catch handler exists and does not rethrow.
-const isInsideNonRethrowingTry = (node: EsTreeNode, functionBoundary: EsTreeNode): boolean => {
+export const isInsideNonRethrowingTry = (
+  node: EsTreeNode,
+  functionBoundary: EsTreeNode,
+): boolean => {
   let child: EsTreeNode = node;
   let ancestor: EsTreeNode | null | undefined = node.parent;
   while (ancestor && ancestor !== functionBoundary) {
@@ -75,7 +78,7 @@ export const isPromiseResolveCall = (node: EsTreeNode): boolean => {
 
 // True when the chain (walked through member links) carries a `.catch(...)`
 // or two-argument `.then(onOk, onErr)` rejection handler.
-const chainCarriesRejectionHandler = (node: EsTreeNode): boolean => {
+export const chainCarriesRejectionHandler = (node: EsTreeNode): boolean => {
   let cursor: EsTreeNode | null | undefined = stripParenExpression(node);
   while (cursor) {
     if (isNodeOfType(cursor, "ChainExpression")) {

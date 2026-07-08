@@ -2,8 +2,10 @@ import { defineRule } from "../../utils/define-rule.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
 import { findVariableInitializer } from "../../utils/find-variable-initializer.js";
+import { getRootIdentifierName } from "../../utils/get-root-identifier-name.js";
 import { isEarlyExitStatement } from "../../utils/is-early-exit-statement.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
+import { singleExpressionPredicateBody } from "../../utils/single-expression-predicate-body.js";
 import { stripParenExpression } from "../../utils/strip-paren-expression.js";
 import { unwrapNegativeGuardForm } from "../../utils/unwrap-negative-guard-form.js";
 import type { RuleContext } from "../../utils/rule-context.js";
@@ -245,27 +247,6 @@ const isGuardedByRepeatedFindTest = (findCall: EsTreeNodeOfType<"CallExpression"
   return false;
 };
 
-const memberExpressionRootName = (expression: EsTreeNode): string | null => {
-  let current = expression;
-  while (isNodeOfType(current, "MemberExpression")) {
-    current = stripParenExpression(current.object as EsTreeNode);
-  }
-  return isNodeOfType(current, "Identifier") ? current.name : null;
-};
-
-const singleExpressionPredicateBody = (
-  predicate: EsTreeNodeOfType<"ArrowFunctionExpression"> | EsTreeNodeOfType<"FunctionExpression">,
-): EsTreeNode | null => {
-  let body: EsTreeNode = predicate.body;
-  if (isNodeOfType(body, "BlockStatement")) {
-    if (body.body.length !== 1) return null;
-    const onlyStatement = body.body[0];
-    if (!isNodeOfType(onlyStatement, "ReturnStatement") || !onlyStatement.argument) return null;
-    body = onlyStatement.argument;
-  }
-  return stripParenExpression(body);
-};
-
 // The `.map(...)` sibling may live in the same component OR in a same-file
 // helper the component calls (`options={toOptionLabels(items)}`), so search
 // the whole module when a Program root is reachable. Matches the map
@@ -353,14 +334,14 @@ const isSelfDerivedEqualityLookup = (findCall: EsTreeNodeOfType<"CallExpression"
   const isEqualityLookupShape = sidePairs.some(([elementKeyRead, comparedValue]) => {
     if (
       !isNodeOfType(elementKeyRead, "MemberExpression") ||
-      memberExpressionRootName(elementKeyRead) !== parameter.name
+      getRootIdentifierName(elementKeyRead) !== parameter.name
     ) {
       return false;
     }
     if (isNodeOfType(comparedValue, "Identifier")) return comparedValue.name !== parameter.name;
     return (
       isNodeOfType(comparedValue, "MemberExpression") &&
-      memberExpressionRootName(comparedValue) !== parameter.name
+      getRootIdentifierName(comparedValue) !== parameter.name
     );
   });
   if (!isEqualityLookupShape) return false;
@@ -417,7 +398,7 @@ const equalityLookupKeyName = (predicate: EsTreeNode | undefined): string | null
       !side.computed &&
       isNodeOfType(side.property, "Identifier") &&
       isNodeOfType(stripParenExpression(side.object as EsTreeNode), "Identifier") &&
-      memberExpressionRootName(side) === parameter.name
+      getRootIdentifierName(side) === parameter.name
     ) {
       return side.property.name;
     }

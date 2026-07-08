@@ -1,8 +1,11 @@
 import { defineRule } from "../../utils/define-rule.js";
 import {
+  chainCarriesRejectionHandler,
+  isInsideNonRethrowingTry,
   isNeverRejectingHelperCall,
   isNonRejectingPromiseConstruction,
   isPromiseResolveCall,
+  subtreeContainsThrow,
 } from "../../utils/is-never-rejecting-expression.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
@@ -121,68 +124,6 @@ const isThunkActionDispatchCall = (callNode: EsTreeNodeOfType<"CallExpression">)
   return (
     Boolean(firstArgument) && isNodeOfType(stripParenExpression(firstArgument), "CallExpression")
   );
-};
-
-// A `.catch(...)` or two-argument `.then(onOk, onErr)` anywhere in the call
-// chain handles rejection inline, so the awaited chain resolves either way.
-const chainCarriesRejectionHandler = (node: EsTreeNode): boolean => {
-  let cursor: EsTreeNode | null = stripParenExpression(node);
-  while (cursor) {
-    if (isNodeOfType(cursor, "CallExpression")) {
-      const callee: EsTreeNode = cursor.callee;
-      if (
-        isNodeOfType(callee, "MemberExpression") &&
-        !callee.computed &&
-        isNodeOfType(callee.property, "Identifier")
-      ) {
-        if (callee.property.name === "catch") return true;
-        if (callee.property.name === "then" && (cursor.arguments?.length ?? 0) >= 2) return true;
-        cursor = callee.object;
-        continue;
-      }
-      return false;
-    }
-    if (isNodeOfType(cursor, "MemberExpression")) {
-      cursor = cursor.object;
-      continue;
-    }
-    if (isNodeOfType(cursor, "ChainExpression")) {
-      cursor = cursor.expression;
-      continue;
-    }
-    return false;
-  }
-  return false;
-};
-
-const subtreeContainsThrowStatement = (root: EsTreeNode): boolean => {
-  let didFindThrow = false;
-  walkAst(root, (child: EsTreeNode) => {
-    if (didFindThrow) return false;
-    if (isNodeOfType(child, "ThrowStatement")) {
-      didFindThrow = true;
-      return false;
-    }
-  });
-  return didFindThrow;
-};
-
-const isInsideNonRethrowingTryBlock = (node: EsTreeNode, functionBoundary: EsTreeNode): boolean => {
-  let child: EsTreeNode = node;
-  let ancestor: EsTreeNode | null | undefined = node.parent;
-  while (ancestor && ancestor !== functionBoundary) {
-    if (
-      isNodeOfType(ancestor, "TryStatement") &&
-      ancestor.block === child &&
-      ancestor.handler &&
-      !subtreeContainsThrowStatement(ancestor.handler)
-    ) {
-      return true;
-    }
-    child = ancestor;
-    ancestor = ancestor.parent ?? null;
-  }
-  return false;
 };
 
 const getUseCallbackWrappedFunction = (expression: EsTreeNode): EsTreeNode => {
@@ -314,7 +255,7 @@ const isSyncArrayLiteralMethodCall = (callNode: EsTreeNodeOfType<"CallExpression
   if (!SYNC_ARRAY_METHOD_NAMES.has(callee.property.name)) return false;
   const receiver = stripParenExpression(callee.object);
   if (!isNodeOfType(receiver, "ArrayExpression")) return false;
-  return (callNode.arguments ?? []).every((argument) => !subtreeContainsThrowStatement(argument));
+  return (callNode.arguments ?? []).every((argument) => !subtreeContainsThrow(argument));
 };
 
 const returnedExpressionCanReject = (expression: EsTreeNode, depth: number): boolean => {
@@ -400,12 +341,12 @@ const isNeverRejectingLocalAsyncHelperCall = (
       const awaited = child.argument ? stripParenExpression(child.argument) : null;
       const isSafeAwait =
         (awaited !== null && isNeverRejectingExpression(awaited, depth - 1)) ||
-        isInsideNonRethrowingTryBlock(child, helper);
+        isInsideNonRethrowingTry(child, helper);
       if (!isSafeAwait) isRejectionProof = false;
       return;
     }
     if (isNodeOfType(child, "ThrowStatement")) {
-      if (!isInsideNonRethrowingTryBlock(child, helper)) isRejectionProof = false;
+      if (!isInsideNonRethrowingTry(child, helper)) isRejectionProof = false;
       return;
     }
     if (isNodeOfType(child, "ReturnStatement") && child.argument) {
