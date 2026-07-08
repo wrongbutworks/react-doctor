@@ -2,6 +2,7 @@ import { defineRule } from "../../utils/define-rule.js";
 import { findVariableInitializer } from "../../utils/find-variable-initializer.js";
 import { getCalleeName } from "../../utils/get-callee-name.js";
 import { isEarlyExitStatement } from "../../utils/is-early-exit-statement.js";
+import { isFunctionLike } from "../../utils/is-function-like.js";
 import { isInsideTryStatement } from "../../utils/is-inside-try-statement.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
 import { stripParenExpression } from "../../utils/strip-paren-expression.js";
@@ -9,6 +10,16 @@ import { walkAst } from "../../utils/walk-ast.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
 import type { RuleContext } from "../../utils/rule-context.js";
+import type { RuleVisitors } from "../../utils/rule-visitors.js";
+
+// Unit tests and Playwright/Cypress e2e page objects build regexes from
+// developer-typed constants (test queries, test-id segments), never from
+// runtime user input, so the rule's threat model does not apply. The
+// `test-noise` tag covers most testlike files; this raw-path check
+// additionally catches `tests/e2e/…` trees nested under a package source
+// root, which the tag's source-root scoping treats as production.
+const TEST_CONTEXT_FILE_PATTERN =
+  /(\.test\.|\.spec\.|__tests__|(^|\/)(test|tests|e2e|cypress|playwright)\/)/;
 
 // Identifier names that resolve the RegExp source to a user/config search,
 // filter, highlight, or query term (the values that carry unescaped regex
@@ -283,6 +294,105 @@ const identifierResolvesToEscapedValue = (
   return initializerLooksEscaped(binding.initializer, remainingHops);
 };
 
+const REGEXP_METACHARACTER_PATTERN = /[\\^$.*+?()[\]{}|]/;
+
+const literalStringValue = (node: EsTreeNode): string | null => {
+  const inner = stripParenExpression(node);
+  if (isNodeOfType(inner, "Literal") && typeof inner.value === "string") return inner.value;
+  if (isNodeOfType(inner, "TemplateLiteral") && (inner.expressions?.length ?? 0) === 0) {
+    return inner.quasis[0]?.value.cooked ?? null;
+  }
+  return null;
+};
+
+const isDirectlyExported = (declarationNode: EsTreeNode): boolean => {
+  let ancestor: EsTreeNode | null | undefined = declarationNode.parent;
+  while (ancestor) {
+    if (
+      isNodeOfType(ancestor, "ExportNamedDeclaration") ||
+      isNodeOfType(ancestor, "ExportDefaultDeclaration")
+    ) {
+      return true;
+    }
+    if (isNodeOfType(ancestor, "Program")) return false;
+    ancestor = ancestor.parent ?? null;
+  }
+  return false;
+};
+
+// A parameter of a module-private function whose EVERY same-file call site
+// passes a metacharacter-free string literal (`parseLengthAfter(text,
+// "margin")`) carries only developer-typed characters, never a runtime
+// search term — the "keyword" in the parameter name is the caller's fixed
+// vocabulary. Bails when the function is exported or its name escapes call
+// position (either lets unseen callers pass dynamic values).
+const isParameterFedOnlyMetacharacterFreeLiterals = (
+  identifier: EsTreeNodeOfType<"Identifier">,
+): boolean => {
+  const binding = findVariableInitializer(identifier, identifier.name);
+  if (!binding || binding.initializer !== null) return false;
+  const owner = binding.scopeOwner;
+  if (!isFunctionLike(owner)) return false;
+  const parameterIndex = (owner.params ?? []).findIndex(
+    (param) => param === binding.bindingIdentifier,
+  );
+  if (parameterIndex < 0) return false;
+  let functionName: string | null = null;
+  let declarationIdentifier: EsTreeNode | null = null;
+  let declarationNode: EsTreeNode = owner;
+  if (isNodeOfType(owner, "FunctionDeclaration") && owner.id) {
+    functionName = owner.id.name;
+    declarationIdentifier = owner.id;
+  } else {
+    const ownerParent = owner.parent;
+    if (
+      ownerParent &&
+      isNodeOfType(ownerParent, "VariableDeclarator") &&
+      isNodeOfType(ownerParent.id, "Identifier")
+    ) {
+      functionName = ownerParent.id.name;
+      declarationIdentifier = ownerParent.id;
+      declarationNode = ownerParent;
+    }
+  }
+  if (!functionName || !declarationIdentifier) return false;
+  if (isDirectlyExported(declarationNode)) return false;
+  let programRoot: EsTreeNode = owner;
+  while (programRoot.parent) programRoot = programRoot.parent;
+  let doesNameEscapeCallPosition = false;
+  const callSiteArguments: (EsTreeNode | undefined)[] = [];
+  walkAst(programRoot, (child: EsTreeNode) => {
+    if (doesNameEscapeCallPosition) return false;
+    if (isNodeOfType(child, "ExportSpecifier")) {
+      const local = child.local;
+      if (isNodeOfType(local, "Identifier") && local.name === functionName) {
+        doesNameEscapeCallPosition = true;
+        return false;
+      }
+    }
+    if (!isNodeOfType(child, "Identifier") || child.name !== functionName) return;
+    if (child === declarationIdentifier) return;
+    if (isPropertyNamePosition(child)) return;
+    const referenceParent = child.parent;
+    if (
+      referenceParent &&
+      isNodeOfType(referenceParent, "CallExpression") &&
+      referenceParent.callee === child
+    ) {
+      callSiteArguments.push(referenceParent.arguments?.[parameterIndex]);
+      return;
+    }
+    doesNameEscapeCallPosition = true;
+    return false;
+  });
+  if (doesNameEscapeCallPosition || callSiteArguments.length === 0) return false;
+  return callSiteArguments.every((callArgument) => {
+    if (!callArgument || isNodeOfType(callArgument, "SpreadElement")) return false;
+    const literalValue = literalStringValue(callArgument);
+    return literalValue !== null && !REGEXP_METACHARACTER_PATTERN.test(literalValue);
+  });
+};
+
 // A dominating guard already shape-tested the term (`if
 // (!/^[\w\s]*$/.test(query)) return value.includes(query);`) — the
 // construction only runs on metacharacter-free values.
@@ -346,9 +456,11 @@ export const noUnescapedDynamicStringInRegexp = defineRule({
   title: "Unescaped dynamic string in RegExp constructor",
   severity: "warn",
   category: "Correctness",
+  tags: ["test-noise"],
   recommendation:
     "A search/filter/highlight term dropped straight into `new RegExp(...)` lets its regex metacharacters act as operators, so a user typing `.` or `(` over-matches or throws. Escape the value with an `escapeRegExp` helper before constructing the pattern.",
-  create: (context: RuleContext) => {
+  create: (context: RuleContext): RuleVisitors => {
+    if (TEST_CONTEXT_FILE_PATTERN.test(context.filename ?? "")) return {};
     const reportUnescapedConstruction = (
       node: EsTreeNodeOfType<"CallExpression"> | EsTreeNodeOfType<"NewExpression">,
     ): void => {
@@ -360,7 +472,8 @@ export const noUnescapedDynamicStringInRegexp = defineRule({
       const hasUnescapedSearchTerm = rawSearchTermIdentifiers.some(
         (identifier) =>
           !identifierResolvesToEscapedValue(identifier, INITIALIZER_RESOLUTION_HOPS) &&
-          !isShapeTestedByDominatingGuard(node, identifier.name),
+          !isShapeTestedByDominatingGuard(node, identifier.name) &&
+          !isParameterFedOnlyMetacharacterFreeLiterals(identifier),
       );
       if (!hasUnescapedSearchTerm) return;
       if (isInsideTryStatement(node, { region: "block" })) return;

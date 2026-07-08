@@ -4,6 +4,7 @@ import { walkAst } from "../../utils/walk-ast.js";
 import { isFunctionLike } from "../../utils/is-function-like.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
+import { findProgramRoot } from "../../utils/find-program-root.js";
 import { findVariableInitializer } from "../../utils/find-variable-initializer.js";
 import { flattenLogicalAndChain } from "../../utils/flatten-logical-and-chain.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
@@ -113,6 +114,248 @@ const memberPathOf = (node: EsTreeNode): string | null => {
   if (!isNodeOfType(current, "Identifier")) return null;
   parts.unshift(current.name);
   return parts.join(".");
+};
+
+// How many identifier-initializer hops the provably-positive guards
+// follow before giving up (`isExpanded` → `isExpandable && …` →
+// `children.length > 0` is three).
+const PROVENANCE_HOP_LIMIT = 6;
+
+const numericLiteralValue = (node: EsTreeNode): number | null => {
+  const stripped = stripParenExpression(node);
+  if (isNodeOfType(stripped, "Literal") && typeof stripped.value === "number") {
+    return stripped.value;
+  }
+  return null;
+};
+
+// `path > 0`, `path >= 1`, `path !== 0`, `path === 3` and their mirrored
+// forms all prove the (non-negative) length/size at `targetPath` is
+// positive, so the `&&` can never short-circuit to a rendered `0`.
+const comparisonProvesPositive = (
+  binary: EsTreeNodeOfType<"BinaryExpression">,
+  targetPath: string,
+): boolean => {
+  const provesForOperandSide = (
+    pathSide: EsTreeNode,
+    literalSide: EsTreeNode,
+    greaterOperator: string,
+    greaterOrEqualOperator: string,
+  ): boolean => {
+    if (memberPathOf(pathSide) !== targetPath) return false;
+    const literalValue = numericLiteralValue(literalSide);
+    if (literalValue === null) return false;
+    if (binary.operator === greaterOperator) return literalValue >= 0;
+    if (binary.operator === greaterOrEqualOperator) return literalValue >= 1;
+    if (binary.operator === "!==" || binary.operator === "!=") return literalValue === 0;
+    if (binary.operator === "===" || binary.operator === "==") return literalValue >= 1;
+    return false;
+  };
+  return (
+    provesForOperandSide(binary.left as EsTreeNode, binary.right, ">", ">=") ||
+    provesForOperandSide(binary.right, binary.left as EsTreeNode, "<", "<=")
+  );
+};
+
+// A dominating condition proves the length positive when it is (or
+// resolves through identifier initializers to) a `targetPath > 0`-style
+// comparison, possibly nested in `&&` — the cloudscape tree-item shape:
+// `isExpandable = children.length > 0`, `isExpanded = isExpandable && …`,
+// `{isExpanded && children.length && <ul/>}`.
+const conditionProvesPositive = (
+  condition: EsTreeNode,
+  targetPath: string,
+  remainingHops: number,
+): boolean => {
+  if (remainingHops <= 0) return false;
+  const stripped = stripParenExpression(condition);
+  if (isNodeOfType(stripped, "BinaryExpression")) {
+    return comparisonProvesPositive(stripped, targetPath);
+  }
+  if (isNodeOfType(stripped, "LogicalExpression") && stripped.operator === "&&") {
+    return (
+      conditionProvesPositive(stripped.left, targetPath, remainingHops - 1) ||
+      conditionProvesPositive(stripped.right, targetPath, remainingHops - 1)
+    );
+  }
+  if (isNodeOfType(stripped, "Identifier")) {
+    const binding = findVariableInitializer(stripped, stripped.name);
+    if (!binding?.initializer) return false;
+    return conditionProvesPositive(binding.initializer, targetPath, remainingHops - 1);
+  }
+  return false;
+};
+
+const isNonEmptyArrayLiteral = (node: EsTreeNode): boolean => {
+  const stripped = stripParenExpression(node);
+  return (
+    isNodeOfType(stripped, "ArrayExpression") &&
+    stripped.elements.some((element) => element && !isNodeOfType(element, "SpreadElement"))
+  );
+};
+
+const isReferencedAnywhereBesidesBinding = (
+  bindingIdentifier: EsTreeNode,
+  name: string,
+): boolean => {
+  const programRoot = findProgramRoot(bindingIdentifier);
+  if (!programRoot) return true;
+  let isReferenced = false;
+  walkAst(programRoot, (child: EsTreeNode) => {
+    if (isReferenced) return false;
+    if (child === bindingIdentifier) return;
+    const isMatchingIdentifier =
+      (isNodeOfType(child, "Identifier") || isNodeOfType(child, "JSXIdentifier")) &&
+      child.name === name;
+    if (isMatchingIdentifier) {
+      isReferenced = true;
+      return false;
+    }
+  });
+  return isReferenced;
+};
+
+// `const [features, setFeatures] = useState([…nonEmpty…])` where the
+// setter is never referenced: the array can never change, so its length
+// is a constant positive number and no `0` can leak.
+const isConstantNonEmptyUseStateArray = (receiver: EsTreeNodeOfType<"Identifier">): boolean => {
+  const binding = findVariableInitializer(receiver, receiver.name);
+  if (!binding) return false;
+  const pattern = binding.bindingIdentifier.parent;
+  if (!pattern || !isNodeOfType(pattern, "ArrayPattern")) return false;
+  if (pattern.elements[0] !== binding.bindingIdentifier) return false;
+  const declarator = pattern.parent;
+  if (!declarator || !isNodeOfType(declarator, "VariableDeclarator") || !declarator.init) {
+    return false;
+  }
+  const useStateCall = stripParenExpression(declarator.init);
+  if (!isHookCallNamed(useStateCall, "useState") || !isNodeOfType(useStateCall, "CallExpression")) {
+    return false;
+  }
+  const initialValue = useStateCall.arguments[0];
+  if (!initialValue || !isNonEmptyArrayLiteral(initialValue)) return false;
+  const setterElement = pattern.elements[1];
+  if (!setterElement) return true;
+  if (!isNodeOfType(setterElement, "Identifier")) return false;
+  return !isReferencedAnywhereBesidesBinding(setterElement, setterElement.name);
+};
+
+// The function's own top-level returns — nested callbacks' returns are
+// theirs, not this function's.
+const collectOwnReturnExpressions = (functionNode: EsTreeNode): EsTreeNode[] => {
+  if (!isFunctionLike(functionNode) || !functionNode.body) return [];
+  const body = functionNode.body as EsTreeNode;
+  if (!isNodeOfType(body, "BlockStatement")) return [body];
+  const returnedExpressions: EsTreeNode[] = [];
+  walkAst(body, (child: EsTreeNode) => {
+    if (isFunctionLike(child)) return false;
+    if (isNodeOfType(child, "ReturnStatement")) {
+      // A bare `return;` yields undefined — nullish, so provably safe.
+      if (child.argument) returnedExpressions.push(child.argument);
+      return false;
+    }
+  });
+  return returnedExpressions;
+};
+
+const isNullishExpression = (node: EsTreeNode): boolean => {
+  const stripped = stripParenExpression(node);
+  if (isNodeOfType(stripped, "Identifier")) return stripped.name === "undefined";
+  if (isNodeOfType(stripped, "Literal")) return stripped.value === null;
+  return isNodeOfType(stripped, "UnaryExpression") && stripped.operator === "void";
+};
+
+const unwrapCallableFunction = (node: EsTreeNode): EsTreeNode | null => {
+  const stripped = stripParenExpression(node);
+  if (isFunctionLike(stripped)) return stripped;
+  if (isHookCallNamed(stripped, "useCallback") && isNodeOfType(stripped, "CallExpression")) {
+    const callbackArgument = stripped.arguments[0];
+    if (callbackArgument && isFunctionLike(stripParenExpression(callbackArgument))) {
+      return stripParenExpression(callbackArgument);
+    }
+  }
+  return null;
+};
+
+// Every value this expression can take is either nullish (renders
+// nothing) or an array proven non-empty (`allGlobalErrors.length > 0 ?
+// allGlobalErrors : undefined`), followed through ternaries, identifier
+// initializers, `useMemo` results, and calls to in-file (`useCallback`)
+// functions — the remix-forms `globalErrorsToDisplay?.length` shape,
+// where `?.length` is undefined or positive and a literal `0` can never
+// leak.
+const isProvablyNonEmptyOrNullish = (node: EsTreeNode, remainingHops: number): boolean => {
+  if (remainingHops <= 0) return false;
+  const stripped = stripParenExpression(node);
+  if (isNullishExpression(stripped)) return true;
+  if (isNonEmptyArrayLiteral(stripped)) return true;
+  if (isNodeOfType(stripped, "ConditionalExpression")) {
+    const branchIsProvable = (branch: EsTreeNode): boolean => {
+      if (isProvablyNonEmptyOrNullish(branch, remainingHops - 1)) return true;
+      const branchPath = memberPathOf(branch);
+      const test = stripParenExpression(stripped.test);
+      return Boolean(
+        branchPath &&
+        isNodeOfType(test, "BinaryExpression") &&
+        comparisonProvesPositive(test, `${branchPath}.length`),
+      );
+    };
+    return (
+      branchIsProvable(stripped.consequent) &&
+      isProvablyNonEmptyOrNullish(stripped.alternate, remainingHops - 1)
+    );
+  }
+  if (isNodeOfType(stripped, "Identifier")) {
+    const binding = findVariableInitializer(stripped, stripped.name);
+    if (!binding?.initializer) return false;
+    const initializer = stripParenExpression(binding.initializer);
+    if (isHookCallNamed(initializer, "useMemo") && isNodeOfType(initializer, "CallExpression")) {
+      const memoCallback = initializer.arguments[0];
+      if (!memoCallback) return false;
+      const returnedExpressions = collectOwnReturnExpressions(stripParenExpression(memoCallback));
+      return returnedExpressions.every((returned) =>
+        isProvablyNonEmptyOrNullish(returned, remainingHops - 1),
+      );
+    }
+    return isProvablyNonEmptyOrNullish(initializer, remainingHops - 1);
+  }
+  if (isNodeOfType(stripped, "CallExpression")) {
+    const callee = stripParenExpression(stripped.callee);
+    if (!isNodeOfType(callee, "Identifier")) return false;
+    const binding = findVariableInitializer(callee, callee.name);
+    if (!binding?.initializer) return false;
+    const callableFunction = unwrapCallableFunction(binding.initializer);
+    if (!callableFunction) return false;
+    const returnedExpressions = collectOwnReturnExpressions(callableFunction);
+    return returnedExpressions.every((returned) =>
+      isProvablyNonEmptyOrNullish(returned, remainingHops - 1),
+    );
+  }
+  return false;
+};
+
+// A `.length`/`.size` guard whose value is provably positive (or the
+// receiver provably non-empty-or-nullish) at this branch cannot render
+// a literal `0`, so the finding would be wrong.
+const guardedCountCannotBeZero = (
+  leakingOperand: EsTreeNode,
+  precedingOperands: EsTreeNode[],
+): boolean => {
+  const strippedOperand = stripParenExpression(leakingOperand);
+  if (!isNodeOfType(strippedOperand, "MemberExpression")) return false;
+  const leakPath = memberPathOf(strippedOperand);
+  if (
+    leakPath &&
+    precedingOperands.some((preceding) =>
+      conditionProvesPositive(preceding, leakPath, PROVENANCE_HOP_LIMIT),
+    )
+  ) {
+    return true;
+  }
+  const receiver = stripParenExpression(strippedOperand.object as EsTreeNode);
+  if (!isNodeOfType(receiver, "Identifier")) return false;
+  if (isConstantNonEmptyUseStateArray(receiver)) return true;
+  return isProvablyNonEmptyOrNullish(receiver, PROVENANCE_HOP_LIMIT);
 };
 
 // `{errors.length && <p>{errors.length.message}</p>}` — the render side
@@ -344,6 +587,8 @@ export const jsxNumericAndLeakedRender = defineRule({
         .find((guardOperand) => isSyntacticallyNumeric(guardOperand));
       if (!leakingOperand) return;
       if (renderSideReadsMemberOfGuardPath(leakingOperand, renderOperand)) return;
+      const precedingOperands = operands.slice(0, operands.indexOf(leakingOperand));
+      if (guardedCountCannotBeZero(leakingOperand, precedingOperands)) return;
 
       context.report({
         node: leakingOperand,

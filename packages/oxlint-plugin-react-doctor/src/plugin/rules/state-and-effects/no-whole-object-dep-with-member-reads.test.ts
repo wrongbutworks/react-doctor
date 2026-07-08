@@ -204,6 +204,10 @@ describe("no-whole-object-dep-with-member-reads", () => {
     expect(result.diagnostics).toHaveLength(0);
   });
 
+  it("carries the test-noise tag so test-fixture components are pipeline-skipped", () => {
+    expect(noWholeObjectDepWithMemberReads.tags).toContain("test-noise");
+  });
+
   it("does not flag when props is used bare in an equality check", () => {
     const result = runRule(
       noWholeObjectDepWithMemberReads,

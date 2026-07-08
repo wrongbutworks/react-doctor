@@ -478,6 +478,37 @@ describe("no-enter-submit-without-ime-composition-guard", () => {
     expect(result.diagnostics).toHaveLength(1);
   });
 
+  it("still flags a validity-gated Enter commit (validation gates are not composition guards)", () => {
+    const result = runRule(
+      noEnterSubmitWithoutImeCompositionGuard,
+      `const CalendarNameField = ({ isValid, onSave, name }) => (
+         <input
+           type="text"
+           onKeyDown={(e) => { if (e.key === 'Enter' && isValid) onSave(name); }}
+         />
+       );`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags an error-state-gated Enter commit (bulwarkmail sub-address accepted-noise shape)", () => {
+    const result = runRule(
+      noEnterSubmitWithoutImeCompositionGuard,
+      `const TagField = ({ tag, error, handleUseAddress }) => (
+         <input
+           type="text"
+           onKeyDown={(e) => {
+             if (e.key === 'Enter' && tag && !error) {
+               e.preventDefault();
+               handleUseAddress();
+             }
+           }}
+         />
+       );`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
   it("still flags a timer-named handler despite containing the letters i-m-e", () => {
     const result = runRule(
       noEnterSubmitWithoutImeCompositionGuard,

@@ -1,6 +1,7 @@
 import { defineRule } from "../../utils/define-rule.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
+import { findVariableInitializer } from "../../utils/find-variable-initializer.js";
 import { isEarlyExitStatement } from "../../utils/is-early-exit-statement.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
 import { stripParenExpression } from "../../utils/strip-paren-expression.js";
@@ -29,7 +30,17 @@ const FUNCTION_NODE_TYPES = new Set<string>([
   "FunctionExpression",
   "FunctionDeclaration",
 ]);
-const STRUCTURAL_IDENTITY_IGNORED_KEYS = new Set(["parent", "loc", "range", "start", "end"]);
+// `optional` is ignored so the `?.` spelling of a guard proves the plain
+// spelling of the deref: `apps?.find(f)?.name && <span>{apps.find(f).name}
+// </span>` — the truthy guard already proves both the receiver and the hit.
+const STRUCTURAL_IDENTITY_IGNORED_KEYS = new Set([
+  "parent",
+  "loc",
+  "range",
+  "start",
+  "end",
+  "optional",
+]);
 
 // A callback-shaped first argument distinguishes `Array.prototype.find` from
 // ORM query builders like `Model.find({ where: ... })` (an ObjectExpression
@@ -47,12 +58,15 @@ const hasArrayCallbackFirstArgument = (node: EsTreeNodeOfType<"CallExpression">)
   }
   // A bare identifier is a predicate reference (`items.find(isActive)`), unless
   // it is PascalCase — a component selector (`wrapper.find(Modal)`), not a
-  // predicate — except for known global predicates like `Boolean`.
-  return (
-    isNodeOfType(firstArgument, "Identifier") &&
-    (KNOWN_GLOBAL_PREDICATE_NAMES.has(firstArgument.name) ||
-      !PASCAL_CASE_IDENTIFIER_PATTERN.test(firstArgument.name))
-  );
+  // predicate — except for known global predicates like `Boolean`. An
+  // identifier that resolves to an object literal is a query filter
+  // (`collection.find(filter)`, a MongoDB cursor), not a callback.
+  if (!isNodeOfType(firstArgument, "Identifier")) return false;
+  if (KNOWN_GLOBAL_PREDICATE_NAMES.has(firstArgument.name)) return true;
+  if (PASCAL_CASE_IDENTIFIER_PATTERN.test(firstArgument.name)) return false;
+  const binding = findVariableInitializer(firstArgument, firstArgument.name);
+  const initializer = binding?.initializer ? stripParenExpression(binding.initializer) : null;
+  return !(initializer && isNodeOfType(initializer, "ObjectExpression"));
 };
 
 // `_.chain(users).filter(...).find(cb)` returns a LodashWrapper (unwrapped
@@ -353,6 +367,136 @@ const isSelfDerivedEqualityLookup = (findCall: EsTreeNodeOfType<"CallExpression"
   return enclosingScopeMapsOverReceiver(findCall, receiver);
 };
 
+// Dotted receiver path tolerant of `?.` / `!` (`wishlist?.customerProductListItems`
+// and `wishlist.customerProductListItems` compare equal); null for computed
+// or non-Identifier-rooted shapes.
+const optionalTolerantMemberPath = (node: EsTreeNode): string | null => {
+  const target = stripParenExpression(node);
+  if (isNodeOfType(target, "ChainExpression") || isNodeOfType(target, "TSNonNullExpression")) {
+    return optionalTolerantMemberPath(target.expression as EsTreeNode);
+  }
+  if (isNodeOfType(target, "Identifier")) return target.name;
+  if (
+    isNodeOfType(target, "MemberExpression") &&
+    !target.computed &&
+    isNodeOfType(target.property, "Identifier")
+  ) {
+    const objectPath = optionalTolerantMemberPath(target.object as EsTreeNode);
+    return objectPath === null ? null : `${objectPath}.${target.property.name}`;
+  }
+  return null;
+};
+
+// The element property an equality-lookup predicate keys on
+// (`(i) => i.productId === product.productId` → "productId"); null when the
+// predicate is not a single-expression `param.key === value` comparison.
+const equalityLookupKeyName = (predicate: EsTreeNode | undefined): string | null => {
+  if (
+    !isNodeOfType(predicate, "ArrowFunctionExpression") &&
+    !isNodeOfType(predicate, "FunctionExpression")
+  ) {
+    return null;
+  }
+  const parameter = predicate.params?.[0];
+  if (!isNodeOfType(parameter, "Identifier")) return null;
+  const predicateBody = singleExpressionPredicateBody(predicate);
+  if (
+    !predicateBody ||
+    !isNodeOfType(predicateBody, "BinaryExpression") ||
+    predicateBody.operator !== "==="
+  ) {
+    return null;
+  }
+  const sides = [
+    stripParenExpression(predicateBody.left as EsTreeNode),
+    stripParenExpression(predicateBody.right as EsTreeNode),
+  ];
+  for (const side of sides) {
+    if (
+      isNodeOfType(side, "MemberExpression") &&
+      !side.computed &&
+      isNodeOfType(side.property, "Identifier") &&
+      isNodeOfType(stripParenExpression(side.object as EsTreeNode), "Identifier") &&
+      memberExpressionRootName(side) === parameter.name
+    ) {
+      return side.property.name;
+    }
+  }
+  return null;
+};
+
+// The candidate guard find's value is coerced to a boolean: under a `!`
+// (`const isInWishlist = !!items?.find(...)`) or in a branch-test position.
+const isBooleanConsumedExpression = (callNode: EsTreeNode): boolean => {
+  let child: EsTreeNode = callNode;
+  let parent = child.parent ?? null;
+  while (parent) {
+    if (isNodeOfType(parent, "UnaryExpression") && parent.operator === "!") return true;
+    if (
+      isNodeOfType(parent, "ChainExpression") ||
+      isNodeOfType(parent, "LogicalExpression") ||
+      GROUPING_EXPRESSION_TYPES.has(parent.type)
+    ) {
+      child = parent;
+      parent = parent.parent ?? null;
+      continue;
+    }
+    if (
+      isNodeOfType(parent, "IfStatement") ||
+      isNodeOfType(parent, "ConditionalExpression") ||
+      isNodeOfType(parent, "WhileStatement")
+    ) {
+      return (parent as { test?: EsTreeNode }).test === child;
+    }
+    return false;
+  }
+  return false;
+};
+
+// Derived-membership-state idiom: the module elsewhere boolean-tests a
+// DIFFERENT find over the same receiver path keyed on the same element
+// property (`const isInWishlist = !!wishlist?.customerProductListItems?.find(
+// (item) => item.productId === productId)`), and that state gates the path
+// that runs the unguarded deref (a favourite-toggle handler only invoked
+// when the item is present). Structurally identical re-finds are excluded —
+// those are decided by the domination-aware repeated-find guard, and a
+// non-dominating identical test (a later-called closure) must keep firing.
+const moduleDerivesMembershipStateFromSameLookup = (
+  findCall: EsTreeNodeOfType<"CallExpression">,
+): boolean => {
+  const callee = findCall.callee;
+  if (!isNodeOfType(callee, "MemberExpression")) return false;
+  const receiverPath = optionalTolerantMemberPath(callee.object as EsTreeNode);
+  if (!receiverPath || !receiverPath.includes(".")) return false;
+  const keyName = equalityLookupKeyName(findCall.arguments?.[0]);
+  if (!keyName) return false;
+  let programRoot: EsTreeNode | null = null;
+  let current: EsTreeNode | null = findCall.parent ?? null;
+  while (current) {
+    if (isNodeOfType(current, "Program")) programRoot = current;
+    current = current.parent ?? null;
+  }
+  if (!programRoot) return false;
+  return subtreeContainsMatch(programRoot, (node) => {
+    if (node === findCall || !isNodeOfType(node, "CallExpression")) return false;
+    if (areNodesStructurallyIdentical(node, findCall)) return false;
+    const candidateCallee = node.callee;
+    if (
+      !isNodeOfType(candidateCallee, "MemberExpression") ||
+      candidateCallee.computed ||
+      !isNodeOfType(candidateCallee.property, "Identifier") ||
+      !FIND_METHOD_NAMES.has(candidateCallee.property.name)
+    ) {
+      return false;
+    }
+    if (optionalTolerantMemberPath(candidateCallee.object as EsTreeNode) !== receiverPath) {
+      return false;
+    }
+    if (equalityLookupKeyName(node.arguments?.[0]) !== keyName) return false;
+    return isBooleanConsumedExpression(node);
+  });
+};
+
 export const noArrayFindResultMemberAccessWithoutGuard = defineRule({
   id: "no-array-find-result-member-access-without-guard",
   title: "Unguarded member access on find() result",
@@ -387,6 +531,7 @@ export const noArrayFindResultMemberAccessWithoutGuard = defineRule({
       if (isBooleanFindOverTruthyArrayLiteral(node)) return;
       if (isGuardedByRepeatedFindTest(node)) return;
       if (isSelfDerivedEqualityLookup(node)) return;
+      if (moduleDerivesMembershipStateFromSameLookup(node)) return;
       context.report({ node, message: MESSAGE });
     },
   }),

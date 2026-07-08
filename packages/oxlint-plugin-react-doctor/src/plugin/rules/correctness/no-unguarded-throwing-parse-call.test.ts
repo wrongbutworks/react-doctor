@@ -546,4 +546,109 @@ describe("no-unguarded-throwing-parse-call", () => {
     );
     expect(result.diagnostics).toHaveLength(1);
   });
+
+  it("stays quiet for a config-host template whose query part is a search-params serialization (r34 shape)", () => {
+    const result = runRule(
+      noUnguardedThrowingParseCall,
+      `class R34Client {
+        getFullUrl(path, params) {
+          const host = this.backends[this.currentBackend];
+          const version = this.version;
+          const search = createSearchParams(params).toString();
+          return new URL(\`\${host}/\${version}/\${path}?\${search}\`);
+        }
+      }`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet for decodeURIComponent of a URLSearchParams toString chain (gatsby static-query-mapper shape)", () => {
+    const result = runRule(
+      noUnguardedThrowingParseCall,
+      `const removeExportQueryParam = (path) => {
+        const [filePath, queryParams] = path.split("?");
+        const params = new URLSearchParams(queryParams.replace(/[+]/g, "%2B"));
+        params.delete("export");
+        const paramsString = params.toString().replace(/[+]/g, "%20");
+        return \`\${filePath}\${paramsString ? \`?\${decodeURIComponent(paramsString)}\` : ""}\`;
+      };`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet in Storybook stories files (easy-ui shape)", () => {
+    const result = runRule(
+      noUnguardedThrowingParseCall,
+      `function $window() {
+        return window.top || window;
+      }
+      function tab() {
+        const url = new URL($window().location.href);
+        return url.searchParams.get("ezui-tab-nav-tab");
+      }`,
+      { filename: "src/TabNav/TabNav.stories.tsx" },
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet for a color parse in a docs demo component (suomifi shape)", () => {
+    const result = runRule(
+      noUnguardedThrowingParseCall,
+      `export const baseStyles = ({ color: colorProp, theme }) => {
+        const color = colorProp ? colorProp : theme.colors.blackBase;
+        return css\`color: \${readableColor(color)};\`;
+      };`,
+      { filename: "src/docs/Colors/Colors.baseStyles.tsx" },
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet for a proxy gated by an exact-equality allowlist filter in the same call (gatsby partytown shape)", () => {
+    const result = runRule(
+      noUnguardedThrowingParseCall,
+      `export function partytownProxy(partytownProxiedURLs) {
+        return proxy((req) => new URL(req.query.url).origin, {
+          filter: (req) => partytownProxiedURLs.some((url) => req.query?.url === url),
+          proxyReqPathResolver: (req) => {
+            const { pathname = "", search = "" } = new URL(req.query?.url);
+            return pathname + search;
+          },
+        });
+      }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags new URL of a client-controlled referer header (webstudio shape)", () => {
+    const result = runRule(
+      noUnguardedThrowingParseCall,
+      `export const loader = async ({ request }) => {
+        const url = new URL(request.url);
+        const refererRawUrl = request.headers.get("referer");
+        const refererUrl = refererRawUrl === null ? url : new URL(refererRawUrl);
+        return refererUrl.host === url.host;
+      };`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags decodeURI of req.path in a request handler (gatsby dev-ssr shape)", () => {
+    const result = runRule(
+      noUnguardedThrowingParseCall,
+      `app.get("*", async (req, res) => {
+        const pagePath = store.getState().pages.get(decodeURI(req.path));
+        return pagePath;
+      });`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags decodeURIComponent of window.location.hash (reactuse useHash shape)", () => {
+    const result = runRule(
+      noUnguardedThrowingParseCall,
+      `const getHash = () => decodeURIComponent(window.location.hash.replace("#", ""));`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
 });

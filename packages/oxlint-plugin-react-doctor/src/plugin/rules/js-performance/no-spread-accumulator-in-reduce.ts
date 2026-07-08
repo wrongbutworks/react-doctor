@@ -7,11 +7,43 @@ import { findVariableInitializer } from "../../utils/find-variable-initializer.j
 import { isAstNode } from "../../utils/is-ast-node.js";
 import { isMemberProperty } from "../../utils/is-member-property.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
+import { normalizeFilename } from "../../utils/normalize-filename.js";
 import type { RuleContext } from "../../utils/rule-context.js";
 import { stripParenExpression } from "../../utils/strip-paren-expression.js";
 import { walkAst } from "../../utils/walk-ast.js";
 
 const OBJECT_ENUMERATION_METHOD_NAMES = new Set(["keys", "entries", "values"]);
+
+// Docs-site / demo sources render bounded showcase data (a design-system
+// palette, a component gallery), where the O(n²) copy is unobservable and
+// the immutable fold is stylistic — verified false positive in the wild.
+// `test-noise` already covers test/story paths; these segments are the
+// docs-flavored equivalents that path heuristic can't see.
+const DOCS_ONLY_PATH_SEGMENTS = new Set([
+  "docs",
+  "__docs__",
+  "demo",
+  "demos",
+  "example",
+  "examples",
+]);
+
+const isDocsOnlyFilePath = (filename: string): boolean =>
+  normalizeFilename(filename)
+    .split("/")
+    .some((pathSegment) => DOCS_ONLY_PATH_SEGMENTS.has(pathSegment));
+
+// Mutate-and-return is only a safe rewrite when the fold starts from a
+// fresh literal. A seed referencing an existing object (`reduce(fn, b)`,
+// `reduce(fn, defaultLocale.Modal!)`) means the spread is deliberately
+// protecting shared state from mutation, and a missing seed starts the
+// fold on the source's first element — mutating either is a real bug, so
+// both stay quiet.
+const isFreshLiteralSeed = (seedArgument: EsTreeNode | undefined): boolean => {
+  if (!isAstNode(seedArgument)) return false;
+  const stripped = stripParenExpression(seedArgument);
+  return isNodeOfType(stripped, "ObjectExpression") || isNodeOfType(stripped, "ArrayExpression");
+};
 
 const isSpreadFreeArrayLiteral = (node: EsTreeNode, mustHaveElements: boolean): boolean => {
   if (!isNodeOfType(node, "ArrayExpression")) return false;
@@ -234,42 +266,47 @@ export const noSpreadAccumulatorInReduce = defineRule({
   category: "Performance",
   recommendation:
     "Mutate the accumulator and return it (`acc[key] = value; return acc`) so the fold stays O(n) instead of copying the whole accumulator every step.",
-  create: (context: RuleContext) => ({
-    CallExpression(node: EsTreeNodeOfType<"CallExpression">) {
-      const callee = node.callee;
-      if (!isMemberProperty(callee, "reduce") && !isMemberProperty(callee, "reduceRight")) {
-        return;
-      }
-      if (isStaticallyBoundedReduceSource(callee.object)) return;
-
-      const callback = node.arguments[0];
-      if (
-        !callback ||
-        (!isNodeOfType(callback, "ArrowFunctionExpression") &&
-          !isNodeOfType(callback, "FunctionExpression"))
-      ) {
-        return;
-      }
-      const accumulatorParam = callback.params[0];
-      if (!accumulatorParam || !isNodeOfType(accumulatorParam, "Identifier")) return;
-      const accumulatorName = accumulatorParam.name;
-
-      const analysis = analyzeReducerReturns(callback, accumulatorName);
-      if (analysis.isAccumulatorNameShadowed || analysis.hasAccumulatorPassthroughReturn) return;
-
-      for (const literal of analysis.returnedLiterals) {
-        if (
-          literalSpreadsAccumulator(literal, accumulatorName) &&
-          literalGrowsAccumulatorPerIteration(literal)
-        ) {
-          context.report({
-            node: literal,
-            message:
-              "This is O(n²) because spreading the accumulator copies the entire growing collection every step. Mutate and return the accumulator instead (acc[key] = value; return acc).",
-          });
+  create: (context: RuleContext) => {
+    const isDocsOnlyFile = isDocsOnlyFilePath(context.filename ?? "");
+    return {
+      CallExpression(node: EsTreeNodeOfType<"CallExpression">) {
+        if (isDocsOnlyFile) return;
+        const callee = node.callee;
+        if (!isMemberProperty(callee, "reduce") && !isMemberProperty(callee, "reduceRight")) {
           return;
         }
-      }
-    },
-  }),
+        if (!isFreshLiteralSeed(node.arguments?.[1])) return;
+        if (isStaticallyBoundedReduceSource(callee.object)) return;
+
+        const callback = node.arguments[0];
+        if (
+          !callback ||
+          (!isNodeOfType(callback, "ArrowFunctionExpression") &&
+            !isNodeOfType(callback, "FunctionExpression"))
+        ) {
+          return;
+        }
+        const accumulatorParam = callback.params[0];
+        if (!accumulatorParam || !isNodeOfType(accumulatorParam, "Identifier")) return;
+        const accumulatorName = accumulatorParam.name;
+
+        const analysis = analyzeReducerReturns(callback, accumulatorName);
+        if (analysis.isAccumulatorNameShadowed || analysis.hasAccumulatorPassthroughReturn) return;
+
+        for (const literal of analysis.returnedLiterals) {
+          if (
+            literalSpreadsAccumulator(literal, accumulatorName) &&
+            literalGrowsAccumulatorPerIteration(literal)
+          ) {
+            context.report({
+              node: literal,
+              message:
+                "This is O(n²) because spreading the accumulator copies the entire growing collection every step. Mutate and return the accumulator instead (acc[key] = value; return acc).",
+            });
+            return;
+          }
+        }
+      },
+    };
+  },
 });

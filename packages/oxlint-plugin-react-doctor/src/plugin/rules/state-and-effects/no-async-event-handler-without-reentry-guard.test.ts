@@ -473,6 +473,59 @@ describe("no-async-event-handler-without-reentry-guard", () => {
     expect(result.diagnostics).toHaveLength(0);
   });
 
+  it("stays quiet: POST to a preview endpoint — a read-style compute, not a mutation", () => {
+    const result = runRule(
+      noAsyncEventHandlerWithoutReentryGuard,
+      `function PromptManager({ selectedStage }) {
+  const previewStage = async () => {
+    const res = await fetch(\`/api/prompts/\${selectedStage}/preview\`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ testData: {} })
+    });
+    if (!res.ok) return;
+    const data = await res.json();
+    setPreview(data.preview);
+  };
+  return <button onClick={previewStage}>Preview</button>;
+}`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: POST to a stop endpoint — idempotent halt, double-fire is harmless", () => {
+    const result = runRule(
+      noAsyncEventHandlerWithoutReentryGuard,
+      `function Security() {
+  const stopMedia = useCallback(async () => {
+    await api.post('/media/stop');
+    if (videoRef.current) {
+      videoRef.current.src = '';
+    }
+    setStreaming(false);
+  }, []);
+  return <button onClick={stopMedia}>Stop</button>;
+}`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags a POST whose template URL ends in a dynamic segment", () => {
+    const result = runRule(
+      noAsyncEventHandlerWithoutReentryGuard,
+      `function Vote({ pollId }) {
+  const castVote = async () => {
+    await fetch(\`/api/polls/\${pollId}\`, { method: 'POST' });
+    setVoted(true);
+  };
+  return <button onClick={castVote}>Vote</button>;
+}`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
   it("still flags an unguarded post-await setter after a mutating request", () => {
     const result = runRule(
       noAsyncEventHandlerWithoutReentryGuard,

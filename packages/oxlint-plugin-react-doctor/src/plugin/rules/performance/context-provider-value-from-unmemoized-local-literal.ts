@@ -65,12 +65,29 @@ const owningFunctionOfBinding = (binding: BindingInfo): EsTreeNode | null =>
 // one-hop identifier bound in the SAME render scope to a fresh
 // object/array/function literal — the identifier-indirection form the
 // base rule documents as a pass.
+//
+// React Compiler auto-memoizes the per-render allocation, so consumers
+// never see a fresh value on unrelated renders and the recommendation
+// (add useMemo) is exactly what compiler codebases forbid — the rule is
+// `disabledBy: ["react-compiler"]`, matching the sibling
+// `jsx-no-new-*-as-prop` / `prefer-stable-empty-fallback` gates.
+//
+// KNOWN ACCEPTED NOISE: a provider that is a comment-documented
+// tests/storybook-only stub living in a PRODUCTION file (run-kit's
+// `StandaloneSessionContextProvider` in `src/contexts/session-context.tsx`)
+// is byte-for-byte the rule's flagship one-hop-literal shape — the only
+// signals are a JSDoc comment and its name, neither of which single-file
+// AST analysis can honor without also silencing real providers. The
+// `test-noise` tag already skips such stubs when they live under
+// testlike paths; stubs co-located with production providers stay
+// flagged.
 export const contextProviderValueFromUnmemoizedLocalLiteral = defineRule({
   id: "context-provider-value-from-unmemoized-local-literal",
   title: "Context value from an unmemoized local literal",
   tags: ["react-jsx-only", "test-noise"],
   severity: "warn",
   category: "Performance",
+  disabledBy: ["react-compiler"],
   recommendation:
     "Wrap the context value in useMemo/useCallback so consumers do not redraw every render, or move it outside the component if it never changes.",
   create: (context: RuleContext) => {

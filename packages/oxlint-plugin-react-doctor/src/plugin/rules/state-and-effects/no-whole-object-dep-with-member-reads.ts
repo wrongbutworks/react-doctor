@@ -129,6 +129,11 @@ const callbackShadowsName = (callbackFunction: EsTreeNode, name: string): boolea
 export const noWholeObjectDepWithMemberReads = defineRule({
   id: "no-whole-object-dep-with-member-reads",
   title: "Whole props object in deps while only members are read",
+  // `test-noise` opts every `isTestFilePath(...)` file out via
+  // `mergeAndFilterDiagnostics` — memoization quality inside a throwaway
+  // test-fixture component is irrelevant (verified false positive on a
+  // `useCallback(..., [props])` helper in a `*.test.tsx`).
+  tags: ["test-noise"],
   severity: "warn",
   recommendation:
     "Destructure the fields you read (`const { onChange } = props`) and depend on those bindings instead of the whole `props` object. Props are a fresh object whenever the parent re-renders, so a whole-props dependency defeats the memoization.",

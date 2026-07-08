@@ -1,4 +1,3 @@
-import { INDEX_PARAMETER_NAMES } from "../../constants/react.js";
 import { collectPatternNames } from "../../utils/collect-pattern-names.js";
 import { defineRule } from "../../utils/define-rule.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
@@ -24,11 +23,12 @@ const ARRAY_MUTATING_METHODS = new Set([
   "unshift",
 ]);
 
-// Name of the index-shaped identifier a `key=` expression resolves to, or
-// null. Mirrors the coverage of no-array-index-as-key's `extractIndexName`
-// (bare identifier, `String(i)`/`Number(i)`, `i.toString()`, `` `${i}` ``)
-// but returns the identifier regardless of whether the name is in the index
-// set — the caller matches it against the map callback's single parameter.
+// Name of the identifier a `key=` expression resolves to, or null. Mirrors
+// the coverage of no-array-index-as-key's `extractIndexName` (bare
+// identifier, `String(i)`/`Number(i)`, `i.toString()`, `` `${i}` ``) but
+// returns the identifier regardless of its name — after `.fill()` the sole
+// callback parameter IS the constant fill value whatever it is called, so
+// the caller matches it against the map callback's single parameter.
 const extractKeyIdentifierName = (node: EsTreeNode): string | null => {
   if (isNodeOfType(node, "Identifier")) return node.name;
 
@@ -283,14 +283,14 @@ export const noFillMapElementAsKey = defineRule({
   title: "fill().map() first param is the element, not the index",
   severity: "warn",
   recommendation:
-    "After `.fill(value)` every element is identical, so a lone `.map((index) => …)` binds `index` to that value and gives every child the same key. Add the index as the second parameter: `.map((_, index) => …)`.",
+    "After `.fill(value)` every element is identical, so a lone `.map((n) => …)` binds `n` to that value — whatever the parameter is named — and gives every child the same key. Add the index as the second parameter: `.map((_, index) => …)`.",
   create: (context: RuleContext) => ({
     JSXAttribute(node: EsTreeNodeOfType<"JSXAttribute">) {
       if (!isNodeOfType(node.name, "JSXIdentifier") || node.name.name !== "key") return;
       if (!node.value || !isNodeOfType(node.value, "JSXExpressionContainer")) return;
 
       const keyName = extractKeyIdentifierName(node.value.expression);
-      if (!keyName || !INDEX_PARAMETER_NAMES.has(keyName)) return;
+      if (!keyName) return;
 
       const enclosingMap = findEnclosingMapCall(node);
       if (!enclosingMap) return;

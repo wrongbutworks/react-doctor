@@ -660,6 +660,159 @@ window.open(\`\${SEARCH_URL}?query=\${encodeURIComponent(value)}\`, '_blank');`,
     expect(result.diagnostics).toHaveLength(0);
   });
 
+  it("stays quiet: Template led by window.origin (AppFlowy as-template idiom)", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      "window.open(`${window.origin}/as-template?viewUrl=${encodeURIComponent(publishUrl)}`, '_blank');",
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Imported camelCase URL constant (AppFlowy downloadPage idiom)", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      `import { downloadPage } from '@/utils/url';
+window.open(downloadPage);`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Const bound to a path-builder call with a dynamic path argument (dtale popup idiom)", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      `const openTab = (path) => {
+  const url = fullPath(path, dataId);
+  window.open(url, '_blank', \`titlebar=1,location=1,status=1,width=\${width},height=\${height}\`);
+};`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: URL builder wrapping a path-builder call (dtale export idiom)", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      `const exportHTML = () => {
+  const url = buildURL(fullPath(DATA_ENDPOINT, dataId), { export: true });
+  window.open(url, '_blank');
+};`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Sync get…Url route-builder helper (AppFlowy open-in-new-tab idiom)", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      `const onSelect = () => {
+  const url = getViewUrl(view, currentWorkspaceId);
+  if (!url) return;
+  window.open(url, '_blank');
+};`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Direct get…Url call with a modifier-key target ternary (jaeger deep-deps idiom)", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      `function viewAllDep({ ctrlKey, metaKey }) {
+  window.open(getUrl({ density, operation }), ctrlKey || metaKey ? '_blank' : '_self');
+}`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Bare relative template path (glific chat route idiom)", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      "window.open(`chat/${contact.id}?search=${item.messageNumber}`);",
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: file: URL template of an app-written log file (Tauri debug idiom)", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      "window.open(`file://${rustStore.debugLogPath}`, '_blank');",
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Prop of a local non-exported component whose every usage is a literal path (rad-ui card idiom)", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      `const IntegrationCard = ({ title, cta = "", ctaLink }) => {
+  const onClickHandler = () => {
+    window.open(ctaLink, '_blank');
+  };
+  return <button onClick={onClickHandler}>{cta}</button>;
+};
+const Page = () => (
+  <div>
+    <IntegrationCard ctaLink="/docs/first-steps/installation" cta="Install" title="Install" />
+    <IntegrationCard ctaLink="/docs/first-steps/introduction" cta="View Docs" title="Docs" />
+  </div>
+);`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags a prop of an exported component (unknowable call sites)", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      `export const PopoverPanel = ({ url }) => (
+  <div onClick={() => window.open(url, '_blank')} />
+);
+const Demo = () => <PopoverPanel url="/docs" />;`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags a local component prop when one usage passes a dynamic value", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      `const Card = ({ ctaLink }) => (
+  <button onClick={() => window.open(ctaLink, '_blank')}>Go</button>
+);
+const Page = ({ items }) => (
+  <div>
+    <Card ctaLink="/docs" />
+    <Card ctaLink={items[0].url} />
+  </div>
+);`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags a build…Url helper result (composable-origin builder stays opaque)", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      "window.open(buildCorrelationsUrl(dataId, encodeStrings), '_blank');",
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags a process…Url transformer of user-entered links (AppFlowy openUrl idiom)", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      `const newUrl = processUrl(url);
+window.open(newUrl, '_blank');`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags a config-supplied help link behind a truthiness guard (jaeger trace-diff idiom)", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      `const onClick = () => {
+  const helpLink = getConfig().traceDiff?.helpLink;
+  if (helpLink) {
+    window.open(helpLink, '_blank');
+  }
+};`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
   it("still flags an untrusted dynamic destination", () => {
     const result = runRule(
       windowOpenWithoutNoopener,
@@ -695,6 +848,281 @@ window.open(\`\${SEARCH_URL}?query=\${encodeURIComponent(value)}\`, '_blank');`,
        const Help = () => (
          <button onClick={() => window.open(LINKS.docs, "_blank")}>Docs</button>
        );`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("stays quiet: useState whose only setters pass same-file path-builder URLs (dtale MissingNoCharts idiom)", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      `const buildUrls = (dataId, chartType) => {
+  const imageUrl = buildURLString(menuFuncs.fullPath(\`/dtale/missingno/\${chartType}\`, dataId), { id: '1' });
+  const fileUrl = buildURLString(menuFuncs.fullPath(\`/dtale/missingno/\${chartType}\`, dataId), { file: 'true' });
+  return [imageUrl, fileUrl];
+};
+const MissingNoCharts = ({ dataId, chartType }) => {
+  const [imageUrl, setImageUrl] = React.useState();
+  const [fileUrl, setFileUrl] = React.useState();
+  React.useEffect(() => {
+    const urls = buildUrls(dataId, chartType);
+    setImageUrl(urls[0]);
+    setFileUrl(urls[1]);
+  }, [dataId, chartType]);
+  return (
+    <>
+      <button onClick={() => window.open(imageUrl ?? '', '_blank')} />
+      <button onClick={() => window.open(fileUrl ?? '', '_blank')} />
+    </>
+  );
+};`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags a useState URL whose setter receives server data", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      `const Portal = () => {
+  const [portalUrl, setPortalUrl] = React.useState();
+  React.useEffect(() => {
+    api.fetchPortal().then((response) => setPortalUrl(response.url));
+  }, []);
+  return <button onClick={() => window.open(portalUrl ?? '', '_blank')} />;
+};`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("stays quiet: anchorEl.href helper fed e.currentTarget from an inline handler on a trusted-href link (react-cosmos idiom)", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      `export function FixtureLink({ children, fixtureId }) {
+  return (
+    <Link
+      href={createRelativePlaygroundUrl({ fixture: fixtureId })}
+      onClick={e => {
+        e.preventDefault();
+        if (e.metaKey) openAnchorInNewTab(e.currentTarget);
+        else selectFixture(fixtureId);
+      }}
+    >
+      {children}
+    </Link>
+  );
+}
+function openAnchorInNewTab(anchorEl) {
+  window.open(anchorEl.href, '_blank');
+}`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: anchorEl.href helper reached through a named handler wired to a trusted-href link (react-cosmos bookmarks idiom)", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      `export function FixtureBookmarks({ bookmarks, onFixtureSelect }) {
+  return (
+    <ul>
+      {bookmarks.map(fixtureItem => {
+        const { fixtureId } = fixtureItem;
+        function handleClick(e) {
+          e.preventDefault();
+          if (e.metaKey) {
+            openAnchorInNewTab(e.currentTarget);
+          } else {
+            onFixtureSelect(fixtureId);
+          }
+        }
+        return (
+          <li key={fixtureId}>
+            <FixtureLink href={createRelativePlaygroundUrl({ fixture: fixtureId })} onClick={handleClick}>
+              {fixtureId}
+            </FixtureLink>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+function openAnchorInNewTab(anchorEl) {
+  window.open(anchorEl.href, '_blank');
+}`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags an anchorEl.href helper when the wired element's href is dynamic", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      `const ArticleLink = ({ article }) => (
+  <a
+    href={article.url}
+    onClick={e => {
+      if (e.metaKey) openAnchorInNewTab(e.currentTarget);
+    }}
+  >
+    {article.title}
+  </a>
+);
+function openAnchorInNewTab(anchorEl) {
+  window.open(anchorEl.href, '_blank');
+}`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("stays quiet: local useCallback wrapper only ever called with hardcoded literals (rad-ui NavBar idiom)", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      `const NavBar = () => {
+  const openLink = useCallback(
+    (url) => () => {
+      window.open(url, "_blank");
+    },
+    []
+  );
+  return (
+    <div>
+      <button onClick={openLink("https://discord.gg/nMaQfeEPNp")}>Discord</button>
+      <button onClick={openLink("https://github.com/rad-ui/ui")}>GitHub</button>
+    </div>
+  );
+};`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags a local wrapper when any call site passes a dynamic value", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      `const Menu = ({ item }) => {
+  const openLink = (url) => {
+    window.open(url, "_blank");
+  };
+  return (
+    <div>
+      <button onClick={() => openLink("https://github.com/rad-ui/ui")}>GitHub</button>
+      <button onClick={() => openLink(item.url)}>Item</button>
+    </div>
+  );
+};`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags an exported helper whose URL parameter has unknowable callers (ant-design openUrl idiom)", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      `export const openUrl = ({ href, target }) => {
+  switch (target) {
+    case '_blank':
+      window.open(href, target);
+      break;
+    default:
+      window.location.href = href;
+  }
+};`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("stays quiet: destructured href from a map over an inline array of hardcoded links (pwa-kit social-icons idiom)", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      `const SocialIcons = () => (
+  <div>
+    {[
+      { href: 'https://www.youtube.com/channel/UCSTGHqzR1Q9yAVbiS3dAFHg', ariaLabel: 'YouTube' },
+      { href: '/', ariaLabel: 'Pinterest' },
+      { href: 'https://twitter.com/CommerceCloud', ariaLabel: 'Twitter' },
+    ].map(({ href, ariaLabel }) => (
+      <button
+        key={href}
+        onClick={() => {
+          window.open(href);
+        }}
+        aria-label={ariaLabel}
+      />
+    ))}
+  </div>
+);`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags a destructured value from a map over dynamic template data (glific template-buttons idiom)", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      `export const TemplateButtons = ({ template }) => {
+  const handleButtonClick = (type, value) => {
+    if (type === 'call-to-action') {
+      if (value) window.open(value, '_blank');
+    }
+  };
+  return (
+    <div>
+      {template?.map(({ title, value, type }) => (
+        <button key={title} onClick={() => handleButtonClick(type, value)}>
+          {title}
+        </button>
+      ))}
+    </div>
+  );
+};`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("stays quiet: binding co-navigated through Router.push in a sibling branch (hyperdx cmd+click-row idiom)", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      `export function ListingRow({ href, name }) {
+  return (
+    <tr
+      onClick={e => {
+        if (e.metaKey || e.ctrlKey) {
+          window.open(href, '_blank');
+        } else {
+          Router.push(href);
+        }
+      }}
+      onAuxClick={e => {
+        if (e.button === 1) {
+          window.open(href, '_blank');
+        }
+      }}
+    >
+      {name}
+    </tr>
+  );
+}`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags a host-pinned protocol//hostname template with a config port (PortOS launch idiom)", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      "window.open(`${window.location.protocol}//${window.location.hostname}:${app.uiPort}`, '_blank');",
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags a URL destructured from a plural get…Urls getter (PortOS launch-URLs idiom)", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      `const { https, http } = getLaunchUrls(app);
+window.open(https, '_blank');`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags a URL destructured from an awaited API .then callback (PortOS OAuth idiom)", () => {
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      `api.getGoogleAuthUrl().then(({ url }) => {
+  window.open(url, '_blank');
+});`,
     );
     expect(result.diagnostics).toHaveLength(1);
   });

@@ -35,10 +35,11 @@ const URL_UNTRUSTED_ROOT_NAMES = new Set(["searchParams", "params", "location", 
 
 const MAX_INITIALIZER_TRACE_DEPTH = 5;
 
-// Non-render/library plumbing, vendored/static artifacts, and controlled-input
-// files where the throw is not a user-facing render/handler crash.
-const EXCLUDED_FILE_PATTERN =
-  /(\.test\.|\.spec\.|__tests__|\/dist\/|\/build\/|\.min\.|(^|\/)(scripts|vendor|public)\/)/;
+// Vendored/static artifacts, build tooling, and demo/docs surfaces where the
+// throw is not a user-facing render/handler crash (a docs color-palette page
+// only ever receives the design-token set it renders). Tests, stories, and
+// e2e files are additionally excluded by the `test-noise` tag.
+const EXCLUDED_FILE_PATTERN = /(\/dist\/|\/build\/|\.min\.|(^|\/)(scripts|vendor|public|docs)\/)/;
 
 // A template literal whose first quasi hard-codes an absolute scheme+host
 // prefix (`https://github.com/${owner}/…`) cannot make `new URL` throw: after
@@ -142,8 +143,56 @@ const isCompileTimeOrModuleConst = (argument: EsTreeNode): boolean => {
   return false;
 };
 
+// `URLSearchParams#toString()` (react-router's `createSearchParams` returns a
+// URLSearchParams) always emits well-formed percent-encoding: it cannot make
+// `new URL` throw in any position and always decodes cleanly, so a
+// serialization chain — with optional `.replace`/`.replaceAll`
+// post-processing — is not runtime-malformed input even when the params were
+// built from route/query values.
+const SEARCH_PARAMS_CONSTRUCTOR_NAME_PATTERN = /^(URLSearchParams|createSearchParams)$/;
+
+const isSearchParamsConstruction = (node: EsTreeNode, traceDepth: number): boolean => {
+  if (traceDepth > MAX_INITIALIZER_TRACE_DEPTH) return false;
+  const inner = stripParenExpression(node);
+  if (isNodeOfType(inner, "NewExpression") || isNodeOfType(inner, "CallExpression")) {
+    const callee = stripParenExpression(inner.callee as EsTreeNode);
+    return (
+      isNodeOfType(callee, "Identifier") && SEARCH_PARAMS_CONSTRUCTOR_NAME_PATTERN.test(callee.name)
+    );
+  }
+  if (isNodeOfType(inner, "Identifier")) {
+    const binding = findVariableInitializer(inner, inner.name);
+    const declarator = binding ? findEnclosingDeclarator(binding.bindingIdentifier) : null;
+    if (declarator && declarator.init) {
+      return isSearchParamsConstruction(declarator.init as EsTreeNode, traceDepth + 1);
+    }
+  }
+  return false;
+};
+
+const isSearchParamsSerialization = (node: EsTreeNode, traceDepth: number): boolean => {
+  const inner = stripParenExpression(node);
+  if (!isNodeOfType(inner, "CallExpression")) return false;
+  const callee = inner.callee;
+  if (
+    !isNodeOfType(callee, "MemberExpression") ||
+    callee.computed ||
+    !isNodeOfType(callee.property, "Identifier")
+  ) {
+    return false;
+  }
+  if (callee.property.name === "toString") {
+    return isSearchParamsConstruction(callee.object as EsTreeNode, traceDepth);
+  }
+  if (callee.property.name === "replace" || callee.property.name === "replaceAll") {
+    return isSearchParamsSerialization(callee.object as EsTreeNode, traceDepth);
+  }
+  return false;
+};
+
 const argumentTracesToUrlRouteSource = (argument: EsTreeNode): boolean => {
   const inner = stripParenExpression(argument);
+  if (isSearchParamsSerialization(inner, 0)) return false;
   const rootName = getRootIdentifierName(inner);
   if (rootName && URL_ROUTE_SOURCE_ROOTS.has(rootName)) return true;
   if (isNodeOfType(inner, "Identifier") && URL_ROUTE_FIELD_NAMES.has(inner.name)) return true;
@@ -367,6 +416,7 @@ const isUntrustedUrlArgument = (argument: EsTreeNode, traceDepth: number): boole
   const inner = stripParenExpression(argument);
   if (isCompileTimeOrModuleConst(inner)) return false;
   if (isAlwaysValidUrlArgument(inner)) return false;
+  if (isSearchParamsSerialization(inner, traceDepth)) return false;
   if (isNodeOfType(inner, "AwaitExpression")) {
     return isUntrustedUrlArgument(inner.argument as EsTreeNode, traceDepth + 1);
   }
@@ -420,6 +470,65 @@ const isUntrustedUrlArgument = (argument: EsTreeNode, traceDepth: number): boole
     return subtreeReferencesIdentifierName(inner.callee as EsTreeNode, URL_ROUTE_SOURCE_ROOTS);
   }
   return subtreeReferencesIdentifierName(inner, URL_ROUTE_SOURCE_ROOTS);
+};
+
+const dottedMemberChainPath = (node: EsTreeNode): string | null => {
+  const inner = stripParenExpression(node);
+  if (isNodeOfType(inner, "Identifier")) return inner.name;
+  if (
+    isNodeOfType(inner, "MemberExpression") &&
+    !inner.computed &&
+    isNodeOfType(inner.property, "Identifier")
+  ) {
+    const objectPath = dottedMemberChainPath(inner.object as EsTreeNode);
+    return objectPath ? `${objectPath}.${inner.property.name}` : null;
+  }
+  return null;
+};
+
+const isNullOrUndefinedComparand = (node: EsTreeNode): boolean => {
+  const inner = stripParenExpression(node);
+  if (isNodeOfType(inner, "Literal")) return inner.value === null;
+  return isNodeOfType(inner, "Identifier") && inner.name === "undefined";
+};
+
+// The express-http-proxy option-bag shape: the parsed member chain is exact-
+// equality-checked against allowlist values in a SIBLING callback of the same
+// call — `proxy(req => new URL(req.query.url).origin, { filter: req =>
+// urls.some(url => req.query?.url === url) })` — so the resolver only ever
+// parses a value the gate admitted. Requires a dotted chain: a bare
+// identifier equality (`refererRawUrl === null`) is a null check, not an
+// allowlist, and null/undefined comparands never count.
+const isEqualityAllowlistedInEnclosingCall = (
+  parseNode: EsTreeNode,
+  argument: EsTreeNode,
+): boolean => {
+  const argumentPath = dottedMemberChainPath(argument);
+  if (!argumentPath || !argumentPath.includes(".")) return false;
+  let ancestor: EsTreeNode | null | undefined = parseNode.parent;
+  while (ancestor) {
+    if (isNodeOfType(ancestor, "CallExpression")) {
+      let didFindAllowlistComparison = false;
+      walkAst(ancestor, (child: EsTreeNode) => {
+        if (didFindAllowlistComparison) return false;
+        if (child === parseNode) return false;
+        if (
+          isNodeOfType(child, "BinaryExpression") &&
+          child.operator === "===" &&
+          !isNullOrUndefinedComparand(child.left as EsTreeNode) &&
+          !isNullOrUndefinedComparand(child.right as EsTreeNode) &&
+          (dottedMemberChainPath(child.left as EsTreeNode) === argumentPath ||
+            dottedMemberChainPath(child.right as EsTreeNode) === argumentPath)
+        ) {
+          didFindAllowlistComparison = true;
+          return false;
+        }
+      });
+      if (didFindAllowlistComparison) return true;
+    }
+    ancestor = ancestor.parent ?? null;
+  }
+  return false;
 };
 
 // Non-throwing validity pre-checks these APIs document precisely so callers
@@ -512,6 +621,7 @@ export const noUnguardedThrowingParseCall = defineRule({
   title: "Unguarded call to a throwing parse API",
   severity: "warn",
   category: "Correctness",
+  tags: ["test-noise"],
   recommendation:
     "`decodeURIComponent`/`decodeURI`, color parsers (`readableColor`/`parseToRgb`/`chroma`), and single-arg `new URL(x)` on a URL/route value throw on malformed runtime input and crash render; guard with a validity pre-check (`URL.canParse`, `chroma.valid`), a try/catch, or a `safe*` helper that returns a fallback.",
   create: (context: RuleContext) => {
@@ -530,6 +640,9 @@ export const noUnguardedThrowingParseCall = defineRule({
         if (isInsideTryStatement(node as EsTreeNode)) return;
         if (isRoutedThroughSafeHelper(node as EsTreeNode)) return;
         if (isGuardedByValidityCheck(node as EsTreeNode)) return;
+        if (isEqualityAllowlistedInEnclosingCall(node as EsTreeNode, argument as EsTreeNode)) {
+          return;
+        }
         context.report({ node: node as EsTreeNode, message: URL_MESSAGE });
       },
       CallExpression(node: EsTreeNodeOfType<"CallExpression">) {

@@ -1,4 +1,5 @@
 import { EFFECT_HOOK_NAMES } from "../../constants/react.js";
+import { collectPatternNames } from "../../utils/collect-pattern-names.js";
 import { defineRule } from "../../utils/define-rule.js";
 import { functionBodyHasReturnWithValue } from "../../utils/function-body-has-return-with-value.js";
 import { getEffectCallback } from "../../utils/get-effect-callback.js";
@@ -167,6 +168,57 @@ const isStableHookProductBinding = (scopeAnchor: EsTreeNode, bindingName: string
   return false;
 };
 
+// `const { identityService } = useQueryContext()` — a dependency bound from
+// a context hook and used EXCLUSIVELY as a method-call receiver
+// (`identityService.getAuthHeaders()`) is a DI service singleton whose
+// identity is stable for the provider's lifetime, so it is de-facto
+// mount-only. Data reads (`service.config`) or direct invocation
+// (`fetchViews()`) disqualify — those identities carry per-render meaning.
+const CONTEXT_HOOK_NAME_PATTERN = /^use(?:[A-Z]\w*)?Context$/;
+
+const isContextHookBinding = (scopeAnchor: EsTreeNode, bindingName: string): boolean => {
+  let cursor: EsTreeNode | null | undefined = scopeAnchor;
+  while (cursor) {
+    if (isNodeOfType(cursor, "BlockStatement") || isNodeOfType(cursor, "Program")) {
+      for (const statement of cursor.body ?? []) {
+        if (!isNodeOfType(statement, "VariableDeclaration")) continue;
+        for (const declarator of statement.declarations ?? []) {
+          if (!isNodeOfType(declarator.init, "CallExpression")) continue;
+          const hookCallee = declarator.init.callee;
+          if (!isNodeOfType(hookCallee, "Identifier")) continue;
+          if (!CONTEXT_HOOK_NAME_PATTERN.test(hookCallee.name)) continue;
+          if (doesBindingPatternBindName(declarator.id, bindingName)) return true;
+        }
+      }
+    }
+    cursor = cursor.parent ?? null;
+  }
+  return false;
+};
+
+const isDependencyOnlyMethodCallReceiver = (
+  effectCallback: EsTreeNode,
+  bindingName: string,
+): boolean => {
+  let sawReceiverUse = false;
+  let sawOtherUse = false;
+  walkAst(effectCallback, (child: EsTreeNode) => {
+    if (sawOtherUse) return false;
+    if (!isNodeOfType(child, "Identifier") || child.name !== bindingName) return;
+    const member = child.parent;
+    if (isNodeOfType(member, "MemberExpression") && member.object === child && !member.computed) {
+      const memberParent = member.parent;
+      if (isNodeOfType(memberParent, "CallExpression") && memberParent.callee === member) {
+        sawReceiverUse = true;
+        return;
+      }
+    }
+    sawOtherUse = true;
+    return false;
+  });
+  return sawReceiverUse && !sawOtherUse;
+};
+
 // A module-scope `const` (or import) has one identity for the module's whole
 // lifetime, so it can never re-trigger the effect. Any closer binding of the
 // same name (param, local declaration) shadows it and disqualifies the dep.
@@ -248,7 +300,9 @@ const hasOnlyStableIdentityDependencies = ({
       isStableHookProductBinding(dependencyArray, dependencyElement.name) ||
       isModuleScopeConstBinding(dependencyArray, dependencyElement.name) ||
       (isExternalStoreHookBinding(dependencyArray, dependencyElement.name) &&
-        isDependencyOnlyInvokedInCallback(effectCallback, dependencyElement.name))
+        isDependencyOnlyInvokedInCallback(effectCallback, dependencyElement.name)) ||
+      (isContextHookBinding(dependencyArray, dependencyElement.name) &&
+        isDependencyOnlyMethodCallReceiver(effectCallback, dependencyElement.name))
     );
   });
 
@@ -277,6 +331,106 @@ const referencesCancellationGuard = (asyncFunction: EsTreeNode): boolean => {
     }
   });
   return found;
+};
+
+const collectLocalBindingNames = (asyncFunction: EsTreeNode): Set<string> => {
+  const localNames = new Set<string>();
+  walkAst(asyncFunction, (child: EsTreeNode) => {
+    if (isNodeOfType(child, "VariableDeclarator")) {
+      collectPatternNames(child.id as EsTreeNode, localNames);
+    }
+    if (isFunctionLike(child)) {
+      for (const parameter of child.params ?? []) {
+        collectPatternNames(parameter as EsTreeNode, localNames);
+      }
+      if (isNodeOfType(child.id, "Identifier")) localNames.add(child.id.name);
+    }
+    if (isNodeOfType(child, "CatchClause") && child.param) {
+      collectPatternNames(child.param as EsTreeNode, localNames);
+    }
+  });
+  return localNames;
+};
+
+// Whether any scope between the async function and module scope (component
+// body, effect callback, closures) declares the name — i.e. the binding is
+// per-render/per-run rather than module-lifetime or global.
+const isBoundBetweenScopeAndModule = (asyncFunction: EsTreeNode, bindingName: string): boolean => {
+  let cursor: EsTreeNode | null | undefined = asyncFunction.parent;
+  while (cursor && !isNodeOfType(cursor, "Program")) {
+    if (isFunctionLike(cursor)) {
+      const parameterNames = new Set<string>();
+      for (const parameter of cursor.params ?? []) {
+        collectPatternNames(parameter as EsTreeNode, parameterNames);
+      }
+      if (parameterNames.has(bindingName)) return true;
+    }
+    if (isNodeOfType(cursor, "BlockStatement")) {
+      for (const statement of cursor.body ?? []) {
+        if (isNodeOfType(statement, "VariableDeclaration")) {
+          const declaredNames = new Set<string>();
+          for (const declarator of statement.declarations ?? []) {
+            collectPatternNames(declarator.id as EsTreeNode, declaredNames);
+          }
+          if (declaredNames.has(bindingName)) return true;
+        }
+        if (
+          isNodeOfType(statement, "FunctionDeclaration") &&
+          isNodeOfType(statement.id, "Identifier") &&
+          statement.id.name === bindingName
+        ) {
+          return true;
+        }
+      }
+    }
+    cursor = cursor.parent ?? null;
+  }
+  return false;
+};
+
+// The awaited work reads NOTHING per-render: every free identifier resolves
+// to a local, a state setter, a module-scope const/import, or a global.
+// Overlapping re-runs then compute the same value, so a late resolution
+// writes identical (not stale) state and the out-of-order hazard cannot
+// occur (`const label = await referralService.getCustomLauncherLabel()`
+// where the dep merely gates whether to fetch). Only applied when an
+// explicit deps array exists — an omitted deps array re-runs every render,
+// which is its own bug regardless of what the awaited work reads.
+const asyncWorkIsPerRenderIndependent = (asyncFunction: EsTreeNode): boolean => {
+  const localNames = collectLocalBindingNames(asyncFunction);
+  let readsPerRenderValue = false;
+  walkAst(asyncFunction, (child: EsTreeNode) => {
+    if (readsPerRenderValue) return false;
+    if (!isNodeOfType(child, "Identifier")) return;
+    if (localNames.has(child.name)) return;
+    const parent = child.parent;
+    if (parent && typeof parent.type === "string" && parent.type.startsWith("TS")) return;
+    if (isNodeOfType(parent, "MemberExpression") && parent.property === child && !parent.computed) {
+      return;
+    }
+    if (
+      isNodeOfType(parent, "Property") &&
+      parent.key === child &&
+      !parent.computed &&
+      !parent.shorthand
+    ) {
+      return;
+    }
+    if (
+      isHookBindingInScope(asyncFunction, {
+        bindingName: child.name,
+        hookName: STATE_DISPATCHER_HOOKS,
+        destructureIndex: 1,
+      })
+    ) {
+      return;
+    }
+    if (isModuleScopeConstBinding(asyncFunction, child.name)) return;
+    if (!isBoundBetweenScopeAndModule(asyncFunction, child.name)) return;
+    readsPerRenderValue = true;
+    return false;
+  });
+  return !readsPerRenderValue;
 };
 
 const findFirstSuspensionStart = (asyncFunction: EsTreeNode): number | null => {
@@ -543,23 +697,28 @@ const hasSequenceCounterGuard = (
 // or a useState flag whose paired setter is toggled with boolean literals
 // (`if (fetching) ...; setFetching(true); await ...`). Either way at most
 // one run is ever in flight, so out-of-order stale writes cannot occur.
-const hasPreAwaitEarlyReturnLatch = (
-  asyncFunction: EsTreeNode,
-  effectCallback: EsTreeNode,
-): boolean => {
-  const firstSuspensionStart = findFirstSuspensionStart(asyncFunction);
-  if (firstSuspensionStart === null) return false;
+const scanScopeForLatchBeforeAnchor = ({
+  scanScope,
+  anchorStart,
+  latchAssignmentScope,
+  effectCallback,
+}: {
+  scanScope: EsTreeNode;
+  anchorStart: number;
+  latchAssignmentScope: EsTreeNode;
+  effectCallback: EsTreeNode;
+}): boolean => {
   let isLatched = false;
-  walkOwnFunctionScope(asyncFunction, (node) => {
+  walkOwnFunctionScope(scanScope, (node) => {
     if (isLatched) return;
     if (!isNodeOfType(node, "IfStatement") || node.alternate) return;
     const start = (node as { start?: unknown }).start;
     const end = (node as { end?: unknown }).end;
-    if (typeof start !== "number" || start >= firstSuspensionStart) return;
+    if (typeof start !== "number" || start >= anchorStart) return;
     // Two spellings of the same latch: the guard-clause early exit
     // (`if (busy) return; ... await`) and the wrap-in-if form whose
     // consequent CONTAINS the await (`if (!busy) { setBusy(true); await }`).
-    const wrapsSuspension = typeof end === "number" && end > firstSuspensionStart;
+    const wrapsSuspension = typeof end === "number" && end > anchorStart;
     if (!wrapsSuspension && !isEarlyExitStatement(node.consequent)) return;
     walkAst(node.test as EsTreeNode, (testChild: EsTreeNode) => {
       if (isLatched) return false;
@@ -572,11 +731,11 @@ const hasPreAwaitEarlyReturnLatch = (
       ) {
         return;
       }
-      if (containsBooleanLiteralAssignmentTo(asyncFunction, testChild.name)) {
+      if (containsBooleanLiteralAssignmentTo(latchAssignmentScope, testChild.name)) {
         isLatched = true;
         return false;
       }
-      const setterName = findPairedUseStateSetterName(asyncFunction, testChild.name);
+      const setterName = findPairedUseStateSetterName(latchAssignmentScope, testChild.name);
       if (setterName && containsSetterCallWithLiteral(effectCallback, setterName)) {
         isLatched = true;
         return false;
@@ -584,6 +743,35 @@ const hasPreAwaitEarlyReturnLatch = (
     });
   });
   return isLatched;
+};
+
+const hasPreAwaitEarlyReturnLatch = (
+  asyncFunction: EsTreeNode,
+  effectCallback: EsTreeNode,
+): boolean => {
+  const firstSuspensionStart = findFirstSuspensionStart(asyncFunction);
+  if (firstSuspensionStart === null) return false;
+  return scanScopeForLatchBeforeAnchor({
+    scanScope: asyncFunction,
+    anchorStart: firstSuspensionStart,
+    latchAssignmentScope: asyncFunction,
+    effectCallback,
+  });
+};
+
+// The latch can also live in the effect callback AROUND the async function
+// (`if (!loadingResource && ...) { loadingResource = true; ... run() }`) —
+// the module-let mutex checked and set synchronously before the async work
+// starts, so at most one run is ever in flight.
+const hasEffectCallbackLatch = (asyncFunction: EsTreeNode, effectCallback: EsTreeNode): boolean => {
+  const asyncFunctionStart = (asyncFunction as { start?: unknown }).start;
+  if (typeof asyncFunctionStart !== "number") return false;
+  return scanScopeForLatchBeforeAnchor({
+    scanScope: effectCallback,
+    anchorStart: asyncFunctionStart,
+    latchAssignmentScope: effectCallback,
+    effectCallback,
+  });
 };
 
 export const noSetStateAfterAwaitInEffect = defineRule({
@@ -624,7 +812,9 @@ export const noSetStateAfterAwaitInEffect = defineRule({
 
       for (const asyncFunction of asyncFunctions) {
         if (hasPreAwaitEarlyReturnLatch(asyncFunction, callback)) continue;
+        if (hasEffectCallbackLatch(asyncFunction, callback)) continue;
         if (hasSequenceCounterGuard(asyncFunction, callback)) continue;
+        if (dependencyArray && asyncWorkIsPerRenderIndependent(asyncFunction)) continue;
         if (hasPostAwaitStateSetter(asyncFunction)) {
           context.report({ node, message: MESSAGE });
           return;

@@ -13,10 +13,34 @@ const CLASS_LIST_MUTATION_METHODS = new Set(["add", "remove", "toggle", "replace
 // App-shell / third-party roots are never a component's own reconciled subtree.
 const EXCLUDED_QUERY_TOKENS = new Set(["root", "__next"]);
 
+// Per-element facts that decide whether React can actually clobber an
+// imperative mutation. React only rewrites an attribute it diffs to a NEW
+// value, so the mutated surface must be driven by a dynamic prop on the
+// matched element: a node with no `style` prop (or an all-literal one)
+// keeps an imperative `style.x` write forever, and a static `className`
+// string is never re-applied over a `classList.add`. A `ref` on the
+// element means the component deliberately manages it imperatively, so
+// query-based writes to it are part of that sanctioned pattern.
+interface OwnedStyleAttributeInfo {
+  hasDynamicValue: boolean;
+  knownPropertyNames: Set<string> | null;
+}
+
+interface OwnedElementInfo {
+  hasRefAttribute: boolean;
+  styleAttribute: OwnedStyleAttributeInfo | null;
+  hasDynamicClassName: boolean;
+}
+
 interface OwnedTokens {
-  ids: Set<string>;
-  classNames: Set<string>;
-  testIds: Set<string>;
+  ids: Map<string, OwnedElementInfo[]>;
+  classNames: Map<string, OwnedElementInfo[]>;
+  testIds: Map<string, OwnedElementInfo[]>;
+}
+
+interface ClassNameAttributeInfo {
+  tokens: string[];
+  isDynamic: boolean;
 }
 
 interface QueryTarget {
@@ -38,31 +62,122 @@ const literalStringFromJsxAttributeValue = (
   return null;
 };
 
+const isStaticLiteralExpression = (expression: EsTreeNode): boolean => {
+  const stripped = stripParenExpression(expression);
+  if (isNodeOfType(stripped, "Literal")) return true;
+  return isNodeOfType(stripped, "TemplateLiteral") && stripped.expressions.length === 0;
+};
+
+const styleAttributeInfoFromValue = (
+  value: EsTreeNode | null | undefined,
+): OwnedStyleAttributeInfo => {
+  if (!value || isNodeOfType(value, "Literal")) {
+    return { hasDynamicValue: false, knownPropertyNames: null };
+  }
+  if (!isNodeOfType(value, "JSXExpressionContainer")) {
+    return { hasDynamicValue: true, knownPropertyNames: null };
+  }
+  const expression = stripParenExpression(value.expression);
+  if (!isNodeOfType(expression, "ObjectExpression")) {
+    return { hasDynamicValue: true, knownPropertyNames: null };
+  }
+  let hasDynamicValue = false;
+  let knownPropertyNames: Set<string> | null = new Set<string>();
+  for (const property of expression.properties) {
+    if (!isNodeOfType(property, "Property") || property.computed) {
+      hasDynamicValue = true;
+      knownPropertyNames = null;
+      continue;
+    }
+    if (isNodeOfType(property.key, "Identifier")) {
+      knownPropertyNames?.add(property.key.name);
+    } else if (isNodeOfType(property.key, "Literal")) {
+      knownPropertyNames?.add(String(property.key.value));
+    } else {
+      knownPropertyNames = null;
+    }
+    if (!isStaticLiteralExpression(property.value)) hasDynamicValue = true;
+  }
+  return { hasDynamicValue, knownPropertyNames };
+};
+
+const classNameAttributeInfoFromValue = (
+  value: EsTreeNode | null | undefined,
+): ClassNameAttributeInfo => {
+  const splitTokens = (classNameText: string): string[] =>
+    classNameText.split(/\s+/).filter(Boolean);
+  const literalValue = literalStringFromJsxAttributeValue(value);
+  if (literalValue !== null) return { tokens: splitTokens(literalValue), isDynamic: false };
+  if (!value || !isNodeOfType(value, "JSXExpressionContainer")) {
+    return { tokens: [], isDynamic: false };
+  }
+  const expression = stripParenExpression(value.expression);
+  if (isNodeOfType(expression, "TemplateLiteral")) {
+    const tokens = expression.quasis.flatMap((quasi) =>
+      splitTokens(quasi.value.cooked ?? quasi.value.raw ?? ""),
+    );
+    return { tokens, isDynamic: expression.expressions.length > 0 };
+  }
+  return { tokens: [], isDynamic: true };
+};
+
+const appendOwnedElementInfo = (
+  bucket: Map<string, OwnedElementInfo[]>,
+  token: string,
+  info: OwnedElementInfo,
+): void => {
+  const existing = bucket.get(token);
+  if (existing) {
+    existing.push(info);
+  } else {
+    bucket.set(token, [info]);
+  }
+};
+
 // Collects the literal id / className / data-testid tokens the file's JSX
-// renders. The ownership link — a queried selector must match one of these —
-// is what proves a mutated node is React-owned by this file, suppressing the
-// portal / third-party / non-React node false positives.
+// renders, plus the per-element clobber facts (`style` prop shape, dynamic
+// className, ref). The ownership link — a queried selector must match one
+// of these — proves a mutated node is React-owned by this file; the facts
+// prove React can actually revert the mutation.
 const collectOwnedTokens = (programRoot: EsTreeNode): OwnedTokens => {
   const owned: OwnedTokens = {
-    ids: new Set(),
-    classNames: new Set(),
-    testIds: new Set(),
+    ids: new Map(),
+    classNames: new Map(),
+    testIds: new Map(),
   };
   walkAst(programRoot, (node: EsTreeNode) => {
-    if (!isNodeOfType(node, "JSXAttribute")) return;
-    const attributeName = getJsxAttributeName(node.name);
-    if (!attributeName) return;
-    const value = literalStringFromJsxAttributeValue(node.value);
-    if (value === null) return;
-    if (attributeName === "id") {
-      owned.ids.add(value);
-    } else if (attributeName === "className" || attributeName === "class") {
-      for (const className of value.split(/\s+/)) {
-        if (className) owned.classNames.add(className);
+    if (!isNodeOfType(node, "JSXOpeningElement")) return;
+    const idTokens: string[] = [];
+    const classTokens: string[] = [];
+    const testIdTokens: string[] = [];
+    const info: OwnedElementInfo = {
+      hasRefAttribute: false,
+      styleAttribute: null,
+      hasDynamicClassName: false,
+    };
+    for (const attribute of node.attributes) {
+      if (!isNodeOfType(attribute, "JSXAttribute")) continue;
+      const attributeName = getJsxAttributeName(attribute.name);
+      if (!attributeName) continue;
+      if (attributeName === "ref") {
+        info.hasRefAttribute = true;
+      } else if (attributeName === "style") {
+        info.styleAttribute = styleAttributeInfoFromValue(attribute.value);
+      } else if (attributeName === "className" || attributeName === "class") {
+        const classNameInfo = classNameAttributeInfoFromValue(attribute.value);
+        info.hasDynamicClassName = classNameInfo.isDynamic;
+        classTokens.push(...classNameInfo.tokens);
+      } else if (attributeName === "id") {
+        const idValue = literalStringFromJsxAttributeValue(attribute.value);
+        if (idValue !== null) idTokens.push(idValue);
+      } else if (attributeName === "data-testid") {
+        const testIdValue = literalStringFromJsxAttributeValue(attribute.value);
+        if (testIdValue !== null) testIdTokens.push(testIdValue);
       }
-    } else if (attributeName === "data-testid") {
-      owned.testIds.add(value);
     }
+    for (const token of idTokens) appendOwnedElementInfo(owned.ids, token, info);
+    for (const token of classTokens) appendOwnedElementInfo(owned.classNames, token, info);
+    for (const token of testIdTokens) appendOwnedElementInfo(owned.testIds, token, info);
   });
   return owned;
 };
@@ -98,12 +213,47 @@ const queryCallTarget = (node: EsTreeNode): QueryTarget | null => {
   return parseSelectorTarget(argument.value);
 };
 
-const isOwnedQueryTarget = (target: QueryTarget | null, owned: OwnedTokens): boolean => {
-  if (!target || EXCLUDED_QUERY_TOKENS.has(target.value)) return false;
-  if (target.kind === "id") return owned.ids.has(target.value);
-  if (target.kind === "class") return owned.classNames.has(target.value);
-  return owned.testIds.has(target.value);
+const NO_OWNED_ELEMENTS: OwnedElementInfo[] = [];
+
+const elementInfosForQueryTarget = (
+  target: QueryTarget | null,
+  owned: OwnedTokens,
+): OwnedElementInfo[] => {
+  if (!target || EXCLUDED_QUERY_TOKENS.has(target.value)) return NO_OWNED_ELEMENTS;
+  const bucket =
+    target.kind === "id" ? owned.ids : target.kind === "class" ? owned.classNames : owned.testIds;
+  return bucket.get(target.value) ?? NO_OWNED_ELEMENTS;
 };
+
+const camelizeCssPropertyName = (propertyName: string): string =>
+  propertyName.startsWith("--")
+    ? propertyName
+    : propertyName.replace(/-([a-z])/g, (_match, letter: string) => letter.toUpperCase());
+
+// React re-applies inline style only when the element's `style` prop diffs
+// to new per-key values, so a clobber is only provable when the matched
+// element has a style prop with at least one non-literal value AND the
+// mutated property is (or could be) among its keys. An element that also
+// carries a `ref` is deliberately hybrid-managed — stay quiet.
+const canReactClobberStyleMutation = (
+  elementInfos: OwnedElementInfo[],
+  mutatedPropertyName: string | null,
+): boolean =>
+  elementInfos.some((info) => {
+    if (info.hasRefAttribute) return false;
+    if (!info.styleAttribute || !info.styleAttribute.hasDynamicValue) return false;
+    const knownPropertyNames = info.styleAttribute.knownPropertyNames;
+    if (mutatedPropertyName === null || knownPropertyNames === null) return true;
+    return (
+      knownPropertyNames.has(mutatedPropertyName) ||
+      knownPropertyNames.has(camelizeCssPropertyName(mutatedPropertyName))
+    );
+  });
+
+// React rewrites the class attribute only when the element's `className`
+// expression produces a new string, which requires a dynamic className.
+const canReactClobberClassMutation = (elementInfos: OwnedElementInfo[]): boolean =>
+  elementInfos.some((info) => !info.hasRefAttribute && info.hasDynamicClassName);
 
 // `X.style.<prop>` / `X.style.cssText` → the mutated node `X`, else null.
 const styleAssignmentReceiver = (assignmentTarget: EsTreeNode): EsTreeNode | null => {
@@ -189,19 +339,25 @@ const collectPatternIdentifiers = (
   }
 };
 
+interface OwnedNodeBinding {
+  identifier: EsTreeNodeOfType<"Identifier">;
+  elementInfos: OwnedElementInfo[];
+}
+
 // `document.querySelectorAll('.owned').forEach((row) => ...)` → the callback
 // parameter that binds each owned node, else null.
 const ownedNodeListCallbackParam = (
   node: EsTreeNode,
   owned: OwnedTokens,
-): EsTreeNodeOfType<"Identifier"> | null => {
+): OwnedNodeBinding | null => {
   if (!isNodeOfType(node, "CallExpression")) return null;
   const callee = node.callee;
   if (!isNodeOfType(callee, "MemberExpression") || callee.computed) return null;
   if (!isNodeOfType(callee.property, "Identifier") || callee.property.name !== "forEach") {
     return null;
   }
-  if (!isOwnedQueryTarget(queryCallTarget(callee.object), owned)) return null;
+  const elementInfos = elementInfosForQueryTarget(queryCallTarget(callee.object), owned);
+  if (elementInfos.length === 0) return null;
   const callbackArgument = node.arguments[0];
   if (!callbackArgument) return null;
   const callback = stripParenExpression(callbackArgument);
@@ -212,7 +368,7 @@ const ownedNodeListCallbackParam = (
     return null;
   }
   const firstParam = callback.params[0];
-  return isNodeOfType(firstParam, "Identifier") ? firstParam : null;
+  return isNodeOfType(firstParam, "Identifier") ? { identifier: firstParam, elementInfos } : null;
 };
 
 // `for (const row of document.querySelectorAll('.owned'))` → the loop
@@ -220,14 +376,15 @@ const ownedNodeListCallbackParam = (
 const ownedNodeListLoopBinding = (
   node: EsTreeNode,
   owned: OwnedTokens,
-): EsTreeNodeOfType<"Identifier"> | null => {
+): OwnedNodeBinding | null => {
   if (!isNodeOfType(node, "ForOfStatement")) return null;
-  if (!isOwnedQueryTarget(queryCallTarget(node.right), owned)) return null;
+  const elementInfos = elementInfosForQueryTarget(queryCallTarget(node.right), owned);
+  if (elementInfos.length === 0) return null;
   const left = node.left;
   if (!isNodeOfType(left, "VariableDeclaration")) return null;
   const declarator = left.declarations[0];
   if (!declarator || !isNodeOfType(declarator.id, "Identifier")) return null;
-  return declarator.id;
+  return { identifier: declarator.id, elementInfos };
 };
 
 const CLEANUP_EFFECT_HOOKS = new Set(["useEffect", "useLayoutEffect", "useInsertionEffect"]);
@@ -404,17 +561,41 @@ export const noMutateQueriedDomNodeInComponent = defineRule({
     let ownedTokens: OwnedTokens | null = null;
     const reported = new WeakSet<EsTreeNode>();
 
-    const receiverIsOwnedQuery = (
+    const elementInfosForReceiver = (
       receiver: EsTreeNode,
-      ownedQueryVariables: Set<string>,
+      ownedQueryVariables: Map<string, OwnedElementInfo[]>,
       owned: OwnedTokens,
-    ): boolean => {
+    ): OwnedElementInfo[] => {
       const stripped = stripParenExpression(receiver);
-      if (isNodeOfType(stripped, "Identifier")) return ownedQueryVariables.has(stripped.name);
-      if (isNodeOfType(stripped, "CallExpression")) {
-        return isOwnedQueryTarget(queryCallTarget(stripped), owned);
+      if (isNodeOfType(stripped, "Identifier")) {
+        return ownedQueryVariables.get(stripped.name) ?? NO_OWNED_ELEMENTS;
       }
-      return false;
+      if (isNodeOfType(stripped, "CallExpression")) {
+        return elementInfosForQueryTarget(queryCallTarget(stripped), owned);
+      }
+      return NO_OWNED_ELEMENTS;
+    };
+
+    // `X.style.<prop> = ...` → the CSS property React would diff against,
+    // or null when it is unknowable (computed key, `cssText`), in which
+    // case any dynamic style prop on the element counts as a clobber risk.
+    const mutatedStylePropertyName = (assignmentTarget: EsTreeNode): string | null => {
+      if (!isNodeOfType(assignmentTarget, "MemberExpression")) return null;
+      if (assignmentTarget.computed) return null;
+      if (!isNodeOfType(assignmentTarget.property, "Identifier")) return null;
+      return assignmentTarget.property.name === "cssText" ? null : assignmentTarget.property.name;
+    };
+
+    const setPropertyArgumentName = (node: EsTreeNodeOfType<"CallExpression">): string | null => {
+      const firstArgument = node.arguments?.[0];
+      if (
+        firstArgument &&
+        isNodeOfType(firstArgument, "Literal") &&
+        typeof firstArgument.value === "string"
+      ) {
+        return firstArgument.value;
+      }
+      return null;
     };
 
     const reportMutation = (node: EsTreeNode, mutatedSurface: "style" | "classList"): void => {
@@ -428,23 +609,23 @@ export const noMutateQueriedDomNodeInComponent = defineRule({
 
     const analyzeComponent = (functionNode: EsTreeNode, owned: OwnedTokens): void => {
       const ownedBindingIdentifiers = new Set<EsTreeNode>();
-      const ownedQueryVariables = new Set<string>();
+      const ownedQueryVariables = new Map<string, OwnedElementInfo[]>();
       walkAst(functionNode, (node: EsTreeNode) => {
-        if (
-          isNodeOfType(node, "VariableDeclarator") &&
-          isNodeOfType(node.id, "Identifier") &&
-          node.init &&
-          isOwnedQueryTarget(queryCallTarget(node.init), owned)
-        ) {
-          ownedBindingIdentifiers.add(node.id);
-          ownedQueryVariables.add(node.id.name);
-          return;
+        if (isNodeOfType(node, "VariableDeclarator") && isNodeOfType(node.id, "Identifier")) {
+          const queryInfos = node.init
+            ? elementInfosForQueryTarget(queryCallTarget(node.init), owned)
+            : NO_OWNED_ELEMENTS;
+          if (queryInfos.length > 0) {
+            ownedBindingIdentifiers.add(node.id);
+            ownedQueryVariables.set(node.id.name, queryInfos);
+            return;
+          }
         }
         const iterationBinding =
           ownedNodeListCallbackParam(node, owned) ?? ownedNodeListLoopBinding(node, owned);
         if (iterationBinding) {
-          ownedBindingIdentifiers.add(iterationBinding);
-          ownedQueryVariables.add(iterationBinding.name);
+          ownedBindingIdentifiers.add(iterationBinding.identifier);
+          ownedQueryVariables.set(iterationBinding.identifier.name, iterationBinding.elementInfos);
         }
       });
 
@@ -479,7 +660,9 @@ export const noMutateQueriedDomNodeInComponent = defineRule({
       walkAst(functionNode, (node: EsTreeNode) => {
         if (isNodeOfType(node, "AssignmentExpression")) {
           const receiver = styleAssignmentReceiver(node.left);
-          if (receiver && receiverIsOwnedQuery(receiver, ownedQueryVariables, owned)) {
+          if (!receiver) return;
+          const elementInfos = elementInfosForReceiver(receiver, ownedQueryVariables, owned);
+          if (canReactClobberStyleMutation(elementInfos, mutatedStylePropertyName(node.left))) {
             if (isInsideEffectCleanup(node) || hasStyleSaveRestore(node)) return;
             reportMutation(node, "style");
           }
@@ -487,18 +670,25 @@ export const noMutateQueriedDomNodeInComponent = defineRule({
         }
         if (isNodeOfType(node, "CallExpression")) {
           const classListReceiver = classListMutationReceiver(node.callee);
-          if (
-            classListReceiver &&
-            receiverIsOwnedQuery(classListReceiver, ownedQueryVariables, owned)
-          ) {
-            if (isInsideEffectCleanup(node) || hasBalancedClassToggle(node)) return;
-            reportMutation(node, "classList");
+          if (classListReceiver) {
+            const elementInfos = elementInfosForReceiver(
+              classListReceiver,
+              ownedQueryVariables,
+              owned,
+            );
+            if (canReactClobberClassMutation(elementInfos)) {
+              if (isInsideEffectCleanup(node) || hasBalancedClassToggle(node)) return;
+              reportMutation(node, "classList");
+            }
             return;
           }
           const styleReceiver = stylePropertyCallReceiver(node.callee);
-          if (styleReceiver && receiverIsOwnedQuery(styleReceiver, ownedQueryVariables, owned)) {
-            if (isInsideEffectCleanup(node)) return;
-            reportMutation(node, "style");
+          if (styleReceiver) {
+            const elementInfos = elementInfosForReceiver(styleReceiver, ownedQueryVariables, owned);
+            if (canReactClobberStyleMutation(elementInfos, setPropertyArgumentName(node))) {
+              if (isInsideEffectCleanup(node)) return;
+              reportMutation(node, "style");
+            }
           }
         }
       });

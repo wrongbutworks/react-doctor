@@ -326,4 +326,77 @@ describe("no-unescaped-dynamic-string-in-regexp", () => {
     );
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("does not flag a unit-test file exercising a highlight API (innovaccer shape)", () => {
+    const result = runRule(
+      noUnescapedDynamicStringInRegexp,
+      `const customRegex = (searchTerm) => new RegExp(\`(\${searchTerm})\`, "i");`,
+      { filename: "core/components/organisms/table/__tests__/Table.test.tsx" },
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a Playwright e2e page object under tests/e2e (hyperdx shape)", () => {
+    const result = runRule(
+      noUnescapedDynamicStringInRegexp,
+      `class FilterComponent {
+        locate(filterGroupName) {
+          return this.page.getByTestId(new RegExp(\`^filter-group-\${filterGroupName}\`));
+        }
+      }`,
+      { filename: "packages/app/tests/e2e/components/FilterComponent.ts" },
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a private helper whose keyword parameter only receives metacharacter-free literals (lumina shape)", () => {
+    const result = runRule(
+      noUnescapedDynamicStringInRegexp,
+      `function parseLengthAfter(prompt, keyword) {
+        const pattern = new RegExp(\`\${keyword}\\\\s+(\\\\d+(?:\\\\.\\\\d+)?)(mm|cm|in|pt|px|em|rem)\`, "i");
+        return prompt.match(pattern);
+      }
+      export function parseAiPromptToSchema(prompt) {
+        const margin = parseLengthAfter(prompt, "margin") ?? parseLengthAfter(prompt, "margins");
+        const header = parseLengthAfter(prompt, "header");
+        const footer = parseLengthAfter(prompt, "footer");
+        return { margin, header, footer };
+      }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags a parameter regex when a call site passes a dynamic value", () => {
+    const result = runRule(
+      noUnescapedDynamicStringInRegexp,
+      `function highlightMatches(text, searchTerm) {
+        return new RegExp(searchTerm, "gi").test(text);
+      }
+      const matches = highlightMatches(content, userTypedQuery);`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags a parameter regex when a call-site literal carries metacharacters", () => {
+    const result = runRule(
+      noUnescapedDynamicStringInRegexp,
+      `function matchKeyword(prompt, keyword) {
+        return new RegExp(keyword + "\\\\s+", "i").test(prompt);
+      }
+      const priced = matchKeyword(text, "price (usd)");`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags an exported function's parameter even when local call sites are literals", () => {
+    const result = runRule(
+      noUnescapedDynamicStringInRegexp,
+      `export function matchKeyword(prompt, keyword) {
+        return new RegExp(keyword, "i").test(prompt);
+      }
+      const inline = matchKeyword(text, "margin");`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
 });

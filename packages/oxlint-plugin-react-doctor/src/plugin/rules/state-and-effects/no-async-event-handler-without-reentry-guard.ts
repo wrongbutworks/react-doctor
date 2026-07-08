@@ -71,6 +71,38 @@ const statementContainsPostAwaitStateSetter = (
   return found;
 };
 
+// Endpoint tails whose double-fire is harmless even over POST: read-style
+// compute endpoints (a preview/search/validation just recomputes the same
+// answer) and idempotent halt endpoints (stopping an already-stopped thing
+// is a no-op). Matched against the last STATIC path segment of the request
+// URL; a trailing dynamic segment (`/items/${id}`) never matches.
+const NON_MUTATING_ENDPOINT_TAIL_PATTERN =
+  /^(?:preview|render|search|query|validate|verify|check|stop|cancel|abort)$/i;
+
+const getStaticRequestUrlTail = (node: EsTreeNodeOfType<"CallExpression">): string | null => {
+  const firstArgument = node.arguments?.[0];
+  if (!firstArgument) return null;
+  const stripped = stripParenExpression(firstArgument);
+  if (isNodeOfType(stripped, "Literal") && typeof stripped.value === "string") {
+    return stripped.value;
+  }
+  if (isNodeOfType(stripped, "TemplateLiteral")) {
+    const lastQuasi = stripped.quasis[stripped.quasis.length - 1];
+    const cooked = lastQuasi?.value?.cooked;
+    return typeof cooked === "string" ? cooked : null;
+  }
+  return null;
+};
+
+const targetsNonMutatingEndpoint = (node: EsTreeNodeOfType<"CallExpression">): boolean => {
+  const urlTail = getStaticRequestUrlTail(node);
+  if (!urlTail) return false;
+  const path = urlTail.split(/[?#]/)[0] ?? "";
+  const segments = path.split("/").filter((segment) => segment.length > 0);
+  const lastSegment = segments[segments.length - 1];
+  return Boolean(lastSegment) && NON_MUTATING_ENDPOINT_TAIL_PATTERN.test(lastSegment);
+};
+
 const isMutatingFetchCall = (node: EsTreeNodeOfType<"CallExpression">): boolean => {
   if (!isNodeOfType(node.callee, "Identifier") || node.callee.name !== "fetch") return false;
   const optionsArgument = node.arguments?.[1];
@@ -99,7 +131,7 @@ const awaitedExpressionIsMutatingNetworkOp = (
   if (!expression) return false;
   const stripped = stripParenExpression(expression);
   if (!isNodeOfType(stripped, "CallExpression")) return false;
-  if (isMutatingFetchCall(stripped)) return true;
+  if (isMutatingFetchCall(stripped)) return !targetsNonMutatingEndpoint(stripped);
   const callee = stripped.callee;
   if (isNodeOfType(callee, "MemberExpression") && !callee.computed) {
     if (
@@ -122,6 +154,10 @@ const awaitedExpressionIsMutatingNetworkOp = (
       ) {
         return false;
       }
+      // `api.post('/media/stop')` / `client.post('/prompts/preview')` —
+      // the static endpoint tail marks the request as read-style or
+      // idempotent, so a double-fire carries no duplicate-mutation harm.
+      if (targetsNonMutatingEndpoint(stripped)) return false;
       return true;
     }
     return awaitedExpressionIsMutatingNetworkOp(callee.object as EsTreeNode);

@@ -251,4 +251,61 @@ describe("no-unguarded-browser-global-at-module-scope", () => {
     expect(result.parseErrors).toEqual([]);
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("stays quiet in Gatsby cache-dir client runtime files (browser-only webpack entries)", () => {
+    const result = runRule(
+      noUnguardedBrowserGlobalAtModuleScope,
+      `const loader = new ProdLoader(asyncRequires, matchPaths, window.pageData);
+       window.asyncRequires = asyncRequires;
+       window.addEventListener('unhandledrejection', () => {});`,
+      { filename: "packages/gatsby/cache-dir/production-app.js" },
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet in Remix .client. module files", () => {
+    const result = runRule(
+      noUnguardedBrowserGlobalAtModuleScope,
+      `export const agent = navigator.userAgent;`,
+      { filename: "app/dashboard/index.client.ts" },
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet when the module already throws under a typeof-window check (Gatsby loading-indicator idiom)", () => {
+    const result = runRule(
+      noUnguardedBrowserGlobalAtModuleScope,
+      `if (typeof window === 'undefined') {
+         throw new Error("Loading indicator should never be imported in code that doesn't target only browsers");
+       }
+       if (typeof window.___didShowBefore === 'undefined') {
+         window.___didShowBefore = false;
+       }
+       const origin = window.location.origin;`,
+      prod,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a window-property assignment target (expose-a-global bootstrap idiom)", () => {
+    const result = runRule(noUnguardedBrowserGlobalAtModuleScope, `window.___emitter = emitter;`, {
+      filename: "src/app.js",
+    });
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags a module-scope read next to a window-property assignment", () => {
+    const result = runRule(
+      noUnguardedBrowserGlobalAtModuleScope,
+      `window.___emitter = emitter;
+       const publicLoader = window.___loader;`,
+      prod,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(1);
+  });
 });

@@ -401,6 +401,78 @@ describe("no-array-find-result-member-access-without-guard", () => {
     expect(result.diagnostics).toHaveLength(1);
   });
 
+  it("stays quiet when the conditional-render guard uses the optional-chained spelling of the same find", () => {
+    const result = runRule(
+      noArrayFindResultMemberAccessWithoutGuard,
+      `const TaskItem = ({ task, apps }) => (
+         <div>
+           {task.metadata?.app && apps?.find((a) => a.id === task.metadata.app)?.name && (
+             <span title={task.metadata.app}>
+               {apps.find((a) => a.id === task.metadata.app).name}
+             </span>
+           )}
+         </div>
+       );`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a MongoDB cursor find(filter) whose argument resolves to an object literal", () => {
+    const result = runRule(
+      noArrayFindResultMemberAccessWithoutGuard,
+      `async function listNodes(collection, sessionId, limit) {
+         const filter = { session_id: sessionId };
+         const docs = await collection
+           .find(filter)
+           .sort({ created_at: 1, _id: 1 })
+           .limit(limit)
+           .toArray();
+         return docs;
+       }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet when the module derives boolean membership state from the same keyed lookup (wishlist shape)", () => {
+    const result = runRule(
+      noArrayFindResultMemberAccessWithoutGuard,
+      `const ProductList = ({ wishlist, products }) => {
+         const removeItemFromWishlist = async (product) => {
+           const itemId = wishlist.customerProductListItems.find(
+             (i) => i.productId === product.productId
+           ).id;
+           await deleteItem(itemId);
+         };
+         return products.map((product) => {
+           const isInWishlist = !!wishlist?.customerProductListItems?.find(
+             (item) => item.productId === product.productId
+           );
+           return (
+             <ProductTile
+               key={product.productId}
+               isFavourite={isInWishlist}
+               onFavouriteToggle={() => removeItemFromWishlist(product)}
+             />
+           );
+         });
+       };`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags the optional-receiver deref when no other lookup on the path exists (order-history TP)", () => {
+    const result = runRule(
+      noArrayFindResultMemberAccessWithoutGuard,
+      `const images = products?.map((product) => {
+         return product?.imageGroups?.find((group) => group.viewType === 'small').images[0];
+       });`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
   it("still flags a deref in a non-JSX callback defined after the guard", () => {
     const result = runRule(
       noArrayFindResultMemberAccessWithoutGuard,

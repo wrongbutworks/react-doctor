@@ -205,4 +205,30 @@ describe("no-object-or-array-coerced-to-string-in-template-literal", () => {
     );
     expect(result.diagnostics).toHaveLength(1);
   });
+
+  it("stays quiet in test files (URL-expectation interpolation)", () => {
+    const result = runRule(
+      noObjectOrArrayCoercedToStringInTemplateLiteral,
+      "const serviceName = ['serviceName'];\nconst expected = `metrics/latencies?service=${serviceName}`;",
+      { filename: "jaeger.test.js" },
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag an array comma-joined into an Error message (tRPC invalid-path shape)", () => {
+    const result = runRule(
+      noObjectOrArrayCoercedToStringInTemplateLiteral,
+      "function resolve(options) { const path = [...options.path]; if (path.length !== 2) { throw new Error(`Invalid path ${path}`); } return path; }",
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags an object interpolated into an Error message", () => {
+    const result = runRule(
+      noObjectOrArrayCoercedToStringInTemplateLiteral,
+      "function fail() { const details = { code: 1 }; throw new Error(`request failed: ${details}`); }",
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
 });

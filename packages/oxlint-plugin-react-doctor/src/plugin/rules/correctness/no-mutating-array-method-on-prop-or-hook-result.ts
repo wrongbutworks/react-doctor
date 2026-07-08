@@ -256,8 +256,10 @@ const isDerivedFromHookCall = (binding: BindingInfo): boolean => {
 
 // `const [store] = useState({...})` with the setter never destructured is the
 // deliberate ref-like mutable-container idiom (same rationale as the
-// `.current` carve-out). Only applies when the array is reached through a
-// member access on the container — direct `stateArray.sort()` stays flagged.
+// `.current` carve-out). Applies when the array is reached through a member
+// access on the container, and to direct `splice` (registry add/remove
+// maintenance, e.g. a timeout-id registry emptied on unmount) — a direct
+// `stateArray.sort()` stays flagged.
 const isSetterlessUseStateBinding = (binding: BindingInfo): boolean => {
   const declarator = nearestVariableDeclarator(binding.bindingIdentifier);
   if (!declarator || !isNodeOfType(declarator.id, "ArrayPattern")) return false;
@@ -265,6 +267,84 @@ const isSetterlessUseStateBinding = (binding: BindingInfo): boolean => {
   if (boundElements.length !== 1) return false;
   if (!declarator.init) return false;
   return getCalleeName(stripParenExpression(declarator.init as EsTreeNode)) === "useState";
+};
+
+// Array-returning methods that always allocate a fresh array, so mutating
+// their result never touches the source collection.
+const FRESH_ARRAY_PRODUCING_METHODS = new Set([
+  "filter",
+  "map",
+  "slice",
+  "concat",
+  "flat",
+  "flatMap",
+  "toSorted",
+  "toReversed",
+  "toSpliced",
+]);
+
+const isProvablyFreshOrAbsentValue = (expression: EsTreeNode): boolean => {
+  const stripped = stripParenExpression(expression);
+  if (isNodeOfType(stripped, "ArrayExpression")) return true;
+  if (isNodeOfType(stripped, "Identifier") && stripped.name === "undefined") return true;
+  if (isNodeOfType(stripped, "Literal") && stripped.value === null) return true;
+  if (isNodeOfType(stripped, "ConditionalExpression")) {
+    return (
+      isProvablyFreshOrAbsentValue(stripped.consequent) &&
+      isProvablyFreshOrAbsentValue(stripped.alternate)
+    );
+  }
+  if (isNodeOfType(stripped, "LogicalExpression")) {
+    return (
+      isProvablyFreshOrAbsentValue(stripped.left) && isProvablyFreshOrAbsentValue(stripped.right)
+    );
+  }
+  if (isNodeOfType(stripped, "CallExpression")) {
+    const callee = stripped.callee;
+    if (isNodeOfType(callee, "MemberExpression") && !callee.computed) {
+      const method = callee.property;
+      if (!isNodeOfType(method, "Identifier")) return false;
+      if (FRESH_ARRAY_PRODUCING_METHODS.has(method.name)) return true;
+      return (
+        method.name === "from" &&
+        isNodeOfType(callee.object, "Identifier") &&
+        callee.object.name === "Array"
+      );
+    }
+  }
+  return false;
+};
+
+// `const rows = useMemo(() => source?.filter(...), deps)` — the memo result
+// is a component-owned fresh copy on every return path (`.filter()`,
+// `.slice()`, `[...]`, an array literal, or nothing at all), so an in-place
+// sort touches no shared/cached data. Any return path yielding an identifier
+// or member expression (e.g. `return payload ?? []`) can still alias the
+// source, so the exemption is refused.
+const isUseMemoReturningOnlyFreshArrays = (hookCall: EsTreeNode | null): boolean => {
+  if (!hookCall || !isNodeOfType(hookCall, "CallExpression")) return false;
+  if (getCalleeName(hookCall) !== "useMemo") return false;
+  const factoryArgument = hookCall.arguments?.[0];
+  if (!factoryArgument) return false;
+  const factory = stripParenExpression(factoryArgument);
+  if (!isFunctionLike(factory)) return false;
+  const body = factory.body;
+  if (!body) return false;
+  if (!isNodeOfType(body, "BlockStatement")) return isProvablyFreshOrAbsentValue(body);
+  let sawUnprovenReturn = false;
+  let sawFreshReturn = false;
+  walkAst(body, (child) => {
+    if (child !== body && isFunctionLike(child)) return false;
+    if (!isNodeOfType(child, "ReturnStatement")) return undefined;
+    const returnedValue = child.argument;
+    if (!returnedValue || isProvablyFreshOrAbsentValue(returnedValue)) {
+      sawFreshReturn = true;
+    } else {
+      sawUnprovenReturn = true;
+    }
+    return undefined;
+  });
+  return sawFreshReturn && !sawUnprovenReturn;
 };
 
 // True when the binding is a parameter of its scope-owning function
@@ -356,6 +436,7 @@ type SharedArraySource = "prop" | "hook-result";
 const resolveSharedArraySource = (
   rootIdentifier: EsTreeNodeOfType<"Identifier">,
   callNode: EsTreeNodeOfType<"CallExpression">,
+  mutatingMethodName: string,
   reachesThroughMemberAccess: boolean,
   depth: number,
 ): SharedArraySource | null => {
@@ -366,14 +447,21 @@ const resolveSharedArraySource = (
   if (hasRebindBeforeCall(binding, rootIdentifier.name, callNode)) return null;
   if (!reachesThroughMemberAccess && isBoundThroughRestElement(binding)) return null;
   if (isDerivedFromHookCall(binding)) {
-    if (reachesThroughMemberAccess && isSetterlessUseStateBinding(binding)) return null;
+    if (
+      isSetterlessUseStateBinding(binding) &&
+      (reachesThroughMemberAccess || mutatingMethodName === "splice")
+    ) {
+      return null;
+    }
+    const initializerCall = binding.initializer ? stripParenExpression(binding.initializer) : null;
     const declaratorInit = declaratorInitFor(binding);
     if (
-      isMutableStoreHookCall(
-        binding.initializer ? stripParenExpression(binding.initializer) : null,
-      ) ||
+      isMutableStoreHookCall(initializerCall) ||
       isMutableStoreHookCall(declaratorInit ? stripParenExpression(declaratorInit) : null)
     ) {
+      return null;
+    }
+    if (!reachesThroughMemberAccess && isUseMemoReturningOnlyFreshArrays(initializerCall)) {
       return null;
     }
     return "hook-result";
@@ -390,6 +478,7 @@ const resolveSharedArraySource = (
   return resolveSharedArraySource(
     aliasSource.rootIdentifier,
     callNode,
+    mutatingMethodName,
     reachesThroughMemberAccess || aliasSource.isMemberAccess,
     depth + 1,
   );
@@ -431,7 +520,13 @@ export const noMutatingArrayMethodOnPropOrHookResult = defineRule({
       if (fileImportsImmutableJs(node as EsTreeNode)) return;
 
       const receiverIsMemberAccess = isNodeOfType(receiver, "MemberExpression");
-      const source = resolveSharedArraySource(rootIdentifier, node, receiverIsMemberAccess, 0);
+      const source = resolveSharedArraySource(
+        rootIdentifier,
+        node,
+        callee.property.name,
+        receiverIsMemberAccess,
+        0,
+      );
       if (!source) return;
       context.report({ node, message: messageFor(source) });
     },

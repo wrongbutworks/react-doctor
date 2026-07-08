@@ -936,4 +936,127 @@ const Search = ({ query }) => {
     );
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("stays quiet when the awaited work is independent of every per-render value (dep only gates the fetch)", () => {
+    const result = runRule(
+      noSetStateAfterAwaitInEffect,
+      `import referralService from './referral.service';
+       const NavbarGlobalSearch = () => {
+         const isReferralEligible = useAppSelector((state) => state.referrals.isEligible);
+         const [customLauncherLabel, setCustomLauncherLabel] = useState('');
+         useEffect(() => {
+           const fetchLabel = async () => {
+             const label = await referralService.getCustomLauncherLabel();
+             if (label) {
+               setCustomLauncherLabel(label);
+             }
+           };
+           if (isReferralEligible) {
+             fetchLabel();
+           }
+         }, [isReferralEligible]);
+       };`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags when the awaited work reads the changing dep (result varies across runs)", () => {
+    const result = runRule(
+      noSetStateAfterAwaitInEffect,
+      `const MentionPerson = ({ personId }) => {
+         const [name, setName] = useState('');
+         useEffect(() => {
+           const load = async () => {
+             const person = await fetchPerson(personId);
+             setName(person.name);
+           };
+           load();
+         }, [personId]);
+       };`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("stays quiet when the only dep is a context-hook service used purely as a method-call receiver", () => {
+    const result = runRule(
+      noSetStateAfterAwaitInEffect,
+      `const VerificationWebViewScreen = () => {
+         const { identityService } = useQueryContext();
+         const [authHeaders, setAuthHeaders] = useState(null);
+         useEffect(() => {
+           const fetchAuthHeaders = async () => {
+             try {
+               const headers = await identityService.getAuthHeaders();
+               setAuthHeaders(headers);
+             } catch (error) {
+               console.error('Failed to fetch auth headers:', error);
+             }
+           };
+           fetchAuthHeaders();
+         }, [identityService]);
+       };`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags a context-hook dep that is invoked directly (recreated callback identity)", () => {
+    const result = runRule(
+      noSetStateAfterAwaitInEffect,
+      `const RelatedViews = () => {
+         const { fetchViews } = useViewLoaderContext();
+         const [folder, setFolder] = useState(null);
+         useEffect(() => {
+           const load = async () => {
+             const data = await fetchViews();
+             setFolder(data);
+           };
+           load();
+         }, [fetchViews]);
+       };`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags a context-hook service dep when an unstable dep rides alongside it", () => {
+    const result = runRule(
+      noSetStateAfterAwaitInEffect,
+      `const FileBlock = ({ retryLocalUrl }) => {
+         const { fileHandler } = useEditorContext();
+         const [localUrl, setLocalUrl] = useState(null);
+         useEffect(() => {
+           const load = async () => {
+             const file = await fileHandler.getStoredFile(retryLocalUrl);
+             setLocalUrl(file);
+           };
+           load();
+         }, [fileHandler, retryLocalUrl]);
+       };`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("stays quiet on a module-let mutex checked and set in the effect callback around the async work (commercelayer shape)", () => {
+    const result = runRule(
+      noSetStateAfterAwaitInEffect,
+      `let loadingResource = false;
+       const PaymentMethod = ({ paymentMethods, autoSelectSinglePaymentMethod }) => {
+         const [paymentSelected, setPaymentSelected] = useState('');
+         useEffect(() => {
+           if (paymentMethods != null && !loadingResource) {
+             loadingResource = true;
+             if (autoSelectSinglePaymentMethod != null) {
+               const autoSelect = async () => {
+                 const ps = await createPaymentSource(paymentMethods[0]);
+                 if (ps) {
+                   setPaymentSelected(ps.id);
+                 }
+               };
+               autoSelect();
+             }
+           }
+         }, [paymentMethods, autoSelectSinglePaymentMethod]);
+       };`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
 });

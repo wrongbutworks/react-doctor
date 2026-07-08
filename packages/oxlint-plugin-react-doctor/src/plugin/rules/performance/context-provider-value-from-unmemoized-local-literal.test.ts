@@ -294,6 +294,10 @@ describe("context-provider-value-from-unmemoized-local-literal", () => {
     expect(result.diagnostics).toHaveLength(1);
   });
 
+  it("is disabled on React Compiler projects (compiler memoizes the fresh literal)", () => {
+    expect(contextProviderValueFromUnmemoizedLocalLiteral.disabledBy).toContain("react-compiler");
+  });
+
   it("does not flag the shorthand when the name is a local shadow, not a context", () => {
     const result = runRule(
       contextProviderValueFromUnmemoizedLocalLiteral,

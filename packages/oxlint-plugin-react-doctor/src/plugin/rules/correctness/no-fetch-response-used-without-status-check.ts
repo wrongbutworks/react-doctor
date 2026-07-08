@@ -21,6 +21,13 @@ const MAX_URL_BINDING_RESOLUTION_DEPTH = 4;
 // Build-time scripts (Gatsby node APIs, *.config.* files) run once at
 // build and fail the build loudly on a bad response — not user-facing.
 const BUILD_SCRIPT_BASENAME_PATTERN = /^gatsby-(?:node|config|ssr|browser)\.|\.config\./i;
+// Docs-site demo files (`useHover.demo.tsx`) and test-utility directories
+// (`src/connector/testUtils/mockGremlinFetch.ts`) are non-production
+// surfaces the shared testlike-filename skip does not yet recognize —
+// mirrored locally until `.demo.` / `/testUtils/` are hoisted into
+// `is-testlike-filename.ts`.
+const DEMO_FILE_BASENAME_PATTERN = /\.demos?\./i;
+const TEST_UTILITY_PATH_SEGMENT_PATTERN = /\/(?:testutils|test-utils)\//i;
 
 const MESSAGE =
   "`fetch()` resolves (does not reject) on HTTP 4xx/5xx, so consuming this Response without checking `response.ok`/`response.status` parses an error body as success or crashes on a truthiness guard that is always true. Check `if (!response.ok) throw ...` before reading `.json()`/`.text()`/`.blob()`.";
@@ -58,8 +65,39 @@ const resolveStaticUrlPrefix = (argument: EsTreeNode, depth: number): string | n
 // `canvas.toDataURL(...)`, `URL.createObjectURL(...)` — or carried by a
 // binding/parameter named for the scheme (`dataUrl`, `objectUrl`,
 // `blobUrl`). Decoding them is local: no HTTP status exists to check.
+// A `require('./asset.md')` URL is inert the same way: the bundler emits
+// the asset into the app's own bundle, so the same-origin static URL
+// cannot 4xx/5xx in a consistent deployment.
 const INERT_URL_PRODUCER_METHOD_NAMES = new Set(["toDataURL", "createObjectURL"]);
+const INERT_URL_PRODUCER_CALLEE_NAMES = new Set(["createObjectURL", "require"]);
 const INERT_URL_BINDING_NAME_PATTERN = /^(?:data|object|blob)_?ur[il]$/i;
+
+const isBundledAssetRequireCall = (expression: EsTreeNode): boolean =>
+  isNodeOfType(expression, "CallExpression") &&
+  isNodeOfType(expression.callee, "Identifier") &&
+  expression.callee.name === "require";
+
+// `let markdownPath = ''; try { markdownPath = require(...) } catch {
+// markdownPath = require(fallback) }` — the require-produced URL reaches
+// the binding through assignments rather than the declarator initializer.
+const bindingIsAssignedFromRequire = (identifier: EsTreeNodeOfType<"Identifier">): boolean => {
+  const binding = findVariableInitializer(identifier, identifier.name);
+  if (!binding) return false;
+  let assignedFromRequire = false;
+  walkAst(binding.scopeOwner, (child) => {
+    if (assignedFromRequire) return false;
+    if (
+      isNodeOfType(child, "AssignmentExpression") &&
+      isNodeOfType(child.left, "Identifier") &&
+      child.left.name === identifier.name &&
+      isBundledAssetRequireCall(stripGroupingParens(child.right as EsTreeNode))
+    ) {
+      assignedFromRequire = true;
+      return false;
+    }
+  });
+  return assignedFromRequire;
+};
 
 const isInertUrlProducer = (argument: EsTreeNode, depth: number): boolean => {
   if (depth > MAX_URL_BINDING_RESOLUTION_DEPTH) return false;
@@ -73,10 +111,11 @@ const isInertUrlProducer = (argument: EsTreeNode, depth: number): boolean => {
     ) {
       return INERT_URL_PRODUCER_METHOD_NAMES.has(callee.property.name);
     }
-    return isNodeOfType(callee, "Identifier") && callee.name === "createObjectURL";
+    return isNodeOfType(callee, "Identifier") && INERT_URL_PRODUCER_CALLEE_NAMES.has(callee.name);
   }
   if (isNodeOfType(expression, "Identifier")) {
     if (INERT_URL_BINDING_NAME_PATTERN.test(expression.name)) return true;
+    if (bindingIsAssignedFromRequire(expression)) return true;
     const binding = findVariableInitializer(expression, expression.name);
     if (!binding?.initializer || binding.initializer === expression) return false;
     return isInertUrlProducer(binding.initializer, depth + 1);
@@ -215,6 +254,47 @@ const scopeChecksStatus = (scope: EsTreeNode, responseName: string): boolean => 
   return found;
 };
 
+// APIs that tunnel the HTTP status through the body (`{ status: 201 }` /
+// `{ statusCode: 400 }`) get checked on the PARSED value instead of the
+// Response: `const parsed = await response.json(); if (parsed.status !== 201)
+// throw ...`. That is the ok-check, just one hop later.
+const PARSED_BODY_STATUS_PROPERTIES = new Set(["ok", "status", "statusCode"]);
+
+const isParsedBodyStatusAccess = (node: EsTreeNode, parsedName: string): boolean =>
+  isNodeOfType(node, "MemberExpression") &&
+  !node.computed &&
+  isNodeOfType(node.object, "Identifier") &&
+  node.object.name === parsedName &&
+  isNodeOfType(node.property, "Identifier") &&
+  PARSED_BODY_STATUS_PROPERTIES.has(node.property.name);
+
+const scopeChecksParsedBodyStatus = (scope: EsTreeNode, responseName: string): boolean => {
+  const parsedNames = new Set<string>();
+  walkScopeSkippingShadows(scope, responseName, (child) => {
+    if (!isNodeOfType(child, "VariableDeclarator") || !isNodeOfType(child.id, "Identifier")) {
+      return;
+    }
+    if (!child.init) return;
+    let initializer = stripGroupingParens(child.init as EsTreeNode);
+    if (isNodeOfType(initializer, "AwaitExpression")) {
+      initializer = stripGroupingParens(initializer.argument as EsTreeNode);
+    }
+    if (isBodyConsumeCall(initializer, responseName)) parsedNames.add(child.id.name);
+  });
+  if (parsedNames.size === 0) return false;
+  let found = false;
+  walkScopeSkippingShadows(scope, responseName, (child) => {
+    if (found) return false;
+    for (const parsedName of parsedNames) {
+      if (isParsedBodyStatusAccess(child, parsedName)) {
+        found = true;
+        return false;
+      }
+    }
+  });
+  return found;
+};
+
 const isConsumingReceiver = (identifier: EsTreeNode): boolean => {
   const parent = identifier.parent;
   return Boolean(
@@ -287,8 +367,11 @@ const isLoggingOnlyStatement = (statement: EsTreeNode): boolean =>
   isNodeOfType(statement, "ExpressionStatement") &&
   isConsoleCall(statement.expression as EsTreeNode);
 
+// An EMPTY handler (`catch {}`, `.catch(() => {})`) is a deliberate
+// fail-open swallow — unlike a log-only handler (probably an oversight),
+// nobody writes an empty handler expecting the failure to surface.
 const statementsMaterializeError = (statements: ReadonlyArray<EsTreeNode>): boolean =>
-  statements.some((statement) => !isLoggingOnlyStatement(statement));
+  statements.length === 0 || statements.some((statement) => !isLoggingOnlyStatement(statement));
 
 // A rejection handler "materializes" the failure when it does more than
 // log — sets error state, returns a fallback value, rethrows. A named
@@ -555,6 +638,7 @@ const reportUnguarded = ({
 }: UnguardedReportInput): void => {
   if (!scopeConsumesResponse(scope, responseName, !responseBindingCanBeUndefined)) return;
   if (scopeChecksStatus(scope, responseName)) return;
+  if (scopeChecksParsedBodyStatus(scope, responseName)) return;
   if (scopeResponseEscapes(scope, responseName)) return;
   context.report({ node: reportNode, message: MESSAGE });
 };
@@ -566,9 +650,13 @@ const reportUnguarded = ({
 // parsed as success. Roots only at the literal global `fetch`, and stays
 // quiet when the Response escapes to a caller or validator, when a
 // `.catch` / two-arg `.then` / enclosing try-catch materializes the
-// failure beyond logging, when the URL is a `data:`/`blob:` scheme that
-// can never yield a non-ok response, and in non-production files
-// (stories, demos, tests, build config, gatsby-node scripts).
+// failure beyond logging (or is a deliberately EMPTY fail-open swallow),
+// when the status is checked on the parsed body instead
+// (`parsed.status`/`parsed.statusCode`/`parsed.ok`), when the URL is a
+// `data:`/`blob:` scheme or a bundler-emitted `require(...)` asset URL
+// that can never yield a non-ok response, and in non-production files
+// (stories, docs demos, test utilities, build config, gatsby-node
+// scripts).
 export const noFetchResponseUsedWithoutStatusCheck = defineRule({
   id: "no-fetch-response-used-without-status-check",
   title: "fetch Response consumed without status check",
@@ -581,6 +669,8 @@ export const noFetchResponseUsedWithoutStatusCheck = defineRule({
     const normalizedFilename = (context.filename ?? "").replaceAll("\\", "/");
     const basename = normalizedFilename.slice(normalizedFilename.lastIndexOf("/") + 1);
     if (BUILD_SCRIPT_BASENAME_PATTERN.test(basename)) return {};
+    if (DEMO_FILE_BASENAME_PATTERN.test(basename)) return {};
+    if (TEST_UTILITY_PATH_SEGMENT_PATTERN.test(normalizedFilename)) return {};
     return {
       CallExpression(node: EsTreeNodeOfType<"CallExpression">) {
         if (!isGlobalFetchCall(node)) return;

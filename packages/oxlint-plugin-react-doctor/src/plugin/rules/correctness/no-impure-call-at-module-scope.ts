@@ -42,6 +42,10 @@ const PER_PROCESS_NAME_KEYWORDS = new Set([
   "baseline",
   "session",
   "seed",
+  // `NOW` / `NOW_MS` — the name declares a deliberate module-load
+  // timestamp (hyperdx documents its `export const NOW = Date.now()` as
+  // "time captured at module load, use as a stable fallback")
+  "now",
   "id",
   "tab",
   "client",

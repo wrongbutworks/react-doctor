@@ -101,6 +101,73 @@ const memberAccessPath = (node: EsTreeNode): string | null => {
   return null;
 };
 
+// The comparable path for a chain whose tail is a computed access
+// (`rows?.[0]` has no dotted path, but a guard mentioning `rows` — e.g.
+// `if (rows.length === 0) return [];` — still covers it): peel computed
+// member layers off the end until a dotted path resolves.
+const guardComparablePathForChain = (node: EsTreeNode): string | null => {
+  let target: EsTreeNode = node;
+  while (true) {
+    const directPath = memberAccessPath(target);
+    if (directPath !== null) return directPath;
+    if (isNodeOfType(target, "ChainExpression") || isNodeOfType(target, "TSNonNullExpression")) {
+      target = target.expression as EsTreeNode;
+      continue;
+    }
+    if (isNodeOfType(target, "MemberExpression")) {
+      target = target.object as EsTreeNode;
+      continue;
+    }
+    return null;
+  }
+};
+
+// The throw the rule predicts is already consumed: the call sits in a
+// callback of a promise chain that ends in `.catch(...)`
+// (`fetch(...).then((data) => Object.values(data?.payload?.…)).catch(() =>
+// [])`), so the crash never escapes the chain.
+const isInsideCatchTerminatedPromiseChain = (callNode: EsTreeNode): boolean => {
+  let cursor: EsTreeNode | null = callNode.parent ?? null;
+  while (cursor) {
+    if (
+      isNodeOfType(cursor, "ArrowFunctionExpression") ||
+      isNodeOfType(cursor, "FunctionExpression")
+    ) {
+      const callbackHolder = cursor.parent;
+      if (
+        callbackHolder &&
+        isNodeOfType(callbackHolder, "CallExpression") &&
+        isNodeOfType(callbackHolder.callee, "MemberExpression") &&
+        !callbackHolder.callee.computed &&
+        isNodeOfType(callbackHolder.callee.property, "Identifier") &&
+        (callbackHolder.callee.property.name === "then" ||
+          callbackHolder.callee.property.name === "catch") &&
+        (callbackHolder.arguments ?? []).includes(cursor as never)
+      ) {
+        let chainLink: EsTreeNode = callbackHolder;
+        while (
+          chainLink.parent &&
+          isNodeOfType(chainLink.parent, "MemberExpression") &&
+          chainLink.parent.object === chainLink &&
+          chainLink.parent.parent &&
+          isNodeOfType(chainLink.parent.parent, "CallExpression")
+        ) {
+          if (
+            !chainLink.parent.computed &&
+            isNodeOfType(chainLink.parent.property, "Identifier") &&
+            chainLink.parent.property.name === "catch"
+          ) {
+            return true;
+          }
+          chainLink = chainLink.parent.parent;
+        }
+      }
+    }
+    cursor = cursor.parent ?? null;
+  }
+  return false;
+};
+
 const subtreeContainsMemberPath = (node: EsTreeNode | null | undefined, path: string): boolean => {
   if (!node) return false;
   let found = false;
@@ -210,6 +277,7 @@ export const noObjectKeysValuesEntriesOnMaybeUndefined = defineRule({
       if (!isObjectIterationCall(node)) return;
       const argument = node.arguments?.[0];
       if (!argument) return;
+      if (isInsideCatchTerminatedPromiseChain(node as EsTreeNode)) return;
       const unwrapped = stripParenExpression(argument as EsTreeNode);
 
       // Case A: the argument itself carries optional chaining (`a?.b`),
@@ -218,7 +286,7 @@ export const noObjectKeysValuesEntriesOnMaybeUndefined = defineRule({
       // A `?? {}` fallback makes the argument a LogicalExpression instead,
       // which never reaches this branch.
       if (isNodeOfType(argument as EsTreeNode, "ChainExpression")) {
-        const chainPath = memberAccessPath(argument as EsTreeNode);
+        const chainPath = guardComparablePathForChain(argument as EsTreeNode);
         const isChainGuarded =
           chainPath !== null &&
           isValueGuardedBeforeCall(node, (guard: EsTreeNode) =>

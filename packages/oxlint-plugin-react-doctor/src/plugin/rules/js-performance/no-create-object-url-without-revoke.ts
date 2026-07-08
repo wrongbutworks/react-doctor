@@ -53,6 +53,53 @@ const moduleReferencesRevoke = (programRoot: EsTreeNode): boolean => {
   return found;
 };
 
+const MODULE_CACHE_NAME_PATTERN = /cache/i;
+const CACHE_COLLECTION_CONSTRUCTOR_NAMES = new Set(["Map", "Set"]);
+const CACHE_STORE_METHOD_NAMES = new Set(["set", "add"]);
+
+// A cache-named module-scope `new Map()`/`new Set()` the module stores into
+// (`previewCache.set(id, url)`) is a deliberate app-lifetime cache: the URLs
+// kept there stay in active use across mounts by design (generate once per
+// session, reuse forever), so "never revoked" is the intent, not a leak.
+const moduleKeepsResultsInModuleScopeCache = (programRoot: EsTreeNode): boolean => {
+  if (!isNodeOfType(programRoot, "Program")) return false;
+  const cacheBindingNames = new Set<string>();
+  for (const statement of programRoot.body ?? []) {
+    if (!isNodeOfType(statement, "VariableDeclaration")) continue;
+    for (const declarator of statement.declarations ?? []) {
+      if (!isNodeOfType(declarator.id, "Identifier")) continue;
+      if (!MODULE_CACHE_NAME_PATTERN.test(declarator.id.name)) continue;
+      const initializer = declarator.init ? stripGroupingParens(declarator.init) : null;
+      if (
+        initializer &&
+        isNodeOfType(initializer, "NewExpression") &&
+        isNodeOfType(initializer.callee, "Identifier") &&
+        CACHE_COLLECTION_CONSTRUCTOR_NAMES.has(initializer.callee.name)
+      ) {
+        cacheBindingNames.add(declarator.id.name);
+      }
+    }
+  }
+  if (cacheBindingNames.size === 0) return false;
+  let storesIntoCache = false;
+  walkAst(programRoot, (child) => {
+    if (storesIntoCache) return false;
+    if (
+      isNodeOfType(child, "CallExpression") &&
+      isNodeOfType(child.callee, "MemberExpression") &&
+      !child.callee.computed &&
+      isNodeOfType(child.callee.object, "Identifier") &&
+      cacheBindingNames.has(child.callee.object.name) &&
+      isNodeOfType(child.callee.property, "Identifier") &&
+      CACHE_STORE_METHOD_NAMES.has(child.callee.property.name)
+    ) {
+      storesIntoCache = true;
+      return false;
+    }
+  });
+  return storesIntoCache;
+};
+
 const isGuardBranchOf = (parent: EsTreeNode, node: EsTreeNode): boolean =>
   (isNodeOfType(parent, "LogicalExpression") &&
     (stripGroupingParens(parent.left) === node || stripGroupingParens(parent.right) === node)) ||
@@ -161,6 +208,9 @@ const escapeIsLeaky = (callNode: EsTreeNode): boolean => {
 // value bound to a variable — declared or assigned)
 // when the module never references `URL.revokeObjectURL`. The blob URL
 // pins its Blob/File in memory until revoked, so an un-revoked URL leaks.
+// Stays quiet when the module stores results into a cache-named
+// module-scope Map/Set — a deliberate app-lifetime cache whose URLs are
+// never "done".
 export const noCreateObjectUrlWithoutRevoke = defineRule({
   id: "no-create-object-url-without-revoke",
   title: "createObjectURL without revokeObjectURL",
@@ -171,12 +221,14 @@ export const noCreateObjectUrlWithoutRevoke = defineRule({
     "Call `URL.revokeObjectURL(url)` once the object URL is no longer needed (after the download, in a `useEffect` cleanup, or on unmount). An object URL keeps its Blob/File alive for the document lifetime until it is revoked.",
   create: (context: RuleContext) => {
     let moduleHasRevoke = false;
+    let moduleHasDeliberateCache = false;
     return {
       Program(node: EsTreeNodeOfType<"Program">) {
         moduleHasRevoke = moduleReferencesRevoke(node);
+        moduleHasDeliberateCache = moduleKeepsResultsInModuleScopeCache(node);
       },
       CallExpression(node: EsTreeNodeOfType<"CallExpression">) {
-        if (moduleHasRevoke) return;
+        if (moduleHasRevoke || moduleHasDeliberateCache) return;
         if (!isCreateObjectUrlCall(node)) return;
         if (!escapeIsLeaky(node)) return;
         context.report({ node, message: MESSAGE });

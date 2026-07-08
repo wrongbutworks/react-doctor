@@ -267,6 +267,135 @@ describe("jsx-numeric-and-leaked-render", () => {
     expect(result.diagnostics).toHaveLength(1);
   });
 
+  it("stays quiet when a dominating operand proves the length positive (cloudscape tree-item shape)", () => {
+    const result = runRule(
+      jsxNumericAndLeakedRender,
+      `const TreeItem = ({ item, expandedItems, getItemChildren, id }) => {
+        const children = getItemChildren(item) || [];
+        const isExpandable = children.length > 0;
+        const isExpanded = isExpandable && expandedItems.includes(id);
+        return (
+          <li>
+            {isExpanded && children.length && (
+              <ul>
+                {children.map((child) => (
+                  <TreeItem key={child.id} item={child} />
+                ))}
+              </ul>
+            )}
+          </li>
+        );
+      };`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags when the dominating operand does not constrain the count", () => {
+    const result = runRule(
+      jsxNumericAndLeakedRender,
+      `const TreeItem = ({ children, isSelected }) => (
+        <li>{isSelected && children.length && <ul>{children.map((c) => <li key={c} />)}</ul>}</li>
+      );`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("stays quiet on a never-set useState array seeded non-empty (docusaurus features shape)", () => {
+    const result = runRule(
+      jsxNumericAndLeakedRender,
+      `const Home = () => {
+        const [features, setFeatures] = useState([{ id: 1 }, { id: 2 }]);
+        return (
+          <main>
+            {features && features.length && (
+              <section>
+                {features.map((feature) => (
+                  <Feature key={feature.id} {...feature} />
+                ))}
+              </section>
+            )}
+          </main>
+        );
+      };`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags a useState array whose setter is called (the list can become empty)", () => {
+    const result = runRule(
+      jsxNumericAndLeakedRender,
+      `const Home = () => {
+        const [features, setFeatures] = useState([{ id: 1 }]);
+        return (
+          <main>
+            <button onClick={() => setFeatures([])}>clear</button>
+            {features.length && <section>{features.map((f) => <Feature key={f.id} />)}</section>}
+          </main>
+        );
+      };`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags a useState array seeded empty even when the setter is never called", () => {
+    const result = runRule(
+      jsxNumericAndLeakedRender,
+      `const Home = () => {
+        const [features, setFeatures] = useState([]);
+        return <main>{features.length && <section>{features.map((f) => <Feature key={f} />)}</section>}</main>;
+      };`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("stays quiet when the receiver is provably non-empty-or-undefined (remix-forms globalErrorsToDisplay shape)", () => {
+    const result = runRule(
+      jsxNumericAndLeakedRender,
+      `const SchemaForm = ({ errors, navigationState }) => {
+        const toGlobal = React.useCallback((incoming) => {
+          const all = [].concat(incoming).filter((error) => typeof error === 'string');
+          return all.length > 0 ? all : undefined;
+        }, []);
+        const globalErrors = React.useMemo(() => toGlobal(errors), [errors, toGlobal]);
+        const globalErrorsToDisplay = navigationState !== 'idle' ? undefined : globalErrors;
+        return (
+          <form>
+            {globalErrorsToDisplay?.length && (
+              <Errors>
+                {globalErrorsToDisplay.map((error) => (
+                  <Error key={error}>{error}</Error>
+                ))}
+              </Errors>
+            )}
+          </form>
+        );
+      };`,
+      { filename: "schema-form.tsx" },
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags an optional-chained length on a plain array prop (vip-design-system Footer shape)", () => {
+    const result = runRule(
+      jsxNumericAndLeakedRender,
+      `const Footer = ({ links }) => (
+        <footer>
+          {links?.length && (
+            <ul>
+              {links.map((link) => (
+                <li key={link.href}>{link.label}</li>
+              ))}
+            </ul>
+          )}
+        </footer>
+      );`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
   it("flags a numeric && wrapped by ?? (0 is not nullish, so it still leaks)", () => {
     const result = runRule(
       jsxNumericAndLeakedRender,

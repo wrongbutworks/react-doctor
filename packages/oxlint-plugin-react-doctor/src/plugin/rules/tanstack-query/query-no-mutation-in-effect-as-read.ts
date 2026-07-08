@@ -11,6 +11,7 @@ import { isHookCall } from "../../utils/is-hook-call.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
 import type { RuleContext } from "../../utils/rule-context.js";
 import { stripGroupingParens } from "../../utils/strip-grouping-parens.js";
+import { walkAst } from "../../utils/walk-ast.js";
 import type { ScopeDescriptor, SymbolDescriptor } from "../../semantic/scope-analysis.js";
 
 // The `mutate`/`mutateAsync` destructure keys are the near-unique TanStack
@@ -157,30 +158,31 @@ const getFunctionBindingIdentifier = (
 // useEffect" — crossing an immediately-invoked wrapper or a local helper the
 // effect calls synchronously is fine, but a handler merely *registered* in
 // the effect (socket listener, interval, observer) fires per external event,
-// not on dependency changes.
-const isInvokedFromEffectBody = (
+// not on dependency changes. Returns the invoking effect callback so callers
+// can inspect it for run-once semantics.
+const findInvokingEffectCallback = (
   node: EsTreeNode,
   context: RuleContext,
   visitedFunctions: Set<EsTreeNode> = new Set(),
-): boolean => {
+): EsTreeNode | null => {
   let current = node.parent;
   while (current) {
     if (isFunctionLike(current)) {
-      if (visitedFunctions.has(current)) return false;
+      if (visitedFunctions.has(current)) return null;
       visitedFunctions.add(current);
       const enclosingCall = skipGroupingParensUpward(current);
       if (!isNodeOfType(enclosingCall, "CallExpression")) {
-        return isHelperCalledFromEffectBody(current, context, visitedFunctions);
+        return findEffectCallbackInvokingHelper(current, context, visitedFunctions);
       }
       if (isHookCall(enclosingCall, EFFECT_HOOK_NAMES)) {
         const effectCallback = enclosingCall.arguments[0];
-        return Boolean(effectCallback) && stripGroupingParens(effectCallback) === current;
+        return effectCallback && stripGroupingParens(effectCallback) === current ? current : null;
       }
-      if (stripGroupingParens(enclosingCall.callee) !== current) return false;
+      if (stripGroupingParens(enclosingCall.callee) !== current) return null;
     }
     current = current.parent;
   }
-  return false;
+  return null;
 };
 
 // A helper that isn't invoked where it's defined still counts as effect-fired
@@ -192,29 +194,29 @@ const isInvokedFromEffectBody = (
 // record, so resolve by walking the scope chain and matching the binding
 // identifier's node identity instead of using `symbolFor`, which returns
 // the inner record.
-const isHelperCalledFromEffectBody = (
+const findEffectCallbackInvokingHelper = (
   functionNode: EsTreeNode,
   context: RuleContext,
   visitedFunctions: Set<EsTreeNode>,
-): boolean => {
+): EsTreeNode | null => {
   const bindingIdentifier = getFunctionBindingIdentifier(functionNode);
-  if (!bindingIdentifier) return false;
+  if (!bindingIdentifier) return null;
   let scope: ScopeDescriptor | null = context.scopes.scopeFor(functionNode);
   while (scope) {
     const helperSymbol = scope.symbolsByName.get(bindingIdentifier.name);
     if (helperSymbol?.bindingIdentifier === bindingIdentifier) {
-      return helperSymbol.references.some((reference) => {
+      for (const reference of helperSymbol.references) {
         const callSite = reference.identifier.parent;
-        return (
-          isNodeOfType(callSite, "CallExpression") &&
-          callSite.callee === reference.identifier &&
-          isInvokedFromEffectBody(callSite, context, visitedFunctions)
-        );
-      });
+        if (!isNodeOfType(callSite, "CallExpression")) continue;
+        if (callSite.callee !== reference.identifier) continue;
+        const effectCallback = findInvokingEffectCallback(callSite, context, visitedFunctions);
+        if (effectCallback) return effectCallback;
+      }
+      return null;
     }
     scope = scope.parent;
   }
-  return false;
+  return null;
 };
 
 // The response lands either in a plain binding (scope-resolve and inspect
@@ -256,6 +258,51 @@ const thenHandlerConsumesResponse = (
   const handler = stripGroupingParens(handlerArgument);
   if (!isFunctionLike(handler) || !handler.params[0]) return false;
   return bindingConsumesResponse(handler.params[0], context);
+};
+
+// `const isHandled = useRef(false); useEffect(() => { if (isHandled.current)
+// return; isHandled.current = true; ... mutateAsync(...) })` — a ref latch
+// tested in an if and set to `true` gives the effect fire-exactly-once
+// semantics: a deliberate one-shot write (submit a payment redirect result),
+// not a cacheable read that useQuery could replace.
+const effectCallbackHasRunOnceRefLatch = (effectCallback: EsTreeNode): boolean => {
+  const latchedRefNames = new Set<string>();
+  walkAst(effectCallback, (child: EsTreeNode) => {
+    if (
+      isNodeOfType(child, "AssignmentExpression") &&
+      child.operator === "=" &&
+      isNodeOfType(child.left, "MemberExpression") &&
+      !child.left.computed &&
+      isNodeOfType(child.left.object, "Identifier") &&
+      isNodeOfType(child.left.property, "Identifier") &&
+      child.left.property.name === "current" &&
+      isNodeOfType(child.right, "Literal") &&
+      child.right.value === true
+    ) {
+      latchedRefNames.add(child.left.object.name);
+    }
+  });
+  if (latchedRefNames.size === 0) return false;
+  let testsLatch = false;
+  walkAst(effectCallback, (child: EsTreeNode) => {
+    if (testsLatch) return false;
+    if (!isNodeOfType(child, "IfStatement")) return;
+    walkAst(child.test as EsTreeNode, (testChild: EsTreeNode) => {
+      if (testsLatch) return false;
+      if (
+        isNodeOfType(testChild, "MemberExpression") &&
+        !testChild.computed &&
+        isNodeOfType(testChild.object, "Identifier") &&
+        latchedRefNames.has(testChild.object.name) &&
+        isNodeOfType(testChild.property, "Identifier") &&
+        testChild.property.name === "current"
+      ) {
+        testsLatch = true;
+        return false;
+      }
+    });
+  });
+  return testsLatch;
 };
 
 // `useEffect(() => { if (isTokenCreated) return; ...; mutate(...) })` —
@@ -342,7 +389,9 @@ export const queryNoMutationInEffectAsRead = defineRule({
         ) {
           continue;
         }
-        if (!isInvokedFromEffectBody(callNode, context)) continue;
+        const invokingEffectCallback = findInvokingEffectCallback(callNode, context);
+        if (!invokingEffectCallback) continue;
+        if (effectCallbackHasRunOnceRefLatch(invokingEffectCallback)) continue;
         mutateCalledInEffect = true;
         if (
           awaitedResultConsumesResponse(callNode, context) ||

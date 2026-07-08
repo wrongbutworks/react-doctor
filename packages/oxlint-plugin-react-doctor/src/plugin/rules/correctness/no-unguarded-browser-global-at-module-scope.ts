@@ -13,6 +13,17 @@ import type { RuleVisitors } from "../../utils/rule-visitors.js";
 // `document` is deliberately excluded — legacy SPA mount entrypoints read
 // `document.getElementById('root')` at module scope in files that are never
 // server-rendered, and flagging those is the dominant false positive.
+//
+// Additional exemptions (corpus-audited, this rule scored 0 true positives
+// on 121 repos so it is narrowed aggressively):
+// - browser-only-by-convention files: Remix/React Router `.client.` module
+//   filenames and Gatsby's `cache-dir/` client runtime are never evaluated
+//   during SSR;
+// - modules whose top level already throws/returns under a
+//   `typeof window === "undefined"` check — that IS the guard the rule
+//   asks for, so every read in the module is deliberate browser-only code;
+// - `window.<prop> = ...` assignment targets — the "expose a global on
+//   window" idiom lives in browser bootstrap entries, not SSR-shared code.
 const BROWSER_GLOBAL_NAMES = new Set([
   "window",
   "navigator",
@@ -37,6 +48,60 @@ const DEFERRED_EXECUTION_NODE_TYPES = new Set<string>([
   "AccessorProperty",
   "StaticBlock",
 ]);
+
+// Remix/React Router `.client.` modules and Gatsby's `cache-dir/` client
+// runtime are loaded exclusively in the browser bundle — never by the SSR
+// entry — so module-scope browser-global reads there cannot crash Node.
+// NOTE: duplicated in no-unguarded-browser-global-in-render-or-hook-init
+// (shared utils are frozen for this pass).
+const isBrowserOnlyModuleFilename = (rawFilename: string | undefined): boolean => {
+  if (!rawFilename) return false;
+  const filename = rawFilename.replaceAll("\\", "/").toLowerCase();
+  const basename = filename.slice(filename.lastIndexOf("/") + 1);
+  if (basename.includes(".client.")) return true;
+  const rootedFilename = filename.startsWith("/") ? filename : `/${filename}`;
+  return rootedFilename.includes("/cache-dir/");
+};
+
+const isFlowTerminatingStatement = (statement: EsTreeNode): boolean => {
+  if (isNodeOfType(statement, "ThrowStatement") || isNodeOfType(statement, "ReturnStatement")) {
+    return true;
+  }
+  if (isNodeOfType(statement, "BlockStatement")) {
+    const lastStatement = statement.body[statement.body.length - 1];
+    return Boolean(lastStatement && isFlowTerminatingStatement(lastStatement));
+  }
+  return false;
+};
+
+// A top-level `if (typeof window === "undefined") { throw new Error(...) }`
+// (the Gatsby loading-indicator idiom) is the module declaring itself
+// browser-only — the exact guard this rule recommends — so every
+// browser-global read in the module is deliberate.
+const moduleDeclaresBrowserOnly = (
+  program: EsTreeNodeOfType<"Program">,
+  guardAliasNames: ReadonlySet<string>,
+): boolean =>
+  (program.body ?? []).some(
+    (statement) =>
+      isNodeOfType(statement, "IfStatement") &&
+      isFlowTerminatingStatement(statement.consequent) &&
+      subtreeHasBrowserEnvironmentGuard(statement.test, guardAliasNames),
+  );
+
+// `window.___emitter = emitter` — the flagged global is the root of an
+// assignment-target member chain, the "install a global" bootstrap idiom.
+const isAssignmentTargetRead = (globalIdentifier: EsTreeNode): boolean => {
+  let current: EsTreeNode = globalIdentifier;
+  let ancestor = current.parent;
+  while (ancestor && isNodeOfType(ancestor, "MemberExpression") && ancestor.object === current) {
+    current = ancestor;
+    ancestor = ancestor.parent ?? null;
+  }
+  return Boolean(
+    ancestor && isNodeOfType(ancestor, "AssignmentExpression") && ancestor.left === current,
+  );
+};
 
 const isEvaluatedAtImportTime = (node: EsTreeNode): boolean => {
   let ancestor = node.parent;
@@ -216,11 +281,14 @@ export const noUnguardedBrowserGlobalAtModuleScope = defineRule({
     'Reading `window`/`navigator`/`localStorage` at module scope throws `ReferenceError: window is not defined` when the module is imported during SSR. Move the read inside a function/effect, or guard it with `typeof window !== "undefined"`.',
   create: (context: RuleContext): RuleVisitors => {
     if (isTestlikeFilename(context.filename)) return {};
+    if (isBrowserOnlyModuleFilename(context.filename)) return {};
 
     let activeGlobalNames = BROWSER_GLOBAL_NAMES;
     let guardAliasNames: ReadonlySet<string> = NO_GUARD_ALIASES;
+    let moduleIsDeclaredBrowserOnly = false;
 
     const reportRead = (node: EsTreeNode, globalName: string): void => {
+      if (moduleIsDeclaredBrowserOnly) return;
       if (!isEvaluatedAtImportTime(node)) return;
       if (isGuardedAgainstSsrCrash(node, guardAliasNames)) return;
       context.report({
@@ -238,10 +306,12 @@ export const noUnguardedBrowserGlobalAtModuleScope = defineRule({
           );
         }
         guardAliasNames = collectGuardAliasNames(node);
+        moduleIsDeclaredBrowserOnly = moduleDeclaresBrowserOnly(node, guardAliasNames);
       },
       MemberExpression(node: EsTreeNodeOfType<"MemberExpression">) {
         const object = stripParenExpression(node.object);
         if (!isNodeOfType(object, "Identifier") || !activeGlobalNames.has(object.name)) return;
+        if (isAssignmentTargetRead(object)) return;
         reportRead(object, object.name);
       },
       CallExpression(node: EsTreeNodeOfType<"CallExpression">) {

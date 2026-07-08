@@ -288,6 +288,33 @@ DeploymentFailureEmail.PreviewProps = previewDefaults;`,
     expect(result.diagnostics).toHaveLength(0);
   });
 
+  it("does not flag a NOW-named module-load timestamp (hyperdx stable-fallback idiom)", () => {
+    expect(
+      runRule(noImpureCallAtModuleScope, `export const NOW = Date.now();`).diagnostics,
+    ).toHaveLength(0);
+    expect(
+      runRule(noImpureCallAtModuleScope, `const NOW_MS = new Date().getTime();`).diagnostics,
+    ).toHaveLength(0);
+  });
+
+  it("still flags new Date() inside a store's module-scope initialState (zustand calendar idiom)", () => {
+    const result = runRule(
+      noImpureCallAtModuleScope,
+      `const initialState = {
+        calendars: [],
+        selectedDate: new Date(),
+        isLoading: false,
+      };
+      export const useCalendarStore = create((set) => ({
+        ...initialState,
+        reset: () => set(initialState),
+      }));`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(1);
+    expect(result.diagnostics[0].message).toContain("new Date()");
+  });
+
   it("still flags a frozen const wall-clock read with a value-shaped name", () => {
     const result = runRule(
       noImpureCallAtModuleScope,

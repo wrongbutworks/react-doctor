@@ -160,4 +160,41 @@ describe("no-create-object-url-without-revoke", () => {
     );
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("stays quiet when URLs feed a deliberate module-scope cache (preview thumbnails shape)", () => {
+    const result = runRule(
+      noCreateObjectUrlWithoutRevoke,
+      `const previewCache = new Map();
+       async function renderEffectPreview(pipeline, source, effectId) {
+         const blob = await source.convertToBlob({ type: 'image/jpeg' });
+         return URL.createObjectURL(blob);
+       }
+       async function generateAllPreviews(effects) {
+         for (const def of effects) {
+           if (previewCache.has(def.id)) continue;
+           const url = await renderEffectPreview(pipeline, source, def.id);
+           if (url) previewCache.set(def.id, url);
+         }
+       }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags a returned object URL when the module-scope cache is never stored into", () => {
+    const result = runRule(
+      noCreateObjectUrlWithoutRevoke,
+      `const previewCache = new Map();
+       function make(blob) { return URL.createObjectURL(blob); }`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags when the only cache-named binding is not a collection", () => {
+    const result = runRule(
+      noCreateObjectUrlWithoutRevoke,
+      `const cacheKey = 'avatar';
+       function make(blob) { return URL.createObjectURL(blob); }`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
 });

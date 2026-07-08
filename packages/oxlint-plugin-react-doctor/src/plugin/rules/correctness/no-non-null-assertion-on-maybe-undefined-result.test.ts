@@ -309,6 +309,120 @@ describe("no-non-null-assertion-on-maybe-undefined-result", () => {
     expect(result.diagnostics).toHaveLength(0);
   });
 
+  it("does not flag find! over a const array-literal mapping table (breakpoints shape)", () => {
+    const result = runRule(
+      noNonNullAssertionOnMaybeUndefinedResult,
+      `const BREAKPOINT_MAPPING: [Breakpoint, number][] = [
+        ['xl', 1840],
+        ['l', 1320],
+        ['default', -1],
+      ];
+      export function getBreakpointValue(breakpoint: Breakpoint): number {
+        return BREAKPOINT_MAPPING.find(bp => bp[0] === breakpoint)![1];
+      }`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags find! over a let-declared array literal (mutable, not a lookup table)", () => {
+    const result = runRule(
+      noNonNullAssertionOnMaybeUndefinedResult,
+      `let entries = [['a', 1]];
+      const lookup = (key: string) => entries.find((entry) => entry[0] === key)![1];`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("does not flag find! after a preceding receiver-length early-exit guard (two-row swap shape)", () => {
+    const result = runRule(
+      noNonNullAssertionOnMaybeUndefinedResult,
+      `async function swapOrder(id1: string, id2: string) {
+        const rows = await selectRows(id1, id2);
+        if (rows.length !== 2) throw new Error('NOT_FOUND');
+        const order1 = rows.find(r => r.id === id1)!.displayOrder;
+        const order2 = rows.find(r => r.id === id2)!.displayOrder;
+        return [order1, order2];
+      }`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag an equality-lookup find! when the scope filters the same collection (options-from-collection shape)", () => {
+    const result = runRule(
+      noNonNullAssertionOnMaybeUndefinedResult,
+      `const useColumns = (columns, colVisible) => {
+        const visibleCols = columns.filter(c => colVisible.has(c.key));
+        const startResize = (colIndex) => {
+          const colKey = visibleCols[colIndex].key;
+          return columns.find(c => c.key === colKey)!.minWidth;
+        };
+        return startResize;
+      };`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag an equality-lookup find! over an imported options list the component also filters (grouped-table shape)", () => {
+    const result = runRule(
+      noNonNullAssertionOnMaybeUndefinedResult,
+      `import { groupOptions } from './config';
+      export function DataGrouping({ groups }) {
+        return (
+          <ul>
+            {groups.map(({ property, sorting }) => {
+              const groupLabel = \`\${groupOptions.find(o => o.value === property)!.label} (\${sorting})\`;
+              return (
+                <li key={property}>
+                  <GroupEditor options={groupOptions.filter(o => o.value === property)} label={groupLabel} />
+                </li>
+              );
+            })}
+          </ul>
+        );
+      }`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags an equality-lookup find! when the scope never projects the collection", () => {
+    const result = runRule(
+      noNonNullAssertionOnMaybeUndefinedResult,
+      `const widthFor = (columns, colKey) => columns.find(c => c.key === colKey)!.minWidth;`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("does not flag match! on the value's own toString() projection", () => {
+    const result = runRule(
+      noNonNullAssertionOnMaybeUndefinedResult,
+      `function formatValue(value: number) {
+        if (value < 0.1) return '< 0.1';
+        return value.toString().match(/^-?\\d+(?:\\.\\d{0,2})?/)![0];
+      }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag match! re-run after a boolean-coerced predicate match with the same regex (findUpUntil shape)", () => {
+    const result = runRule(
+      noNonNullAssertionOnMaybeUndefinedResult,
+      `const contextMatch = /awsui-context-([\\w-]+)/;
+      function useVisualContext(elementRef) {
+        useLayoutEffect(() => {
+          if (elementRef.current) {
+            const contextParent = findUpUntil(elementRef.current, node => !!node.className.match(contextMatch));
+            setValue(contextParent?.className.match(contextMatch)![1] ?? '');
+          }
+        }, [elementRef]);
+      }`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
   it("does not flag find! guarded by findIndex !== -1 with the identical predicate", () => {
     const result = runRule(
       noNonNullAssertionOnMaybeUndefinedResult,

@@ -472,6 +472,82 @@ describe("no-arithmetic-on-optional-chained-operand", () => {
     expect(result.diagnostics).toHaveLength(1);
   });
 
+  it("does not flag a division ternary-guarded by a sibling alias from the same chain (SystemHealthWidget shape)", () => {
+    const result = runRule(
+      noArithmeticOnOptionalChainedOperand,
+      `const SystemHealthWidget = ({ health }) => {
+        const procOnline = health?.processes?.online;
+        const procTotal = health?.processes?.total;
+        const cells = [];
+        cells[2] = procTotal ? Math.max(0.25, procOnline / procTotal) : 0.25;
+        return cells;
+      };`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags when the ternary tests an alias from a DIFFERENT parent chain", () => {
+    const result = runRule(
+      noArithmeticOnOptionalChainedOperand,
+      `const Widget = ({ health }) => {
+        const procOnline = health?.processes?.online;
+        const appTotal = health?.apps?.total;
+        return appTotal ? Math.max(0.25, procOnline / 4) : 0.25;
+      };`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("does not flag inside an if whose test reads a fallback-defaulted sibling alias of the same chain", () => {
+    const result = runRule(
+      noArithmeticOnOptionalChainedOperand,
+      `function generateReason(details) {
+        const issues = [];
+        const timeScore = details.time?.score || 1;
+        if (timeScore < 0.7) {
+          const actual = details.time?.actual;
+          issues.push((actual / 1000).toFixed(1));
+        }
+        return issues;
+      }`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag arithmetic whose declarator is only read after a following early-exit guard on the chain", () => {
+    const result = runRule(
+      noArithmeticOnOptionalChainedOperand,
+      `const Collections = ({ tags }) =>
+        tags?.map((tag) => {
+          const pagination = {
+            page: 0,
+            pageCount: Math.ceil(tag?.blog_articles?.length / 6),
+          };
+          if (!tag?.blog_articles || tag?.blog_articles.length === 0) {
+            return null;
+          }
+          return <Tabs tag={tag} pagination={pagination} />;
+        });`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags when the declarator is read before the following early-exit guard", () => {
+    const result = runRule(
+      noArithmeticOnOptionalChainedOperand,
+      `function Report({ tag }) {
+        const pagination = { pageCount: Math.ceil(tag?.blog_articles?.length / 6) };
+        console.log(pagination.pageCount.toFixed(0));
+        if (!tag?.blog_articles) return null;
+        return pagination;
+      }`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
   it("does not flag when the alias in the SAME scope is guarded", () => {
     const result = runRule(
       noArithmeticOnOptionalChainedOperand,

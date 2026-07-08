@@ -310,6 +310,32 @@ describe("no-mutating-array-method-on-prop-or-hook-result", () => {
     expect(result.diagnostics).toHaveLength(0);
   });
 
+  it("does not flag a direct splice of a setter-less useState registry (Timeouts provider idiom)", () => {
+    const result = runRule(
+      noMutatingArrayMethodOnPropOrHookResult,
+      `
+      function TimeoutsProvider({ children }) {
+        const [timeouts] = React.useState([]);
+        React.useEffect(
+          () => () => {
+            timeouts.forEach((tid) => window.clearTimeout(tid));
+            timeouts.splice(0, timeouts.length);
+          },
+          [timeouts],
+        );
+        const context = React.useMemo(() => {
+          const removeTimeout = (id) => {
+            timeouts.splice(0, timeouts.length, ...timeouts.filter((tid) => tid !== id));
+          };
+          return { removeTimeout };
+        }, [timeouts]);
+        return children;
+      }
+      `,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
   it("still flags a direct sort of a setter-less useState array", () => {
     const result = runRule(
       noMutatingArrayMethodOnPropOrHookResult,
@@ -317,6 +343,91 @@ describe("no-mutating-array-method-on-prop-or-hook-result", () => {
       function List() {
         const [rows] = useState([]);
         rows.sort();
+        return null;
+      }
+      `,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags splice on a useState array whose setter IS destructured", () => {
+    const result = runRule(
+      noMutatingArrayMethodOnPropOrHookResult,
+      `
+      function List() {
+        const [rows, setRows] = useState([]);
+        rows.splice(0, 1);
+        return null;
+      }
+      `,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags sort on a useState array passed back through its own setter (stories table idiom)", () => {
+    const result = runRule(
+      noMutatingArrayMethodOnPropOrHookResult,
+      `
+      function Table({ data }) {
+        const [list, setList] = useState(data.slice());
+        const sort = (descriptor) => {
+          const result = list.sort((a, b) => (a[descriptor.column] < b[descriptor.column] ? -1 : 1));
+          setList(result);
+        };
+        return null;
+      }
+      `,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("does not flag sorting a useMemo result that is a fresh filtered copy (FileViewer idiom)", () => {
+    const result = runRule(
+      noMutatingArrayMethodOnPropOrHookResult,
+      `
+      function FileViewer() {
+        const currentItemsFolder = useAppSelector((state) => state.storage.levels[state.id]);
+        const folderFiles = useMemo(() => currentItemsFolder?.filter((item) => !item.isFolder), [currentItemsFolder]);
+        const sortFolderFiles = useMemo(() => {
+          if (folderFiles) {
+            return folderFiles.sort((a, b) => (a.name > b.name ? 1 : -1));
+          }
+          return [];
+        }, [folderFiles]);
+        return null;
+      }
+      `,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags sorting a useMemo result with a return path aliasing the source (recharts payload idiom)", () => {
+    const result = runRule(
+      noMutatingArrayMethodOnPropOrHookResult,
+      `
+      function Legend({ payload, allLineData }) {
+        const allSeriesPayload = useMemo(() => {
+          if (allLineData?.length) {
+            return allLineData.map((ld) => ({ dataKey: ld.dataKey }));
+          }
+          return payload ?? [];
+        }, [allLineData, payload]);
+        const sortedLegendItems = useMemo(() => {
+          return allSeriesPayload.sort((a, b) => a.dataKey.localeCompare(b.dataKey));
+        }, [allSeriesPayload]);
+        return null;
+      }
+      `,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags sorting a prop inside a useMemo factory (sidebar containerNames idiom)", () => {
+    const result = runRule(
+      noMutatingArrayMethodOnPropOrHookResult,
+      `
+      function Sidebar({ containerNames }) {
+        const sortedContainerNames = useMemo(() => containerNames.sort(), [containerNames]);
         return null;
       }
       `,

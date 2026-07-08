@@ -168,6 +168,81 @@ const resolveOptionalChainOperandGuardNames = (operand: EsTreeNode): string[] | 
   return rootName ? [rootName, stripped.name] : null;
 };
 
+// Same-scope bindings derived from the SAME PARENT CHAIN as the operand —
+// an identical path, a prefix of it, or a sibling leaf (`procTotal =
+// health?.processes?.total` vs `procOnline = health?.processes?.online`).
+// When such a binding is truthy the shared chain prefix resolved, so the
+// operand's chain cannot short-circuit. Initializers with a `||`/`??`
+// fallback qualify too (`const timeScore = details.time?.score || 1`) —
+// the guard check is mention-level, matching the rule's existing
+// precision. These names are credited ONLY for enclosing tests
+// (`procTotal ? procOnline / procTotal : 0.25`), not for preceding
+// early-exit guards: a distant `if (!label) return;` on a different leaf
+// says nothing about the property being multiplied.
+const chainAliasPathQualifiesForTest = (aliasPath: string, operandPath: string): boolean => {
+  if (aliasPath === operandPath) return true;
+  if (operandPath.startsWith(`${aliasPath}.`)) return true;
+  const aliasParentEnd = aliasPath.lastIndexOf(".");
+  const operandParentEnd = operandPath.lastIndexOf(".");
+  return (
+    aliasParentEnd > 0 &&
+    operandParentEnd > 0 &&
+    aliasPath.slice(0, aliasParentEnd) === operandPath.slice(0, operandParentEnd)
+  );
+};
+
+const chainMemberOfAliasInitializer = (initializer: EsTreeNode): EsTreeNode | null => {
+  const direct = asDirectOptionalChainMember(initializer);
+  if (direct) return direct;
+  const stripped = stripKeepingChain(initializer);
+  if (
+    isNodeOfType(stripped, "LogicalExpression") &&
+    (stripped.operator === "||" || stripped.operator === "??")
+  ) {
+    return asDirectOptionalChainMember(stripped.left as EsTreeNode);
+  }
+  return null;
+};
+
+const collectSameParentChainAliasNames = (operandMember: EsTreeNode): string[] => {
+  const operandPath = chainMemberPath(operandMember);
+  if (!operandPath) return [];
+  const scopeOwner = findScopeOwner(operandMember);
+  if (!scopeOwner) return [];
+  const aliasNames: string[] = [];
+  walkAst(scopeOwner, (child: EsTreeNode) => {
+    if (
+      !isNodeOfType(child, "VariableDeclarator") ||
+      !isNodeOfType(child.id, "Identifier") ||
+      !child.init
+    ) {
+      return;
+    }
+    if (findScopeOwner(child) !== scopeOwner) return;
+    const initializerMember = chainMemberOfAliasInitializer(child.init as EsTreeNode);
+    if (!initializerMember) return;
+    const aliasPath = chainMemberPath(initializerMember);
+    if (aliasPath && chainAliasPathQualifiesForTest(aliasPath, operandPath)) {
+      aliasNames.push(child.id.name);
+    }
+  });
+  return aliasNames;
+};
+
+// The extra names an enclosing `if`/ternary/`&&` test may mention to prove
+// the operand's chain resolved; empty when the operand is not chain-derived.
+const resolveEnclosingTestOnlyGuardNames = (operand: EsTreeNode): string[] => {
+  const direct = asDirectOptionalChainMember(operand);
+  if (direct) return collectSameParentChainAliasNames(direct);
+  const stripped = stripKeepingChain(operand);
+  if (!isNodeOfType(stripped, "Identifier")) return [];
+  const binding = findVariableInitializer(stripped, stripped.name);
+  if (!binding?.initializer) return [];
+  const initializerMember = asDirectOptionalChainMember(binding.initializer);
+  if (!initializerMember) return [];
+  return collectSameParentChainAliasNames(initializerMember);
+};
+
 const unwrapUpwards = (node: EsTreeNode): { consumed: EsTreeNode; consumer: EsTreeNode | null } => {
   let consumed = node;
   let consumer = node.parent ?? null;
@@ -482,10 +557,57 @@ const isGuardedByPrecedingEarlyExit = (binaryNode: EsTreeNode, guardNames: strin
   return false;
 };
 
+// The arithmetic's NaN is provably discarded before observation: its value
+// lands in a declarator whose bindings are not read before a following
+// early-exit guard on the chain consumes the miss case —
+// `const pagination = { pageCount: Math.ceil(tag?.blog_articles?.length /
+// pageSize) }; if (!tag?.blog_articles || …) return null;` puts every
+// observable read of `pagination` after the guard.
+const isDiscardedByEarlyExitBeforeFirstBindingUse = (
+  binaryNode: EsTreeNode,
+  guardNames: string[],
+): boolean => {
+  let child: EsTreeNode = binaryNode;
+  let ancestor: EsTreeNode | null | undefined = binaryNode.parent;
+  while (ancestor && !isNodeOfType(ancestor, "BlockStatement")) {
+    if (isFunctionLike(ancestor)) return false;
+    child = ancestor;
+    ancestor = ancestor.parent ?? null;
+  }
+  if (!ancestor || !isNodeOfType(child, "VariableDeclaration")) return false;
+  const declaredNames = child.declarations.flatMap((declarator) =>
+    isNodeOfType(declarator.id, "Identifier") ? [declarator.id.name] : [],
+  );
+  if (declaredNames.length === 0) return false;
+  const statements = ancestor.body;
+  const declarationIndex = statements.findIndex((statement) => statement === child);
+  if (declarationIndex < 0) return false;
+  for (const following of statements.slice(declarationIndex + 1)) {
+    const followingStatement = following as EsTreeNode;
+    if (
+      isNodeOfType(followingStatement, "IfStatement") &&
+      (isEarlyExitStatement(followingStatement.consequent) ||
+        isEarlyExitStatement(followingStatement.alternate)) &&
+      subtreeReferencesAnyName(followingStatement.test, guardNames) &&
+      !declaredNames.some((name) => subtreeReferencesName(followingStatement, name))
+    ) {
+      return true;
+    }
+    if (declaredNames.some((name) => subtreeReferencesName(followingStatement, name))) {
+      return false;
+    }
+  }
+  return false;
+};
+
 // Flags `a?.b * n` / `a?.b / n` / `a?.b % n` (or a variable bound to `a?.b`)
 // when the result flows into a numeric consumer and no `??` fallback or
 // enclosing guard on the chain root exists. Additive operators, the
-// `?.length - 1` index idiom, `?.()` call forms, and guarded roots stay quiet.
+// `?.length - 1` index idiom, `?.()` call forms, and guarded roots stay
+// quiet — as do arithmetic under an enclosing test of a same-parent-chain
+// sibling alias (`procTotal ? procOnline / procTotal : 0.25`) and results
+// whose declarator is only read after a following early-exit guard on the
+// chain consumed the miss case.
 export const noArithmeticOnOptionalChainedOperand = defineRule({
   id: "no-arithmetic-on-optional-chained-operand",
   title: "Multiplicative math on optional-chained value can be NaN",
@@ -500,8 +622,13 @@ export const noArithmeticOnOptionalChainedOperand = defineRule({
       for (const operand of operands) {
         const guardNames = resolveOptionalChainOperandGuardNames(operand);
         if (!guardNames) continue;
-        if (isGuardedByEnclosingTest(node as EsTreeNode, guardNames)) continue;
+        const enclosingTestGuardNames = [
+          ...guardNames,
+          ...resolveEnclosingTestOnlyGuardNames(operand),
+        ];
+        if (isGuardedByEnclosingTest(node as EsTreeNode, enclosingTestGuardNames)) continue;
         if (isGuardedByPrecedingEarlyExit(node as EsTreeNode, guardNames)) continue;
+        if (isDiscardedByEarlyExitBeforeFirstBindingUse(node as EsTreeNode, guardNames)) continue;
         if (!isNumericConsumerContext(node as EsTreeNode, guardNames)) continue;
         context.report({ node, message: MESSAGE });
         return;

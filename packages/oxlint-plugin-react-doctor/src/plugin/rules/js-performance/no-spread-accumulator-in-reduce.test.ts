@@ -308,6 +308,69 @@ describe("no-spread-accumulator-in-reduce", () => {
     expect(result.diagnostics).toHaveLength(1);
   });
 
+  it("does not flag a fold seeded with a shared outer object (json-edit-react compiled-styles shape)", () => {
+    const result = runRule(
+      noSpreadAccumulatorInReduce,
+      `const compile = (fns, base) => {
+        const b = base.cell;
+        return (nodeData) => fns.reduce((acc, fn) => ({ ...acc, ...(fn(nodeData) ?? {}) }), b);
+      };`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a fold seeded with a shared module-level member (dt-react-component locale shape)", () => {
+    const result = runRule(
+      noSpreadAccumulatorInReduce,
+      `const generateLocale = () =>
+        localeList.reduce((merged, locale) => ({ ...merged, ...locale }), defaultLocale.Modal!);`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a seedless reduce (the fold starts on the source's first element)", () => {
+    const result = runRule(
+      noSpreadAccumulatorInReduce,
+      `const merged = items.reduce((acc, item) => ({ ...acc, ...item.overrides }));`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags a fold seeded with a TS-asserted fresh literal", () => {
+    const result = runRule(
+      noSpreadAccumulatorInReduce,
+      `const out = items.reduce((acc, x) => [...acc, x], [] as string[]);`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("does not flag a docs-directory showcase fold (suomifi color-palette shape)", () => {
+    const result = runRule(
+      noSpreadAccumulatorInReduce,
+      `const swatches = Object.entries(theme.colors).reduce(
+        (arr, [key, value]) => [...arr, renderSwatch(key, value)],
+        [],
+      );`,
+      { filename: "src/docs/Colors/Colors.tsx" },
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags the same fold outside a docs directory", () => {
+    const result = runRule(
+      noSpreadAccumulatorInReduce,
+      `const swatches = Object.entries(theme.colors).reduce(
+        (arr, [key, value]) => [...arr, renderSwatch(key, value)],
+        [],
+      );`,
+      { filename: "src/components/Colors/Colors.tsx" },
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
   it("does not confuse an inner callback's spread for the reducer's return", () => {
     const result = runRule(
       noSpreadAccumulatorInReduce,

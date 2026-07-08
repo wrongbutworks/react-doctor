@@ -428,6 +428,94 @@ describe("class-component-missing-component-will-unmount-teardown", () => {
     expect(result.diagnostics).toHaveLength(0);
   });
 
+  it("flags listeners registered through nested mount-local helpers invoked synchronously (cboard connection-status idiom)", () => {
+    const result = runRule(
+      classComponentMissingComponentWillUnmountTeardown,
+      `class AppContainer extends Component {
+        componentDidMount() {
+          const configureConnectionStatus = () => {
+            const { updateConnectivity } = this.props;
+            const setAsOnline = () => {
+              updateConnectivity({ isConnected: true });
+            };
+            const setAsOffline = () => {
+              updateConnectivity({ isConnected: false });
+            };
+            const addConnectionEventListeners = () => {
+              window.addEventListener('offline', setAsOffline);
+              window.addEventListener('online', setAsOnline);
+            };
+            const setCurrentConnectionStatus = () => {
+              if (!navigator.onLine) {
+                setAsOffline();
+                return;
+              }
+              setAsOnline();
+            };
+            setCurrentConnectionStatus();
+            addConnectionEventListeners();
+          };
+          configureConnectionStatus();
+        }
+        render() { return null; }
+      }`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("flags a one-level mount-local helper that registers a window listener", () => {
+    const result = runRule(
+      classComponentMissingComponentWillUnmountTeardown,
+      `class Tracker extends React.Component {
+        componentDidMount() {
+          function attachScrollListener() {
+            window.addEventListener('scroll', this.onScroll);
+          }
+          attachScrollListener();
+        }
+        render() { return null; }
+      }`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("does not flag a mount-local helper that is only stored for later, never invoked at mount", () => {
+    const result = runRule(
+      classComponentMissingComponentWillUnmountTeardown,
+      `class LazyAttach extends React.Component {
+        componentDidMount() {
+          const attach = () => {
+            window.addEventListener('resize', this.onResize);
+          };
+          this.attach = attach;
+        }
+        render() { return null; }
+      }`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a synchronously invoked helper listening on its own local emitter", () => {
+    const result = runRule(
+      classComponentMissingComponentWillUnmountTeardown,
+      `class AddressField extends React.Component {
+        componentDidMount() {
+          const setupAutocomplete = () => {
+            const autocomplete = places({ container: this.input });
+            autocomplete.on('change', (event) => this.props.onChange(event.suggestion));
+          };
+          setupAutocomplete();
+        }
+        render() { return null; }
+      }`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
   it("still flags a setTimeout whose instance method sets state", () => {
     const result = runRule(
       classComponentMissingComponentWillUnmountTeardown,

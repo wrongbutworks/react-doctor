@@ -552,4 +552,131 @@ describe("no-fetch-response-used-without-status-check", () => {
     );
     expect(result.diagnostics).toHaveLength(1);
   });
+
+  it("stays quiet on a bundler-emitted require(...) asset URL assigned in try/catch (cboard markdown idiom)", () => {
+    const result = runRule(
+      noFetchResponseUsedWithoutStatusCheck,
+      `function loadHelpText(lang) {
+         let markdownPath = '';
+         try {
+           markdownPath = require(\`../translations/\${lang}.md\`);
+         } catch (err) {
+           markdownPath = require('../translations/en-US.md');
+         }
+         fetch(markdownPath)
+           .then((response) => response.text())
+           .then((text) => setMarkdown(text));
+       }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet on an inline require(...) asset URL", () => {
+    const result = runRule(
+      noFetchResponseUsedWithoutStatusCheck,
+      `fetch(require('./assets/help.md')).then((response) => response.text()).then(setHelp);`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags a binding assigned from a non-require call in try/catch", () => {
+    const result = runRule(
+      noFetchResponseUsedWithoutStatusCheck,
+      `function loadHelpText() {
+         let helpUrl = '';
+         try {
+           helpUrl = resolveHelpUrl();
+         } catch (err) {
+           helpUrl = '/help/en-US';
+         }
+         fetch(helpUrl)
+           .then((response) => response.text())
+           .then((text) => setMarkdown(text));
+       }`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("stays quiet in docs-site .demo. files", () => {
+    const result = runRule(
+      noFetchResponseUsedWithoutStatusCheck,
+      `const fetchPokemon = async (name) =>
+         fetch(\`https://pokeapi.co/api/v2/pokemon/\${name}\`).then((response) => response.json());`,
+      { filename: "src/hooks/useHover/useHover.demo.tsx" },
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet in testUtils directories (mock fetch helpers)", () => {
+    const result = runRule(
+      noFetchResponseUsedWithoutStatusCheck,
+      `const mockGremlinFetch = () => async (queryTemplate) => {
+         const res = await fetch(\`http://mock.test?gremlin=\${queryTemplate}\`);
+         return res.json();
+       };`,
+      { filename: "src/connector/testUtils/mockGremlinFetch.ts" },
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet when the status is checked on the parsed body (status-in-body API)", () => {
+    const result = runRule(
+      noFetchResponseUsedWithoutStatusCheck,
+      `async function verifyTask(props) {
+         const res = await fetch('/tasks_verification', { method: 'POST' });
+         const jsonResponse = await res.json();
+         if (jsonResponse.status !== 201 && jsonResponse.statusCode !== 201) {
+           throw new Error(jsonResponse.message);
+         }
+         return jsonResponse;
+       }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags a parsed body whose non-status properties are the only reads", () => {
+    const result = runRule(
+      noFetchResponseUsedWithoutStatusCheck,
+      `async function loadUser() {
+         const res = await fetch('/api/user');
+         const data = await res.json();
+         setName(data.name);
+       }`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("stays quiet when an enclosing try has a deliberately empty fail-open catch", () => {
+    const result = runRule(
+      noFetchResponseUsedWithoutStatusCheck,
+      `async function moderate(text) {
+         try {
+           const upstream = await fetch('/moderate-text', { method: 'POST' });
+           const verdict = await upstream.json();
+           if (verdict.allowed === false) {
+             return { blocked: true };
+           }
+         } catch {
+           // fail-open: moderation infra never blocks publish
+         }
+         return { blocked: false };
+       }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet when a consuming chain ends in a deliberately empty .catch swallow", () => {
+    const result = runRule(
+      noFetchResponseUsedWithoutStatusCheck,
+      `function loadTitle(endpoint) {
+         fetch(endpoint)
+           .then((r) => r.json())
+           .then((data) => {
+             if (typeof data.title === 'string') setEmbedTitle(data.title);
+           })
+           .catch(() => {});
+       }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
 });

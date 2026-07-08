@@ -3,50 +3,50 @@ import { runRule } from "../../../test-utils/run-rule.js";
 import { noMutateQueriedDomNodeInComponent } from "./no-mutate-queried-dom-node-in-component.js";
 
 describe("no-mutate-queried-dom-node-in-component", () => {
-  it("flags classList.add on a queried, component-owned class", () => {
+  it("flags classList.add on a queried class whose className is dynamic", () => {
     const result = runRule(
       noMutateQueriedDomNodeInComponent,
-      `function Panel() {
+      `function Panel({ open }) {
         useEffect(() => {
           document.querySelector('.panel').classList.add('open');
         }, []);
-        return <div className="panel" />;
+        return <div className={\`panel \${open ? 'open' : ''}\`} />;
       }`,
     );
     expect(result.parseErrors).toEqual([]);
     expect(result.diagnostics).toHaveLength(1);
   });
 
-  it("flags a style mutation on a getElementById result bound to a var", () => {
+  it("flags a style mutation on a getElementById result whose style prop drives the same property", () => {
     const result = runRule(
       noMutateQueriedDomNodeInComponent,
-      `function Overlay() {
+      `function Overlay({ dimmed }) {
         const el = document.getElementById('main-content');
         el.style.filter = 'blur(3px)';
-        return <section id="main-content" />;
+        return <section id="main-content" style={{ filter: dimmed ? 'blur(3px)' : 'none' }} />;
       }`,
     );
     expect(result.diagnostics).toHaveLength(1);
   });
 
-  it("flags classList.remove on a queried #id owned by the component", () => {
+  it("flags classList.remove on a queried #id with a dynamic className", () => {
     const result = runRule(
       noMutateQueriedDomNodeInComponent,
-      `function Menu() {
+      `function Menu({ locked }) {
         const container = document.querySelector('#right');
         container.classList.remove('noscroll');
-        return <aside id="right" className="noscroll" />;
+        return <aside id="right" className={locked ? 'noscroll' : ''} />;
       }`,
     );
     expect(result.diagnostics).toHaveLength(1);
   });
 
-  it("flags a chained getElementById style mutation", () => {
+  it("flags a chained getElementById style mutation against a dynamic style prop", () => {
     const result = runRule(
       noMutateQueriedDomNodeInComponent,
-      `function Row() {
+      `function Row({ order }) {
         document.getElementById('row-1').style.zIndex = '1';
-        return <div id="row-1" />;
+        return <div id="row-1" style={{ zIndex: order }} />;
       }`,
     );
     expect(result.diagnostics).toHaveLength(1);
@@ -157,7 +157,7 @@ describe("no-mutate-queried-dom-node-in-component", () => {
   it("does not flag a shadowed createElement node whose name matches an owned query var (download-link idiom)", () => {
     const result = runRule(
       noMutateQueriedDomNodeInComponent,
-      `function Panel() {
+      `function Panel({ hidden }) {
         const el = document.getElementById('panel');
         const width = el.offsetWidth;
         const download = () => {
@@ -165,7 +165,7 @@ describe("no-mutate-queried-dom-node-in-component", () => {
           el.style.display = 'none';
           document.body.appendChild(el);
         };
-        return <div id="panel" onClick={download} />;
+        return <div id="panel" style={{ display: hidden ? 'none' : 'block' }} onClick={download} />;
       }`,
     );
     expect(result.diagnostics).toHaveLength(0);
@@ -174,13 +174,13 @@ describe("no-mutate-queried-dom-node-in-component", () => {
   it("does not flag a callback parameter that shadows an owned query var (helper decorating its own argument)", () => {
     const result = runRule(
       noMutateQueriedDomNodeInComponent,
-      `function List() {
+      `function List({ dim }) {
         const item = document.querySelector('.item');
         const top = item.offsetTop;
         const decorate = (item) => {
           item.style.opacity = '0.5';
         };
-        return <div className="item" onMouseEnter={decorate} />;
+        return <div className="item" style={{ opacity: dim ? 0.5 : 1 }} onMouseEnter={decorate} />;
       }`,
     );
     expect(result.diagnostics).toHaveLength(0);
@@ -189,14 +189,14 @@ describe("no-mutate-queried-dom-node-in-component", () => {
   it("still flags the queried node when a nested handler shadows a different name", () => {
     const result = runRule(
       noMutateQueriedDomNodeInComponent,
-      `function Panel() {
+      `function Panel({ dimmed }) {
         const el = document.getElementById('panel');
         el.style.filter = 'blur(3px)';
         const download = () => {
           const link = document.createElement('a');
           link.style.display = 'none';
         };
-        return <div id="panel" onClick={download} />;
+        return <div id="panel" style={{ filter: dimmed ? 'blur(3px)' : 'none' }} onClick={download} />;
       }`,
     );
     expect(result.diagnostics).toHaveLength(1);
@@ -205,11 +205,11 @@ describe("no-mutate-queried-dom-node-in-component", () => {
   it("flags style mutation over an owned querySelectorAll forEach callback", () => {
     const result = runRule(
       noMutateQueriedDomNodeInComponent,
-      `function List() {
+      `function List({ color }) {
         document.querySelectorAll('.row').forEach((row) => {
           row.style.background = 'red';
         });
-        return <div className="row" />;
+        return <div className="row" style={{ background: color }} />;
       }`,
     );
     expect(result.diagnostics).toHaveLength(1);
@@ -218,11 +218,11 @@ describe("no-mutate-queried-dom-node-in-component", () => {
   it("flags classList mutation inside a for-of over an owned querySelectorAll", () => {
     const result = runRule(
       noMutateQueriedDomNodeInComponent,
-      `function List() {
+      `function List({ active }) {
         for (const row of document.querySelectorAll('.row')) {
           row.classList.add('active');
         }
-        return <div className="row" />;
+        return <div className={\`row \${active ? 'active' : ''}\`} />;
       }`,
     );
     expect(result.diagnostics).toHaveLength(1);
@@ -241,13 +241,13 @@ describe("no-mutate-queried-dom-node-in-component", () => {
     expect(result.diagnostics).toHaveLength(0);
   });
 
-  it("flags style.setProperty on an owned queried node", () => {
+  it("flags style.setProperty on an owned queried node whose style prop drives the same custom property", () => {
     const result = runRule(
       noMutateQueriedDomNodeInComponent,
-      `function Panel() {
+      `function Panel({ width }) {
         const el = document.getElementById('panel');
         el.style.setProperty('--width', '10px');
-        return <div id="panel" />;
+        return <div id="panel" style={{ '--width': width }} />;
       }`,
     );
     expect(result.diagnostics).toHaveLength(1);
@@ -388,33 +388,134 @@ export const Modal = ({ open, children }) => {
     expect(result.diagnostics).toHaveLength(0);
   });
 
-  it("still flags an unbalanced class add on an owned node", () => {
+  it("still flags an unbalanced class add on an owned node with a dynamic className", () => {
     const result = runRule(
       noMutateQueriedDomNodeInComponent,
-      `function Banner() {
+      `function Banner({ highlighted }) {
          const highlight = () => {
            const banner = document.getElementById('promo-banner');
            if (!banner) return;
            banner.classList.add('highlighted');
          };
-         return <div id="promo-banner" onMouseEnter={highlight} />;
+         return <div id="promo-banner" className={highlighted ? 'highlighted' : ''} onMouseEnter={highlight} />;
        }`,
     );
     expect(result.diagnostics).toHaveLength(1);
   });
 
-  it("still flags a style write that is never restored", () => {
+  it("still flags a style write that is never restored against a dynamic style prop", () => {
     const result = runRule(
       noMutateQueriedDomNodeInComponent,
-      `function Chart() {
+      `function Chart({ emphasized }) {
          const emphasize = () => {
            const node = document.getElementById('chart');
            if (!node) return;
            node.style.border = '2px solid red';
          };
-         return <div id="chart" onClick={emphasize} />;
+         return <div id="chart" style={{ border: emphasized ? '2px solid red' : 'none' }} onClick={emphasize} />;
        }`,
     );
     expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("does not flag a style write when the element renders no style prop (iframe-loader idiom)", () => {
+    const result = runRule(
+      noMutateQueriedDomNodeInComponent,
+      `const FrameWrapper = ({ componentName }) => {
+        const onLoad = () => {
+          document.getElementById('iframe-loader').style.display = 'none';
+        };
+        return (
+          <>
+            <div id="iframe-loader">Loading ...</div>
+            <iframe id="myFrame" onLoad={onLoad} src={componentName} />
+          </>
+        );
+      };`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a transform write to a node with className but no style prop (parallax demo idiom)", () => {
+    const result = runRule(
+      noMutateQueriedDomNodeInComponent,
+      `const Demo = () => {
+        const parallax = useParallax((value) => {
+          const card = document.getElementById('parallax-card');
+          if (card) {
+            card.style.transform = \`rotateX(\${value.roll * 20}deg)\`;
+          }
+        });
+        return (
+          <section ref={parallax.ref} className='flex min-h-96'>
+            <div className='border-border flex h-72 w-56' id='parallax-card' />
+          </section>
+        );
+      };`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a style write to a node the component also holds a ref to (tooltip zero-latency idiom)", () => {
+    const result = runRule(
+      noMutateQueriedDomNodeInComponent,
+      `function WorldMapCard({ tooltipEnabled, setTooltipEnabled, tooltipRef }) {
+        useEffect(() => {
+          const hideTooltip = () => {
+            const tooltip = document.getElementById('world-map-tooltip');
+            if (tooltip) tooltip.style.opacity = '0';
+            setTooltipEnabled(false);
+          };
+          window.addEventListener('scroll', hideTooltip);
+          return () => window.removeEventListener('scroll', hideTooltip);
+        }, []);
+        return (
+          <div
+            id="world-map-tooltip"
+            ref={tooltipRef}
+            style={{ left: 0, top: 0, opacity: tooltipEnabled ? 1 : 0 }}
+          />
+        );
+      }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a style write when the element's style prop is a static literal object", () => {
+    const result = runRule(
+      noMutateQueriedDomNodeInComponent,
+      `function Panel() {
+        const el = document.getElementById('panel');
+        el.style.display = 'none';
+        return <div id="panel" style={{ display: 'block' }} />;
+      }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a style write to a property the dynamic style prop does not drive", () => {
+    const result = runRule(
+      noMutateQueriedDomNodeInComponent,
+      `function Panel({ width }) {
+        const el = document.getElementById('panel');
+        el.style.display = 'none';
+        return <div id="panel" style={{ width }} />;
+      }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag classList.add when the element's className is a static string", () => {
+    const result = runRule(
+      noMutateQueriedDomNodeInComponent,
+      `function Panel() {
+        useEffect(() => {
+          document.querySelector('.panel').classList.add('open');
+        }, []);
+        return <div className="panel" />;
+      }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
   });
 });

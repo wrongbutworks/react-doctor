@@ -595,6 +595,176 @@ const SaveButton = () => {
     expect(result.diagnostics).toHaveLength(0);
   });
 
+  it("stays quiet: Promise.all over an array literal where every element carries its own .catch fallback", () => {
+    const result = runRule(
+      noLoadingFlagResetOutsideFinally,
+      `const refresh = async () => {
+        setLoading(true);
+        const [cols, images, videos] = await Promise.all([
+          listMediaCollections().catch(() => []),
+          listImageGallery().catch(() => []),
+          listVideoHistory().catch(() => []),
+        ]);
+        setCollections(cols);
+        setLoading(false);
+      };`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: Promise.all element with a .then(...).catch(...) chain still counts as rejection-handled", () => {
+    const result = runRule(
+      noLoadingFlagResetOutsideFinally,
+      `const refresh = async () => {
+        setLoading(true);
+        const [instances, subs] = await Promise.all([
+          getInstances({ silent: true }).catch(() => null),
+          listPeerSubscriptions({ recordId })
+            .then((r) => r?.subscriptions || [])
+            .catch(() => []),
+        ]);
+        setPeers(instances?.peers || []);
+        setSubscriptions(subs);
+        setLoading(false);
+      };`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: bare Redux thunk dispatch await (rejection folds into the resolved action)", () => {
+    const result = runRule(
+      noLoadingFlagResetOutsideFinally,
+      `const onStopSharing = async () => {
+        setIsLoading(true);
+        await dispatch(sharedThunks.stopSharingItem({ itemId }));
+        onClose();
+        setIsLoading(false);
+      };`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags a dispatch await that is .unwrap()ed (unwrap rethrows the rejection)", () => {
+    const result = runRule(
+      noLoadingFlagResetOutsideFinally,
+      `const onStopSharing = async () => {
+        setIsLoading(true);
+        await dispatch(sharedThunks.stopSharingItem({ itemId })).unwrap();
+        setIsLoading(false);
+      };`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("stays quiet: useCallback-wrapped same-file helper whose awaits are all .catch-guarded", () => {
+    const result = runRule(
+      noLoadingFlagResetOutsideFinally,
+      `const TasteTab = () => {
+        const loadProfile = useCallback(async () => {
+          const data = await api.getTasteProfile().catch(() => null);
+          if (data) setProfile(data);
+          setLoading(false);
+        }, []);
+        const submitAnswer = async () => {
+          setSubmitting(true);
+          const result = await api.submitTasteAnswer(answer).catch(() => null);
+          if (!result) {
+            toast.error("Failed to save response");
+            setSubmitting(false);
+            return;
+          }
+          await loadProfile();
+          setSubmitting(false);
+        };
+      };`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags an await of a same-file helper whose own await is unguarded", () => {
+    const result = runRule(
+      noLoadingFlagResetOutsideFinally,
+      `const Tab = () => {
+        const loadPublished = async () => {
+          const rows = await api.getAgentPublished(agentId);
+          setRows(rows);
+        };
+        const refresh = async () => {
+          setPublishedLoading(true);
+          await loadPublished();
+          setPublishedLoading(false);
+        };
+      };`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("stays quiet: same-file helper awaiting Promise.all over an array populated with dispatch pushes", () => {
+    const result = runRule(
+      noLoadingFlagResetOutsideFinally,
+      `const ShareInviteDialog = (props) => {
+        const processInvites = async (usersToInvite) => {
+          const sharingPromises = [];
+          usersToInvite.forEach((user) => {
+            sharingPromises.push(
+              dispatch(sharedThunks.shareItemWithUser({ sharedWith: user.email })),
+            );
+          });
+          await Promise.all(sharingPromises);
+        };
+        const onInvite = async () => {
+          setIsAnyInviteLoading(true);
+          await processInvites(usersToInvite);
+          setIsAnyInviteLoading(false);
+          props.onClose();
+        };
+      };`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags Promise.all over an array populated with unguarded request pushes", () => {
+    const result = runRule(
+      noLoadingFlagResetOutsideFinally,
+      `const loadPhotos = async (searchValue) => {
+        setLoading(true);
+        const requests = [];
+        pages.forEach((page) => {
+          requests.push(unsplash.search.getPhotos({ query: searchValue, page }));
+        });
+        const results = await Promise.all(requests);
+        setPhotos(results);
+        setLoading(false);
+      };`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("stays quiet: 'error' in result check on a conditional-await result binding", () => {
+    const result = runRule(
+      noLoadingFlagResetOutsideFinally,
+      `const handleDraftSave = async () => {
+        setDraftSaving(true);
+        const result = editingId
+          ? await updateSkill(editingId, payload)
+          : await importSkill(payload);
+        setDraftSaving(false);
+        if ('error' in result) {
+          setDraftError(result.error.message);
+          return;
+        }
+        setSkill(result.skill);
+      };`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
   it("still flags a reset after an unguarded rejectable await", () => {
     const result = runRule(
       noLoadingFlagResetOutsideFinally,
@@ -625,6 +795,212 @@ const SaveButton = () => {
            setSaving(false);
          };
        };`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("stays quiet in a `.test.` file (jest fixture components fail the test, not a user)", () => {
+    const result = runRule(
+      noLoadingFlagResetOutsideFinally,
+      `const handleClick = async () => {
+        setVisible(true);
+        setLoading(true);
+        await mockRequest(0);
+        setLoading(false);
+      };`,
+      { filename: "src/components/picker/tests/picker.test.tsx" },
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet in a __tests__ directory (non-production test harness code)", () => {
+    const result = runRule(
+      noLoadingFlagResetOutsideFinally,
+      `it("heuristic 2", async () => {
+        setFeedbackDisabledValue(true);
+        expect(await userPassesFeedbackRequestHeuristic()).toBe(false);
+        setFeedbackDisabledValue(false);
+        expect(await userPassesFeedbackRequestHeuristic()).toBe(true);
+      });`,
+      { filename: "src/utils/__tests__/feedback.ts" },
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet when the catch clears the flag through a same-file reset helper (glific HSM shape)", () => {
+    const result = runRule(
+      noLoadingFlagResetOutsideFinally,
+      `const HSM = () => {
+        const resetUploadState = () => {
+          setUploadingFile(false);
+          setUploadedFile(null);
+        };
+        const handleFileUpload = async (file) => {
+          setUploadedFile(file);
+          setUploadingFile(true);
+          try {
+            const result = await uploadMedia({ variables: { media: file } });
+            setAttachmentURL(result.data.uploadMedia);
+            setUploadingFile(false);
+          } catch (error) {
+            setNotification('File upload failed. Please try again.', 'error');
+            resetUploadState();
+          }
+        };
+      };`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags when the catch calls a same-file helper that does not reset the flag", () => {
+    const result = runRule(
+      noLoadingFlagResetOutsideFinally,
+      `const Save = () => {
+        const logFailure = (error) => {
+          console.error(error);
+        };
+        const submit = async () => {
+          setSaving(true);
+          try {
+            await persist(draft);
+            setSaving(false);
+          } catch (error) {
+            logFailure(error);
+          }
+        };
+      };`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("stays quiet when the awaited `this.method` swallows every error in its own try/catch (cboard shape)", () => {
+    const result = runRule(
+      noLoadingFlagResetOutsideFinally,
+      `class InputImage extends React.Component {
+        async resizeImage(file, imageName = null) {
+          try {
+            const { onChange } = this.props;
+            const resizedBlob = await readAndCompressImage(file, configLQ);
+            const blobHQ = await readAndCompressImage(file, configHQ);
+            onChange(resizedBlob, imageName || file.name, blobHQ);
+          } catch (err) {
+            console.error(err);
+          }
+        }
+
+        handleChange = async (event) => {
+          const { setIsLoadingImage } = this.props;
+          setIsLoadingImage(true);
+          const file = event.target.files[0];
+          if (file) {
+            await this.resizeImage(file);
+          }
+          setIsLoadingImage(false);
+        };
+      }`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags an awaited `this.method` whose own await is unguarded", () => {
+    const result = runRule(
+      noLoadingFlagResetOutsideFinally,
+      `class Uploader extends React.Component {
+        async uploadFile(file) {
+          await api.upload(file);
+        }
+
+        handleChange = async (event) => {
+          const { setIsLoadingImage } = this.props;
+          setIsLoadingImage(true);
+          await this.uploadFile(event.target.files[0]);
+          setIsLoadingImage(false);
+        };
+      }`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("stays quiet when a switch-case assignment await is result-shape-checked afterwards (commercelayer saveAddresses shape)", () => {
+    const result = runRule(
+      noLoadingFlagResetOutsideFinally,
+      `const handleClick = async () => {
+        setForceDisable(true);
+        let response = { success: false };
+        switch (true) {
+          case customerEmail != null: {
+            response = await saveAddresses({ customerEmail });
+            break;
+          }
+          case order != null: {
+            response = await saveAddresses({});
+            break;
+          }
+        }
+        setForceDisable(false);
+        if (onClick && response.success) onClick(response);
+      };`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags an assignment await whose result is never error-shape-checked", () => {
+    const result = runRule(
+      noLoadingFlagResetOutsideFinally,
+      `const handleClick = async () => {
+        setForceDisable(true);
+        let response;
+        response = await saveAddresses({ customerEmail });
+        setForceDisable(false);
+        onClick(response);
+      };`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("stays quiet: same-file async helper awaiting only a delay and returning a sync array sort (docs demo fakeSort shape)", () => {
+    const result = runRule(
+      noLoadingFlagResetOutsideFinally,
+      `async function fakeSort(field, dir) {
+        await new Promise(r => setTimeout(r, 250));
+        return [...SOURCE].sort((a, b) => {
+          if (a[field] < b[field]) return dir === 'asc' ? -1 : 1;
+          if (a[field] > b[field]) return dir === 'asc' ? 1 : -1;
+          return 0;
+        });
+      }
+      const Demo = () => {
+        const handleSort = useCallback(async (col, dir) => {
+          setLoading(true);
+          setLastSort({ field: col.sortField, dir });
+          const sorted = await fakeSort(col.sortField, dir);
+          setData(sorted);
+          setLoading(false);
+        }, []);
+      };`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags a same-file async helper that returns a rejectable call", () => {
+    const result = runRule(
+      noLoadingFlagResetOutsideFinally,
+      `async function loadRows(field) {
+        await new Promise(r => setTimeout(r, 250));
+        return api.fetchRows(field);
+      }
+      const Demo = () => {
+        const handleSort = async (col) => {
+          setLoading(true);
+          const rows = await loadRows(col.sortField);
+          setData(rows);
+          setLoading(false);
+        };
+      };`,
     );
     expect(result.diagnostics).toHaveLength(1);
   });

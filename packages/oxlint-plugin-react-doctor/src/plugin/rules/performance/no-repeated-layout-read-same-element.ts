@@ -103,13 +103,18 @@ const classifyLayoutReadCall = (
 // Nearest enclosing block, branch arm, or the scope root — two reads
 // only "repeat" when they share the same execution path, so reads in
 // separate branches (blocks, switch cases, ternary arms, unbraced
-// if/else bodies) never group together.
+// if/else bodies, short-circuit right operands of &&/||/??) never group
+// together. A read in a logical right operand is a deliberate lazy
+// fallback (`el.clientWidth || el.getBoundingClientRect().width`) that
+// only executes on the rare path — hoisting it would pessimize the
+// common path.
 const enclosingRegion = (node: EsTreeNode, scopeRoot: EsTreeNode): EsTreeNode => {
   let child: EsTreeNode = node;
   let cursor: EsTreeNode | null | undefined = node.parent;
   while (cursor && cursor !== scopeRoot) {
     if (isNodeOfType(cursor, "BlockStatement")) return cursor;
     if (isNodeOfType(cursor, "SwitchCase")) return cursor;
+    if (isNodeOfType(cursor, "LogicalExpression") && cursor.right === child) return child;
     if (
       (isNodeOfType(cursor, "ConditionalExpression") || isNodeOfType(cursor, "IfStatement")) &&
       (cursor.consequent === child || cursor.alternate === child)

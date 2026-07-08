@@ -6,15 +6,40 @@ import {
 } from "../../utils/is-never-rejecting-expression.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
+import { findVariableInitializer } from "../../utils/find-variable-initializer.js";
 import { isFunctionLike } from "../../utils/is-function-like.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
+import { stripParenExpression } from "../../utils/strip-paren-expression.js";
 import { walkAst } from "../../utils/walk-ast.js";
 import { walkOwnFunctionScope } from "../../utils/walk-own-function-scope.js";
 import type { RuleContext } from "../../utils/rule-context.js";
+import type { RuleVisitors } from "../../utils/rule-visitors.js";
 import { unwrapChainExpression } from "./utils/unwrap-chain-expression.js";
 
 const MESSAGE =
   "This resets a loading/busy flag only on the success path: if the awaited call rejects the reset never runs and the flag stays stuck truthy (a spinner that never stops, a button disabled forever). Move the reset into a `finally` block, or mirror it on every catch, so it clears on rejection too.";
+
+// A stuck flag in jest/vitest fixture components fails the test run instead
+// of stranding a user on a spinner, so test files are out of scope.
+const TEST_FILE_BASENAME_SUFFIXES: ReadonlyArray<string> = [".test.", ".spec.", ".cy."];
+
+const TEST_FILE_PATH_SEGMENTS: ReadonlyArray<string> = [
+  "/__tests__/",
+  "/__test__/",
+  "/__mocks__/",
+  "/tests/",
+  "/test/",
+];
+
+const isTestFileFilename = (rawFilename: string | undefined): boolean => {
+  if (!rawFilename) return false;
+  const filename = rawFilename.replaceAll("\\", "/");
+  const lastSlash = filename.lastIndexOf("/");
+  const basename = lastSlash === -1 ? filename : filename.slice(lastSlash + 1);
+  if (TEST_FILE_BASENAME_SUFFIXES.some((suffix) => basename.includes(suffix))) return true;
+  const rootedFilename = filename.startsWith("/") ? filename : `/${filename}`;
+  return TEST_FILE_PATH_SEGMENTS.some((segment) => rootedFilename.includes(segment));
+};
 
 const LOADING_FLAG_SETTER_PATTERN =
   /(loading|busy|submitting|saving|pending|fetching|processing|uploading|spinner|disabl|refreshing|updating|inflight|working|posting|sending|deleting)/i;
@@ -77,27 +102,348 @@ const classifyResetContext = (
   return "plain";
 };
 
-// `await Promise.allSettled(...)` never rejects by spec, and
-// `await f().catch(...)` handles rejection inline, so the await always
-// resumes and the trailing reset still runs.
+// Depth budget for the recursive never-rejecting analysis (helper calls
+// resolving to helpers, Promise.all over pushed arrays); bounds mutual
+// recursion through same-file bindings.
+const NEVER_REJECTING_ANALYSIS_MAX_DEPTH = 3;
+
+const REDUX_DISPATCH_CALLEE_NAME_PATTERN = /dispatch$/i;
+
+// `await dispatch(saveThing(...))` — Redux Toolkit `createAsyncThunk`
+// dispatches resolve with a rejected ACTION instead of throwing; rejection
+// only surfaces through `.unwrap()`, a member chain this bare-dispatch
+// shape does not match, so `.unwrap()`ed dispatches stay flagged.
+const isThunkActionDispatchCall = (callNode: EsTreeNodeOfType<"CallExpression">): boolean => {
+  const callee = stripParenExpression(callNode.callee);
+  if (!isNodeOfType(callee, "Identifier")) return false;
+  if (!REDUX_DISPATCH_CALLEE_NAME_PATTERN.test(callee.name)) return false;
+  const firstArgument = callNode.arguments[0];
+  return (
+    Boolean(firstArgument) && isNodeOfType(stripParenExpression(firstArgument), "CallExpression")
+  );
+};
+
+// A `.catch(...)` or two-argument `.then(onOk, onErr)` anywhere in the call
+// chain handles rejection inline, so the awaited chain resolves either way.
+const chainCarriesRejectionHandler = (node: EsTreeNode): boolean => {
+  let cursor: EsTreeNode | null = stripParenExpression(node);
+  while (cursor) {
+    if (isNodeOfType(cursor, "CallExpression")) {
+      const callee: EsTreeNode = cursor.callee;
+      if (
+        isNodeOfType(callee, "MemberExpression") &&
+        !callee.computed &&
+        isNodeOfType(callee.property, "Identifier")
+      ) {
+        if (callee.property.name === "catch") return true;
+        if (callee.property.name === "then" && (cursor.arguments?.length ?? 0) >= 2) return true;
+        cursor = callee.object;
+        continue;
+      }
+      return false;
+    }
+    if (isNodeOfType(cursor, "MemberExpression")) {
+      cursor = cursor.object;
+      continue;
+    }
+    if (isNodeOfType(cursor, "ChainExpression")) {
+      cursor = cursor.expression;
+      continue;
+    }
+    return false;
+  }
+  return false;
+};
+
+const subtreeContainsThrowStatement = (root: EsTreeNode): boolean => {
+  let didFindThrow = false;
+  walkAst(root, (child: EsTreeNode) => {
+    if (didFindThrow) return false;
+    if (isNodeOfType(child, "ThrowStatement")) {
+      didFindThrow = true;
+      return false;
+    }
+  });
+  return didFindThrow;
+};
+
+const isInsideNonRethrowingTryBlock = (node: EsTreeNode, functionBoundary: EsTreeNode): boolean => {
+  let child: EsTreeNode = node;
+  let ancestor: EsTreeNode | null | undefined = node.parent;
+  while (ancestor && ancestor !== functionBoundary) {
+    if (
+      isNodeOfType(ancestor, "TryStatement") &&
+      ancestor.block === child &&
+      ancestor.handler &&
+      !subtreeContainsThrowStatement(ancestor.handler)
+    ) {
+      return true;
+    }
+    child = ancestor;
+    ancestor = ancestor.parent ?? null;
+  }
+  return false;
+};
+
+const getUseCallbackWrappedFunction = (expression: EsTreeNode): EsTreeNode => {
+  const stripped = stripParenExpression(expression);
+  if (!isNodeOfType(stripped, "CallExpression")) return stripped;
+  const callee = stripParenExpression(stripped.callee);
+  const calleeName = isNodeOfType(callee, "Identifier")
+    ? callee.name
+    : isNodeOfType(callee, "MemberExpression") &&
+        !callee.computed &&
+        isNodeOfType(callee.property, "Identifier")
+      ? callee.property.name
+      : null;
+  if (calleeName !== "useCallback") return stripped;
+  const wrappedFunction = stripped.arguments[0];
+  return wrappedFunction && isFunctionLike(wrappedFunction) ? wrappedFunction : stripped;
+};
+
+// `await Promise.all(sharingPromises)` where the binding is an array literal
+// whose elements — and every `<name>.push(...)` into it in the same scope —
+// are never-rejecting promises (e.g. RTK dispatches). Any reassignment of
+// the binding makes its contents unknowable and bails out.
+const isArrayBindingOfNeverRejectingPromises = (
+  identifier: EsTreeNodeOfType<"Identifier">,
+  depth: number,
+): boolean => {
+  if (depth <= 0) return false;
+  const binding = findVariableInitializer(identifier, identifier.name);
+  if (!binding?.initializer) return false;
+  const initializer = stripParenExpression(binding.initializer);
+  if (!isNodeOfType(initializer, "ArrayExpression")) return false;
+  if (
+    !initializer.elements.every(
+      (element) => element !== null && isNeverRejectingExpression(element, depth - 1),
+    )
+  ) {
+    return false;
+  }
+  let isRejectionProof = true;
+  walkAst(binding.scopeOwner, (child: EsTreeNode) => {
+    if (!isRejectionProof) return false;
+    if (isNodeOfType(child, "AssignmentExpression")) {
+      const target = child.left;
+      if (isNodeOfType(target, "Identifier") && target.name === identifier.name) {
+        isRejectionProof = false;
+        return false;
+      }
+      return;
+    }
+    if (!isNodeOfType(child, "CallExpression")) return;
+    const callee = child.callee;
+    if (!isNodeOfType(callee, "MemberExpression") || callee.computed) return;
+    if (!isNodeOfType(callee.property, "Identifier") || callee.property.name !== "push") return;
+    const receiver = stripParenExpression(callee.object);
+    if (!isNodeOfType(receiver, "Identifier") || receiver.name !== identifier.name) return;
+    if (
+      !(child.arguments ?? []).every((argument) => isNeverRejectingExpression(argument, depth - 1))
+    ) {
+      isRejectionProof = false;
+      return false;
+    }
+  });
+  return isRejectionProof;
+};
+
+const getPromiseCombinatorMethodName = (
+  callNode: EsTreeNodeOfType<"CallExpression">,
+): string | null => {
+  const callee = stripParenExpression(callNode.callee);
+  if (!isNodeOfType(callee, "MemberExpression") || callee.computed) return null;
+  if (!isNodeOfType(callee.object, "Identifier") || callee.object.name !== "Promise") return null;
+  return isNodeOfType(callee.property, "Identifier") ? callee.property.name : null;
+};
+
+// `Promise.allSettled(...)` never rejects by spec; `Promise.all(...)` never
+// rejects when every member provably never rejects (inline `.catch`
+// fallbacks per element, or an array binding populated with dispatches).
+const isNeverRejectingPromiseCombinatorCall = (
+  callNode: EsTreeNodeOfType<"CallExpression">,
+  depth: number,
+): boolean => {
+  const methodName = getPromiseCombinatorMethodName(callNode);
+  if (methodName === "allSettled") return true;
+  if (methodName !== "all") return false;
+  const argument = callNode.arguments[0];
+  if (!argument) return false;
+  const stripped = stripParenExpression(argument);
+  if (isNodeOfType(stripped, "ArrayExpression")) {
+    return stripped.elements.every(
+      (element) => element !== null && isNeverRejectingExpression(element, depth),
+    );
+  }
+  if (isNodeOfType(stripped, "Identifier")) {
+    return isArrayBindingOfNeverRejectingPromises(stripped, depth);
+  }
+  return false;
+};
+
+const SYNC_ARRAY_METHOD_NAMES = new Set([
+  "sort",
+  "map",
+  "filter",
+  "flatMap",
+  "some",
+  "every",
+  "find",
+  "findIndex",
+  "forEach",
+  "slice",
+  "concat",
+  "join",
+  "reduce",
+  "includes",
+  "indexOf",
+  "reverse",
+  "flat",
+  "toSorted",
+  "toReversed",
+]);
+
+// `return [...source].sort(comparator)` — an Array.prototype method called on
+// an array literal returns a plain array (never a thenable), so an async
+// helper returning it cannot adopt a rejecting promise; throw-free callback
+// arguments rule out the one sync escape (a throwing comparator).
+const isSyncArrayLiteralMethodCall = (callNode: EsTreeNodeOfType<"CallExpression">): boolean => {
+  const callee = stripParenExpression(callNode.callee);
+  if (!isNodeOfType(callee, "MemberExpression") || callee.computed) return false;
+  if (!isNodeOfType(callee.property, "Identifier")) return false;
+  if (!SYNC_ARRAY_METHOD_NAMES.has(callee.property.name)) return false;
+  const receiver = stripParenExpression(callee.object);
+  if (!isNodeOfType(receiver, "ArrayExpression")) return false;
+  return (callNode.arguments ?? []).every((argument) => !subtreeContainsThrowStatement(argument));
+};
+
+const returnedExpressionCanReject = (expression: EsTreeNode, depth: number): boolean => {
+  const returned = stripParenExpression(expression);
+  if (isNodeOfType(returned, "CallExpression")) {
+    if (isSyncArrayLiteralMethodCall(returned)) return false;
+    return !isNeverRejectingExpression(returned, depth);
+  }
+  if (isNodeOfType(returned, "NewExpression")) {
+    const isPromiseConstruction =
+      isNodeOfType(returned.callee, "Identifier") && returned.callee.name === "Promise";
+    return isPromiseConstruction && !isNonRejectingPromiseConstruction(returned);
+  }
+  return false;
+};
+
+// `await this.method(...)` in a class component — the method body lives in
+// the same class, so its rejection-proofness is provable in-file.
+const findEnclosingClassMethodFunction = (
+  referenceNode: EsTreeNode,
+  methodName: string,
+): EsTreeNode | null => {
+  let cursor: EsTreeNode | null | undefined = referenceNode.parent;
+  while (cursor) {
+    if (isNodeOfType(cursor, "ClassBody")) {
+      for (const member of cursor.body) {
+        if (
+          !isNodeOfType(member, "MethodDefinition") &&
+          !isNodeOfType(member, "PropertyDefinition")
+        )
+          continue;
+        if (member.computed) continue;
+        if (!isNodeOfType(member.key, "Identifier") || member.key.name !== methodName) continue;
+        const memberValue = member.value;
+        return memberValue && isFunctionLike(memberValue) ? memberValue : null;
+      }
+      return null;
+    }
+    cursor = cursor.parent ?? null;
+  }
+  return null;
+};
+
+const resolveSameFileHelperFunction = (
+  callNode: EsTreeNodeOfType<"CallExpression">,
+): EsTreeNode | null => {
+  const callee = stripParenExpression(callNode.callee);
+  if (isNodeOfType(callee, "Identifier")) {
+    const binding = findVariableInitializer(callee, callee.name);
+    if (!binding?.initializer) return null;
+    return getUseCallbackWrappedFunction(binding.initializer);
+  }
+  if (
+    isNodeOfType(callee, "MemberExpression") &&
+    !callee.computed &&
+    isNodeOfType(callee.object, "ThisExpression") &&
+    isNodeOfType(callee.property, "Identifier")
+  ) {
+    return findEnclosingClassMethodFunction(callNode, callee.property.name);
+  }
+  return null;
+};
+
+// A same-file async helper (possibly useCallback-wrapped, or a `this.method`
+// on the enclosing class) whose every await is itself never-rejecting or
+// sits in a try with a non-rethrowing catch, with no unguarded throw and no
+// returned call that could reject. Covers shapes the shared
+// isNeverRejectingHelperCall misses: `.catch`-guarded awaits inside the
+// helper, useCallback wrappers, class methods, and Promise.all over
+// dispatch-populated arrays.
+const isNeverRejectingLocalAsyncHelperCall = (
+  callNode: EsTreeNodeOfType<"CallExpression">,
+  depth: number,
+): boolean => {
+  if (depth <= 0) return false;
+  const helper = resolveSameFileHelperFunction(callNode);
+  if (!helper || !isFunctionLike(helper) || !helper.async) return false;
+
+  let isRejectionProof = true;
+  walkOwnFunctionScope(helper, (child: EsTreeNode) => {
+    if (!isRejectionProof) return false;
+    if (isNodeOfType(child, "AwaitExpression")) {
+      const awaited = child.argument ? stripParenExpression(child.argument) : null;
+      const isSafeAwait =
+        (awaited !== null && isNeverRejectingExpression(awaited, depth - 1)) ||
+        isInsideNonRethrowingTryBlock(child, helper);
+      if (!isSafeAwait) isRejectionProof = false;
+      return;
+    }
+    if (isNodeOfType(child, "ThrowStatement")) {
+      if (!isInsideNonRethrowingTryBlock(child, helper)) isRejectionProof = false;
+      return;
+    }
+    if (isNodeOfType(child, "ReturnStatement") && child.argument) {
+      if (returnedExpressionCanReject(child.argument, depth - 1)) isRejectionProof = false;
+    }
+  });
+  if (
+    isNodeOfType(helper, "ArrowFunctionExpression") &&
+    !isNodeOfType(helper.body, "BlockStatement") &&
+    returnedExpressionCanReject(helper.body, depth - 1)
+  ) {
+    isRejectionProof = false;
+  }
+  return isRejectionProof;
+};
+
+const isNeverRejectingExpression = (expression: EsTreeNode, depth: number): boolean => {
+  const inner = stripParenExpression(expression);
+  if (isNonRejectingPromiseConstruction(inner)) return true;
+  if (!isNodeOfType(inner, "CallExpression")) return false;
+  if (isPromiseResolveCall(inner)) return true;
+  if (isThunkActionDispatchCall(inner)) return true;
+  if (chainCarriesRejectionHandler(inner)) return true;
+  if (isNeverRejectingPromiseCombinatorCall(inner, depth)) return true;
+  if (isNeverRejectingHelperCall(inner)) return true;
+  return isNeverRejectingLocalAsyncHelperCall(inner, depth);
+};
+
+// `await Promise.allSettled(...)` never rejects by spec, `await f().catch(...)`
+// handles rejection inline, `await dispatch(thunk(...))` folds rejection into
+// the resolved action, and a provably never-rejecting same-file helper cannot
+// skip the trailing reset — the await always resumes.
 const isNeverRejectingAwaitedExpression = (
   awaitNode: EsTreeNodeOfType<"AwaitExpression">,
 ): boolean => {
-  const awaited = unwrapChainExpression(awaitNode.argument);
+  const awaited = awaitNode.argument;
   if (!awaited) return false;
-  if (isNonRejectingPromiseConstruction(awaited)) return true;
-  if (!isNodeOfType(awaited, "CallExpression")) return false;
-  if (isPromiseResolveCall(awaited)) return true;
-  if (isNeverRejectingHelperCall(awaited)) return true;
-  const callee = unwrapChainExpression(awaited.callee);
-  if (!isNodeOfType(callee, "MemberExpression") || callee.computed) return false;
-  if (!isNodeOfType(callee.property, "Identifier")) return false;
-  if (callee.property.name === "catch") return true;
-  return (
-    callee.property.name === "allSettled" &&
-    isNodeOfType(callee.object, "Identifier") &&
-    callee.object.name === "Promise"
-  );
+  return isNeverRejectingExpression(awaited, NEVER_REJECTING_ANALYSIS_MAX_DEPTH);
 };
 
 const isWithinIfTest = (node: EsTreeNode, functionNode: EsTreeNode): boolean => {
@@ -133,13 +479,33 @@ const isMatchCallArgument = (node: EsTreeNode): boolean => {
 
 // `const result = await f(...)` where the binding (or a destructured
 // success/error/ok field) is branch-checked in an `if` marks the callee as a
-// result-object wrapper that folds errors into a resolved value.
+// result-object wrapper that folds errors into a resolved value. The await
+// may sit inside a conditional/logical init
+// (`const result = editing ? await update(...) : await create(...)`), or
+// assign into a pre-declared binding (`response = await saveAddresses(...)`
+// inside switch cases, checked via `response.success` afterwards).
 const isResultObjectCheckedAwait = (
   awaitNode: EsTreeNodeOfType<"AwaitExpression">,
   checkedResultNames: ReadonlySet<string>,
 ): boolean => {
-  const parent = awaitNode.parent;
-  if (!isNodeOfType(parent, "VariableDeclarator") || parent.init !== awaitNode) return false;
+  let child: EsTreeNode = awaitNode;
+  let parent: EsTreeNode | null | undefined = awaitNode.parent;
+  while (
+    parent &&
+    ((isNodeOfType(parent, "ConditionalExpression") && parent.test !== child) ||
+      isNodeOfType(parent, "LogicalExpression"))
+  ) {
+    child = parent;
+    parent = parent.parent ?? null;
+  }
+  if (
+    isNodeOfType(parent, "AssignmentExpression") &&
+    parent.operator === "=" &&
+    parent.right === child
+  ) {
+    return isNodeOfType(parent.left, "Identifier") && checkedResultNames.has(parent.left.name);
+  }
+  if (!isNodeOfType(parent, "VariableDeclarator") || parent.init !== child) return false;
   const bindingTarget = parent.id;
   if (isNodeOfType(bindingTarget, "Identifier")) return checkedResultNames.has(bindingTarget.name);
   if (isNodeOfType(bindingTarget, "ObjectPattern")) {
@@ -309,6 +675,18 @@ const recordCheckedResultName = (
     checkedResultNames.add(identifier.name);
     return;
   }
+  // `if ('error' in result)` — an existence check on a result-shape field.
+  if (
+    isNodeOfType(parent, "BinaryExpression") &&
+    parent.operator === "in" &&
+    parent.right === identifier &&
+    isNodeOfType(parent.left, "Literal") &&
+    typeof parent.left.value === "string" &&
+    RESULT_SHAPE_PROPERTY_NAMES.has(parent.left.value)
+  ) {
+    checkedResultNames.add(identifier.name);
+    return;
+  }
   // `fetchUsers.fulfilled.match(action)` — Redux Toolkit's result check.
   if (
     isNodeOfType(parent, "CallExpression") &&
@@ -404,6 +782,28 @@ const analyzeFunction = (functionNode: EsTreeNode, context: RuleContext): void =
   const settersByName = new Map<string, SetterCall[]>();
   const checkedResultNames = new Set<string>();
 
+  // `catch (e) { resetUploadState() }` where the same-file sync helper's body
+  // does `setUploadingFile(false)` — the flag is cleared on the rejection
+  // path via the helper, so each flag it resets counts as a catch reset.
+  const registerHelperResets = (callNode: EsTreeNodeOfType<"CallExpression">): void => {
+    if (!isNodeOfType(callNode.callee, "Identifier")) return;
+    const start = getNodeStart(callNode);
+    if (start === null) return;
+    const resetContext = classifyResetContext(callNode, functionNode);
+    if (resetContext === "plain") return;
+    const helper = resolveSameFileHelperFunction(callNode);
+    if (!helper || !isFunctionLike(helper) || helper.async) return;
+    walkOwnFunctionScope(helper, (child: EsTreeNode) => {
+      if (!isNodeOfType(child, "CallExpression")) return;
+      const helperSetter = getSetterBooleanValue(child);
+      if (!helperSetter || helperSetter.value) return;
+      if (!LOADING_FLAG_SETTER_PATTERN.test(helperSetter.setterName)) return;
+      const list = settersByName.get(helperSetter.setterName) ?? [];
+      list.push({ value: false, start, context: resetContext, node: callNode });
+      settersByName.set(helperSetter.setterName, list);
+    });
+  };
+
   walkOwnFunctionScope(functionNode, (node) => {
     if (isNodeOfType(node, "AwaitExpression")) {
       const start = getNodeStart(node);
@@ -424,7 +824,10 @@ const analyzeFunction = (functionNode: EsTreeNode, context: RuleContext): void =
     const resultCheckedBindingName = getResultCheckedArrayCallbackBindingName(node);
     if (resultCheckedBindingName) checkedResultNames.add(resultCheckedBindingName);
     const setter = getSetterBooleanValue(node);
-    if (!setter) return;
+    if (!setter) {
+      registerHelperResets(node);
+      return;
+    }
     if (!LOADING_FLAG_SETTER_PATTERN.test(setter.setterName)) return;
     const start = getNodeStart(node);
     if (start === null) return;
@@ -484,15 +887,18 @@ export const noLoadingFlagResetOutsideFinally = defineRule({
   category: "Correctness",
   recommendation:
     "A trailing `setLoading(false)` after an `await` never runs if the awaited call rejects, so the flag stays stuck truthy; reset it in a `finally` block (or mirror the reset on every catch) so it clears on both paths.",
-  create: (context: RuleContext) => ({
-    ArrowFunctionExpression(node: EsTreeNodeOfType<"ArrowFunctionExpression">) {
-      analyzeFunction(node, context);
-    },
-    FunctionExpression(node: EsTreeNodeOfType<"FunctionExpression">) {
-      analyzeFunction(node, context);
-    },
-    FunctionDeclaration(node: EsTreeNodeOfType<"FunctionDeclaration">) {
-      analyzeFunction(node, context);
-    },
-  }),
+  create: (context: RuleContext): RuleVisitors => {
+    if (isTestFileFilename(context.filename)) return {};
+    return {
+      ArrowFunctionExpression(node: EsTreeNodeOfType<"ArrowFunctionExpression">) {
+        analyzeFunction(node, context);
+      },
+      FunctionExpression(node: EsTreeNodeOfType<"FunctionExpression">) {
+        analyzeFunction(node, context);
+      },
+      FunctionDeclaration(node: EsTreeNodeOfType<"FunctionDeclaration">) {
+        analyzeFunction(node, context);
+      },
+    };
+  },
 });

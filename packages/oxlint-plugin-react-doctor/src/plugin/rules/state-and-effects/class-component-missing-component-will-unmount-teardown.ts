@@ -34,6 +34,57 @@ const walkMountBody = (functionBody: EsTreeNode, visit: (node: EsTreeNode) => vo
   });
 };
 
+// Name a local helper is bound to: a `function` declaration, or a `const`
+// arrow/function initializer. `let`/`var` bindings are excluded — a later
+// reassignment could swap the body before the invocation.
+const getConstLocalHelperName = (functionNode: EsTreeNode): string | null => {
+  if (isNodeOfType(functionNode, "FunctionDeclaration")) {
+    return functionNode.id && isNodeOfType(functionNode.id, "Identifier")
+      ? functionNode.id.name
+      : null;
+  }
+  const declarator = functionNode.parent;
+  if (!declarator || !isNodeOfType(declarator, "VariableDeclarator")) return null;
+  if (declarator.init !== functionNode || !isNodeOfType(declarator.id, "Identifier")) return null;
+  const declaration = declarator.parent;
+  if (!declaration || !isNodeOfType(declaration, "VariableDeclaration")) return null;
+  return declaration.kind === "const" ? declarator.id.name : null;
+};
+
+// Walks the mount body plus the bodies of local helpers the mount flow
+// synchronously invokes (`const configure = () => {...}; configure();`),
+// transitively — mount-time work factored into immediately-invoked helpers
+// acquires resources just as directly as inline statements. Helpers that
+// are only stored or passed around as callbacks are never entered.
+const walkSynchronousMountFlow = (
+  functionBody: EsTreeNode,
+  visit: (node: EsTreeNode) => void,
+): void => {
+  const walkedBodies = new Set<EsTreeNode>();
+  const walkBody = (body: EsTreeNode, helperBodiesInScope: Map<string, EsTreeNode>): void => {
+    if (walkedBodies.has(body)) return;
+    walkedBodies.add(body);
+    const helperBodies = new Map(helperBodiesInScope);
+    const synchronouslyInvokedNames = new Set<string>();
+    walkAst(body, (child: EsTreeNode) => {
+      if (child !== body && isFunctionLike(child)) {
+        const helperName = getConstLocalHelperName(child);
+        if (helperName && child.body) helperBodies.set(helperName, child.body);
+        return false;
+      }
+      if (isNodeOfType(child, "CallExpression") && isNodeOfType(child.callee, "Identifier")) {
+        synchronouslyInvokedNames.add(child.callee.name);
+      }
+      visit(child);
+    });
+    for (const invokedName of synchronouslyInvokedNames) {
+      const helperBody = helperBodies.get(invokedName);
+      if (helperBody) walkBody(helperBody, helperBodies);
+    }
+  };
+  walkBody(functionBody, new Map());
+};
+
 const getBareCalleeName = (node: EsTreeNode): string | null => {
   if (!isNodeOfType(node, "CallExpression")) return null;
   return isNodeOfType(node.callee, "Identifier") ? node.callee.name : null;
@@ -160,14 +211,14 @@ const isOneShotListenerOptions = (optionsArgument: EsTreeNode | undefined): bool
   );
 };
 
-// Variables declared inside the mount body whose values never escape it
-// (never assigned onto `this` or another object): a listener registered on
-// such a locally constructed emitter dies with the component, so it needs
-// no teardown.
+// Variables declared inside the synchronous mount flow whose values never
+// escape it (never assigned onto `this` or another object): a listener
+// registered on such a locally constructed emitter dies with the component,
+// so it needs no teardown.
 const collectMountLocalReceiverNames = (mountBody: EsTreeNode): Set<string> => {
   const declaredNames = new Set<string>();
   const escapedNames = new Set<string>();
-  walkMountBody(mountBody, (node) => {
+  walkSynchronousMountFlow(mountBody, (node) => {
     if (isNodeOfType(node, "VariableDeclarator")) {
       collectPatternNames(node.id as EsTreeNode, declaredNames);
     }
@@ -188,7 +239,7 @@ const collectMountLocalReceiverNames = (mountBody: EsTreeNode): Set<string> => {
 // nothing registered.
 const collectSynchronouslyRemovedEventNames = (mountBody: EsTreeNode): Set<string> => {
   const removedEventNames = new Set<string>();
-  walkMountBody(mountBody, (node) => {
+  walkSynchronousMountFlow(mountBody, (node) => {
     if (!isNodeOfType(node, "CallExpression")) return;
     if (getCallMethodName(node.callee) !== "removeEventListener") return;
     const eventArgument = node.arguments?.[0];
@@ -312,6 +363,14 @@ const classUsesDisposeOnUnmount = (classNode: EsTreeNode): boolean => {
   return found;
 };
 
+// KNOWN ACCEPTED NOISE: an app-root class component that never unmounts
+// (cboard's AppContainer, mounted once via a non-exact `<Route path="/">`
+// under ReactDOM.render) registers intentionally app-lifetime listeners,
+// yet stays flagged. The mount site lives in a DIFFERENT module
+// (src/index.js), so no single-file signal proves root-ness — the
+// component's own file only exports a connected class, and name/path
+// heuristics ("App", `components/App/`) misfire on route-level screens
+// and embeddable widgets that do unmount.
 export const classComponentMissingComponentWillUnmountTeardown = defineRule({
   id: "class-component-missing-component-will-unmount-teardown",
   title: "Class component acquires a resource with no teardown",
@@ -341,7 +400,7 @@ export const classComponentMissingComponentWillUnmountTeardown = defineRule({
         const localReceiverNames = collectMountLocalReceiverNames(body);
         const removedEventNames = collectSynchronouslyRemovedEventNames(body);
         let hazardNode: EsTreeNode | null = null;
-        walkMountBody(body, (candidate) => {
+        walkSynchronousMountFlow(body, (candidate) => {
           if (hazardNode) return;
           if (isMountHazard(candidate, localReceiverNames, removedEventNames, node)) {
             hazardNode = candidate;

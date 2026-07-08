@@ -296,6 +296,62 @@ describe("no-object-keys-values-entries-on-maybe-undefined", () => {
     expect(result.diagnostics).toHaveLength(0);
   });
 
+  it("does not flag inside a .then callback of a promise chain ending in .catch", () => {
+    const result = runRule(
+      noObjectKeysValuesEntriesOnMaybeUndefined,
+      `export default async function MediumBlogs() {
+        return fetch('/medium.json')
+          .then(response => response.json())
+          .then(data => {
+            const posts = Object.values(data?.payload?.references?.Post);
+            return posts.slice(0, 3);
+          })
+          .catch(error => {
+            console.error('Error fetching Medium data:', error);
+            return [];
+          });
+      }`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags inside a .then callback when the chain has no .catch", () => {
+    const result = runRule(
+      noObjectKeysValuesEntriesOnMaybeUndefined,
+      `const load = () =>
+        fetch('/medium.json')
+          .then(response => response.json())
+          .then(data => Object.values(data?.payload?.references?.Post));`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("does not flag a computed-index chain argument guarded by a length early-return on the array", () => {
+    const result = runRule(
+      noObjectKeysValuesEntriesOnMaybeUndefined,
+      `const useColumns = (data) => {
+        return useMemo(() => {
+          const rows = data?.data ?? [];
+          if (rows.length === 0) {
+            return [];
+          }
+          return Object.keys(rows?.[0]).map((key) => ({ dataKey: key }));
+        }, [data?.data]);
+      };`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags a computed-index chain argument with no guard on the array", () => {
+    const result = runRule(
+      noObjectKeysValuesEntriesOnMaybeUndefined,
+      `const columnsOf = (rows) => Object.keys(rows?.[0]);`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
   it("does not flag when the same && chain truthiness-guards the optional param through a method wrapper", () => {
     const result = runRule(
       noObjectKeysValuesEntriesOnMaybeUndefined,

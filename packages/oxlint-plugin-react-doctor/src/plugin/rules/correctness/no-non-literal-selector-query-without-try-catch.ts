@@ -70,6 +70,20 @@ const SHAPE_VALIDATION_METHOD_NAMES = new Set([
   "every",
 ]);
 const REGEX_VALIDATION_METHOD_NAMES = new Set(["match", "test", "exec"]);
+const STRING_DERIVATION_METHOD_NAMES = new Set([
+  "slice",
+  "substring",
+  "substr",
+  "replace",
+  "replaceAll",
+  "concat",
+  "trim",
+  "trimStart",
+  "trimEnd",
+  "toLowerCase",
+  "toUpperCase",
+  "normalize",
+]);
 const PREDICATE_CALLEE_NAME_PATTERN = /^(?:is|has|can|check|validate?)|valid/i;
 const NON_DOM_RECEIVER_NAME_PATTERN = /rout(?:e|er)|pattern|history|matcher/i;
 const DEFERRED_CALLBACK_REGISTRAR_NAMES = new Set([
@@ -178,9 +192,31 @@ const isSanitizedSelectorHelperCall = (node: EsTreeNode): boolean => {
   );
 };
 
+// `href.slice(hashIndex)`, `location.hash.replace(...)` — a string-slicing
+// method whose receiver is itself href/hash tainted (an href/hash-named
+// identifier or a tainted expression) hands back a fragment of that value.
+// Validation methods (`startsWith`, `match`) stay out: they return
+// booleans/arrays, not selector strings.
+const isStringDerivationCallOnHrefTaintedReceiver = (node: EsTreeNode): boolean => {
+  if (!isNodeOfType(node, "CallExpression")) return false;
+  if (!isNodeOfType(node.callee, "MemberExpression")) return false;
+  const methodName = getStaticMemberPropertyName(node.callee);
+  if (!methodName || !STRING_DERIVATION_METHOD_NAMES.has(methodName)) return false;
+  const receiver = stripParenExpression(node.callee.object);
+  if (isNodeOfType(receiver, "Identifier")) return HREF_HASH_FUNCTION_PATTERN.test(receiver.name);
+  return isHrefHashDerivedExpression(receiver);
+};
+
 const isHrefHashDerivedExpression = (node: EsTreeNode): boolean => {
   const stripped = stripParenExpression(node);
   if (isHrefGetAttributeCall(stripped) || isHrefHashMemberAccess(stripped)) return true;
+  if (isNodeOfType(stripped, "ConditionalExpression")) {
+    return (
+      isHrefHashDerivedExpression(stripped.consequent) ||
+      isHrefHashDerivedExpression(stripped.alternate)
+    );
+  }
+  if (isStringDerivationCallOnHrefTaintedReceiver(stripped)) return true;
   return isHrefHashNamedCall(stripped) && !isSanitizedSelectorHelperCall(stripped);
 };
 
@@ -623,6 +659,11 @@ const isInHelperOnlyInvokedInsideTry = (node: EsTreeNode): boolean => {
 // `closest` when the selector argument taints to an anchor href/hash value and
 // the call is not inside try/catch. The query throws a `DOMException` on an
 // invalid selector, so an href fragment like `#section 1` crashes the handler.
+//
+// Taint sources: `getAttribute('href'|'hash')`, `.href`/`.hash` member reads,
+// href/hash-named helper calls, string-derivation methods on href/hash-named
+// receivers (`href.slice(hashIndex)`), and ternaries with a tainted branch
+// (`hashIndex !== -1 ? href.slice(hashIndex) : ''`).
 //
 // v1 scope: only the high-confidence href/hash sink fires. String literals,
 // CSS-module templates, `CSS.escape` outputs (including in-file helpers that

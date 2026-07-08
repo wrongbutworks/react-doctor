@@ -147,10 +147,139 @@ describe("styled-components-non-transient-custom-prop-on-intrinsic-element", () 
     expect(result.diagnostics).toHaveLength(0);
   });
 
+  it("flags custom props declared through a same-file named interface (dtale slider idiom)", () => {
+    const result = runRule(
+      rule,
+      `import styled from "styled-components";
+      interface StyledState { index: number; value: number; valueNow: number }
+      export const StyledTrack = styled.div<StyledState>\`background: \${(props) => (props.index === 1 ? '#2a91d1' : '#ddd')};\`;`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(2);
+  });
+
+  it("still flags every generic member of an exported styled intrinsic even when same-file usages pass only one (dtale accepted-noise shape)", () => {
+    const result = runRule(
+      rule,
+      `import styled from "styled-components";
+      interface StyledState { index: number; valueNow: number }
+      export const StyledTrack = styled.div<StyledState>\`background: \${(props) => (props.index === 1 ? '#2a91d1' : '#ddd')};\`;
+      export const Track = (props, state) => <StyledTrack {...props} index={state.index} />;`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(2);
+  });
+
+  it("flags custom props declared through a same-file type alias to a type literal", () => {
+    const result = runRule(
+      rule,
+      "type TrackProps = { active: boolean };\nconst T = styled.div<TrackProps>`color: red;`;",
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("does not flag a same-file named interface whose props are all transient", () => {
+    const result = runRule(
+      rule,
+      "interface TrackProps { $index: number }\nconst T = styled.div<TrackProps>`color: red;`;",
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag an imported (cross-file) prop type reference", () => {
+    const result = runRule(
+      rule,
+      'import styled from "styled-components";\nimport type { TrackProps } from "./types";\nconst T = styled.div<TrackProps>`color: red;`;',
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a same-file generic interface reference", () => {
+    const result = runRule(
+      rule,
+      "interface TrackProps<T> { active: T }\nconst T = styled.div<TrackProps<boolean>>`color: red;`;",
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a type alias to a union or intersection (out of v1 scope)", () => {
+    const result = runRule(
+      rule,
+      "type TrackProps = { active: boolean } & { hovered: boolean };\nconst T = styled.div<TrackProps>`color: red;`;",
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
   it("flags selected on div but not on option", () => {
     const div = runRule(rule, "const D = styled.div<{ selected: boolean }>`color: red;`;");
     expect(div.diagnostics).toHaveLength(1);
     const option = runRule(rule, "const O = styled.option<{ selected: boolean }>`color: red;`;");
     expect(option.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a local styled component whose only usage destructures the prop away before spreading", () => {
+    const result = runRule(
+      rule,
+      [
+        "interface HtmlAWithRefProps { children: ReactNode; forwardedRef?: React.Ref<HTMLAnchorElement> }",
+        "const Ahref = styled.a<HtmlAWithRefProps>`color: red;`;",
+        "export const HtmlA = ({ forwardedRef, ...passProps }: HtmlAWithRefProps) => (",
+        "  <Ahref ref={forwardedRef} {...passProps} />",
+        ");",
+      ].join("\n"),
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags when a local usage passes the custom prop explicitly", () => {
+    const result = runRule(
+      rule,
+      [
+        "const Track = styled.div<{ index: number }>`color: red;`;",
+        "export const Slider = (state: { index: number }) => <Track index={state.index} />;",
+      ].join("\n"),
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags when a local usage spreads props that were not destructured away", () => {
+    const result = runRule(
+      rule,
+      [
+        "const Track = styled.div<{ index: number }>`color: red;`;",
+        "export const Slider = (props: { index: number }) => <Track {...props} />;",
+      ].join("\n"),
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags an exported styled component regardless of local usage", () => {
+    const result = runRule(
+      rule,
+      [
+        "export const Track = styled.div<{ index: number }>`color: red;`;",
+        "const Slider = ({ index, ...rest }: { index: number }) => <Track {...rest} />;",
+      ].join("\n"),
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags a local styled component with a non-JSX escaping reference", () => {
+    const result = runRule(
+      rule,
+      [
+        "const Track = styled.div<{ index: number }>`color: red;`;",
+        "const Wide = styled(Track)`width: 100%;`;",
+        "export const Slider = ({ index, ...rest }: { index: number }) => <Track {...rest} />;",
+      ].join("\n"),
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags a local styled component with no JSX usage at all", () => {
+    const result = runRule(rule, "const Track = styled.div<{ index: number }>`color: red;`;");
+    expect(result.diagnostics).toHaveLength(1);
   });
 });

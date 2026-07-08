@@ -1,9 +1,11 @@
 import { defineRule } from "../../utils/define-rule.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
+import { findEnclosingDeclarator } from "../../utils/find-enclosing-declarator.js";
 import { findVariableInitializer } from "../../utils/find-variable-initializer.js";
 import { isAlwaysMatchingRegexPattern } from "../../utils/is-always-matching-regex-pattern.js";
 import { isAstNode } from "../../utils/is-ast-node.js";
+import { isEarlyExitStatement } from "../../utils/is-early-exit-statement.js";
 import { isFunctionLike } from "../../utils/is-function-like.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
 import { isObjectOfMemberAccess } from "../../utils/is-object-of-member-access.js";
@@ -205,20 +207,22 @@ const regexComparableKey = (node: EsTreeNode): string | null => {
   return memberPath && memberPath.includes(".") ? `path:${memberPath}` : null;
 };
 
-// Walks up through `!`, `&&`/`||`, and parens: is this expression consumed
-// as a branch test (`if`/ternary/`while`)? A `.match(...)` in test position
-// is the guard of a validate-then-extract, not an extraction.
-// `ParenthesizedExpression` is a real oxc runtime node absent from the
-// TSESTree union, so it is matched by `.type` string, not `isNodeOfType`.
+// Walks up through `&&`/`||` and parens: is this expression consumed as a
+// boolean — a branch test (`if`/ternary/`while`) or under a `!` negation
+// (`node => !!node.className.match(re)` predicate coercion)? A `.match(...)`
+// consumed as a boolean is the guard of a validate-then-extract, not an
+// extraction. `ParenthesizedExpression` is a real oxc runtime node absent
+// from the TSESTree union, so it is matched by `.type` string, not
+// `isNodeOfType`.
 const TRANSPARENT_TEST_WRAPPER_TYPES = new Set<string>(["ParenthesizedExpression"]);
 
-const isInBranchTestPosition = (node: EsTreeNode): boolean => {
+const isInBooleanTestPosition = (node: EsTreeNode): boolean => {
   let child: EsTreeNode = node;
   let parent = child.parent ?? null;
   while (parent) {
+    if (isNodeOfType(parent, "UnaryExpression") && parent.operator === "!") return true;
     if (
       isNodeOfType(parent, "LogicalExpression") ||
-      (isNodeOfType(parent, "UnaryExpression") && parent.operator === "!") ||
       TRANSPARENT_TEST_WRAPPER_TYPES.has(parent.type) ||
       isNodeOfType(parent, "ChainExpression")
     ) {
@@ -241,8 +245,10 @@ const isInBranchTestPosition = (node: EsTreeNode): boolean => {
 
 // `str.match(re)!` is likely on a proven-matching path when the enclosing
 // scope also runs `re.test(...)` (validate-then-extract) or guards on
-// another `.match(...)` of the same regex in branch-test position
-// (`if (!line.match(re)) return null; line.match(re)![1]`), so abstain.
+// another `.match(...)` of the same regex in boolean-test position
+// (`if (!line.match(re)) return null; line.match(re)![1]`, or a
+// `findUpUntil(el, (n) => !!n.className.match(re))` predicate whose hit
+// is re-matched on the next line), so abstain.
 const scopeProvesMatchTested = (assertion: EsTreeNode, regexKey: string): boolean => {
   const scope = findOutermostScope(assertion);
   if (!scope) return false;
@@ -269,7 +275,7 @@ const scopeProvesMatchTested = (assertion: EsTreeNode, regexKey: string): boolea
       callee.property.name === "match" &&
       child.arguments?.[0] &&
       regexComparableKey(child.arguments[0] as EsTreeNode) === regexKey &&
-      isInBranchTestPosition(child)
+      isInBooleanTestPosition(child)
     ) {
       proven = true;
       return false;
@@ -345,6 +351,191 @@ const getPropertyName = (memberExpression: EsTreeNodeOfType<"MemberExpression">)
     ? memberExpression.property.name
     : null;
 
+// `BREAKPOINT_MAPPING.find((bp) => bp[0] === breakpoint)![1]` — a receiver
+// resolving to a const array-literal lookup table encodes its coverage at
+// construction (a typed union maps to exhaustive entries), so the `!`
+// asserts a construction invariant the rule cannot refute; abstain.
+const isConstArrayLiteralReceiver = (receiver: EsTreeNode): boolean => {
+  const target = stripParenExpression(receiver);
+  if (!isNodeOfType(target, "Identifier")) return false;
+  const binding = findVariableInitializer(target, target.name);
+  if (!binding?.initializer) return false;
+  const initializer = stripParenExpression(binding.initializer);
+  if (!isNodeOfType(initializer, "ArrayExpression") || initializer.elements.length === 0) {
+    return false;
+  }
+  const declarator = findEnclosingDeclarator(binding.bindingIdentifier);
+  if (!declarator || declarator.id !== binding.bindingIdentifier) return false;
+  const declaration = declarator.parent;
+  return Boolean(
+    declaration && isNodeOfType(declaration, "VariableDeclaration") && declaration.kind === "const",
+  );
+};
+
+// `rows.find((r) => r.id === id1)!` right after `if (rows.length !== 2)
+// throw ...` — a preceding early-exit guard on the receiver's `.length`
+// pins the collection's contents before the lookup, so the assertion
+// encodes a checked invariant; abstain.
+const subtreeReadsReceiverLength = (node: EsTreeNode, receiverKey: string): boolean => {
+  let found = false;
+  walkAst(node, (child) => {
+    if (found) return false;
+    if (
+      isNodeOfType(child, "MemberExpression") &&
+      !child.computed &&
+      isNodeOfType(child.property, "Identifier") &&
+      child.property.name === "length" &&
+      receiverPathKey(child.object as EsTreeNode) === receiverKey
+    ) {
+      found = true;
+      return false;
+    }
+  });
+  return found;
+};
+
+const isGuardedByPrecedingReceiverLengthExit = (
+  assertion: EsTreeNode,
+  findReceiver: EsTreeNode,
+): boolean => {
+  const receiverKey = receiverPathKey(findReceiver);
+  if (!receiverKey) return false;
+  let child: EsTreeNode = assertion;
+  let ancestor: EsTreeNode | null = assertion.parent ?? null;
+  while (ancestor) {
+    if (isFunctionLike(ancestor)) return false;
+    if (isNodeOfType(ancestor, "BlockStatement")) {
+      for (const statement of ancestor.body) {
+        if (statement === child) break;
+        if (
+          isNodeOfType(statement, "IfStatement") &&
+          isEarlyExitStatement(statement.consequent) &&
+          subtreeReadsReceiverLength(statement.test, receiverKey)
+        ) {
+          return true;
+        }
+      }
+    }
+    child = ancestor;
+    ancestor = ancestor.parent ?? null;
+  }
+  return false;
+};
+
+// `options.find((o) => o.value === property)!` where the same scope also
+// projects the searched collection (`options.filter(...)` /
+// `options.map(...)`): the compared key is drawn from the collection
+// itself (Select options, visible-column subsets), so the equality lookup
+// cannot miss by construction; abstain.
+const COLLECTION_PROJECTION_METHOD_NAMES = new Set(["map", "filter"]);
+
+const memberExpressionRootName = (expression: EsTreeNode): string | null => {
+  let current = expression;
+  while (isNodeOfType(current, "MemberExpression")) {
+    current = stripParenExpression(current.object as EsTreeNode);
+  }
+  return isNodeOfType(current, "Identifier") ? current.name : null;
+};
+
+const singleExpressionPredicateBody = (
+  predicate: EsTreeNodeOfType<"ArrowFunctionExpression"> | EsTreeNodeOfType<"FunctionExpression">,
+): EsTreeNode | null => {
+  let body: EsTreeNode = predicate.body;
+  if (isNodeOfType(body, "BlockStatement")) {
+    if (body.body.length !== 1) return null;
+    const onlyStatement = body.body[0];
+    if (!isNodeOfType(onlyStatement, "ReturnStatement") || !onlyStatement.argument) return null;
+    body = onlyStatement.argument;
+  }
+  return stripParenExpression(body);
+};
+
+const isEqualityLookupPredicate = (predicate: EsTreeNode): boolean => {
+  if (
+    !isNodeOfType(predicate, "ArrowFunctionExpression") &&
+    !isNodeOfType(predicate, "FunctionExpression")
+  ) {
+    return false;
+  }
+  const parameter = predicate.params?.[0];
+  if (!isNodeOfType(parameter, "Identifier")) return false;
+  const predicateBody = singleExpressionPredicateBody(predicate);
+  if (
+    !predicateBody ||
+    !isNodeOfType(predicateBody, "BinaryExpression") ||
+    predicateBody.operator !== "==="
+  ) {
+    return false;
+  }
+  const leftSide = stripParenExpression(predicateBody.left as EsTreeNode);
+  const rightSide = stripParenExpression(predicateBody.right as EsTreeNode);
+  const sidePairs: Array<[EsTreeNode, EsTreeNode]> = [
+    [leftSide, rightSide],
+    [rightSide, leftSide],
+  ];
+  return sidePairs.some(([elementKeyRead, comparedValue]) => {
+    if (
+      !isNodeOfType(elementKeyRead, "MemberExpression") ||
+      memberExpressionRootName(elementKeyRead) !== parameter.name
+    ) {
+      return false;
+    }
+    if (isNodeOfType(comparedValue, "Identifier")) return comparedValue.name !== parameter.name;
+    return (
+      isNodeOfType(comparedValue, "MemberExpression") &&
+      memberExpressionRootName(comparedValue) !== parameter.name
+    );
+  });
+};
+
+const scopeProjectsFindReceiver = (assertion: EsTreeNode, findReceiver: EsTreeNode): boolean => {
+  const scope = findOutermostScope(assertion);
+  if (!scope) return false;
+  const receiverTrailingName = isNodeOfType(findReceiver, "Identifier")
+    ? findReceiver.name
+    : isNodeOfType(findReceiver, "MemberExpression")
+      ? getPropertyName(findReceiver)
+      : null;
+  let found = false;
+  walkAst(scope, (child) => {
+    if (found) return false;
+    if (!isNodeOfType(child, "CallExpression")) return;
+    const callee = child.callee;
+    if (
+      !isNodeOfType(callee, "MemberExpression") ||
+      callee.computed ||
+      !isNodeOfType(callee.property, "Identifier") ||
+      !COLLECTION_PROJECTION_METHOD_NAMES.has(callee.property.name) ||
+      (child.arguments?.length ?? 0) === 0
+    ) {
+      return;
+    }
+    const projectionReceiver = stripParenExpression(callee.object as EsTreeNode);
+    if (
+      areNodesLooselyEqual(projectionReceiver, stripParenExpression(findReceiver)) ||
+      (receiverTrailingName !== null &&
+        isNodeOfType(projectionReceiver, "Identifier") &&
+        projectionReceiver.name === receiverTrailingName)
+    ) {
+      found = true;
+      return false;
+    }
+  });
+  return found;
+};
+
+// `value.toString().match(/^-?\d+/)![0]` — a receiver that is the value's
+// own string projection (`x.toString()` / `String(x)`) carries a format
+// the author controls, so whether the regex can miss is a value-range
+// question the rule cannot model; abstain.
+const isOwnStringProjectionReceiver = (matchReceiver: EsTreeNode): boolean => {
+  const target = stripParenExpression(matchReceiver);
+  if (!isNodeOfType(target, "CallExpression")) return false;
+  const callee = stripParenExpression(target.callee as EsTreeNode);
+  if (isNodeOfType(callee, "Identifier")) return callee.name === "String";
+  return isNodeOfType(callee, "MemberExpression") && getPropertyName(callee) === "toString";
+};
+
 const isPredicateArgument = (node: EsTreeNode | null | undefined): boolean =>
   Boolean(
     node &&
@@ -377,14 +568,22 @@ export const noNonNullAssertionOnMaybeUndefinedResult = defineRule({
         if (methodName === "find" || methodName === "findLast") {
           const predicate = args[0] ? stripParenExpression(args[0]) : null;
           if (!isPredicateArgument(predicate)) return;
+          const findReceiver = callee.object as EsTreeNode;
+          if (isConstArrayLiteralReceiver(findReceiver)) return;
+          if (isGuardedByPrecedingReceiverLengthExit(node as EsTreeNode, findReceiver)) return;
           if (
             predicate &&
-            scopeProvesFindMatch(node as EsTreeNode, callee.object as EsTreeNode, predicate)
+            isEqualityLookupPredicate(predicate) &&
+            scopeProjectsFindReceiver(node as EsTreeNode, stripParenExpression(findReceiver))
           ) {
+            return;
+          }
+          if (predicate && scopeProvesFindMatch(node as EsTreeNode, findReceiver, predicate)) {
             return;
           }
         }
         if (methodName === "match") {
+          if (isOwnStringProjectionReceiver(callee.object as EsTreeNode)) return;
           const pattern = args[0] ? stripParenExpression(args[0]) : null;
           if (
             pattern &&

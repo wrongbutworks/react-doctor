@@ -161,4 +161,115 @@ describe("no-unsafe-json-parse", () => {
     );
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("does not flag a CommonJS release script parsing tool output (react-tooltip shape)", () => {
+    const result = runRule(
+      noUnsafeJsonParse,
+      `const util = require("util");
+      const exec = util.promisify(require("child_process").exec);
+      const autoBetaRelease = async () => {
+        const { stdout } = await runCommand("npm view . versions --json");
+        return JSON.parse(stdout).filter((version) => version.includes("beta"));
+      };`,
+      { filename: "beta-release.js" },
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a CommonJS token-generation script reading a repo-local file (vip-design-system shape)", () => {
+    const result = runRule(
+      noUnsafeJsonParse,
+      `const fs = require("fs");
+      const colorsData = fs.readFileSync("colors.json");
+      const allColors = JSON.parse(colorsData).color;`,
+      { filename: "tokens/utilities/colors/index.js" },
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags a parse destructure in ESM code importing node builtins (renoun shape)", () => {
+    const result = runRule(
+      noUnsafeJsonParse,
+      `import { readFile } from "node:fs/promises";
+      export const findPackageDependency = async (packageJsonPath) => {
+        const packageJsonContent = await readFile(packageJsonPath, "utf-8");
+        const { dependencies = {} } = JSON.parse(packageJsonContent);
+        return dependencies;
+      };`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("does not flag a deserializer paired with a same-module stringify serializer (audius shape)", () => {
+    const result = runRule(
+      noUnsafeJsonParse,
+      `export const serializeKeyPair = (value) => {
+        const { publicKey, secretKey } = value;
+        return JSON.stringify({ publicKey: encode(publicKey), secretKey: encode(secretKey) });
+      };
+      export const deserializeKeyPair = (value) => {
+        const { publicKey, secretKey } = JSON.parse(value);
+        return { publicKey: decode(publicKey), secretKey: decode(secretKey) };
+      };`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags a deserialize function with no same-module serializer", () => {
+    const result = runRule(
+      noUnsafeJsonParse,
+      `export const deserializeSettings = (value) => {
+        const { theme } = JSON.parse(value);
+        return theme;
+      };`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("does not flag a re-parse dominated by an unconditional prior parse of the same string (glific shape)", () => {
+    const result = runRule(
+      noUnsafeJsonParse,
+      `function setStates(translationsVal, language) {
+        if (translationsVal) {
+          const translationsCopy = JSON.parse(translationsVal);
+          if (Object.keys(translationsCopy).length > 0) {
+            return JSON.parse(translationsVal)[language.id];
+          }
+        }
+        return null;
+      }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags a re-parse whose prior parse only runs conditionally", () => {
+    const result = runRule(
+      noUnsafeJsonParse,
+      `function read(raw, key) {
+        if (shouldValidate) {
+          JSON.parse(raw);
+        }
+        return JSON.parse(raw)[key];
+      }`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags sibling switch-case parses that do not dominate each other (glific AuthService shape)", () => {
+    const result = runRule(
+      noUnsafeJsonParse,
+      `export const getAuthSession = (element) => {
+        const session = localStorage.getItem("glific_session");
+        if (!session) return null;
+        switch (element) {
+          case "renewal_token":
+            return JSON.parse(session).renewal_token;
+          default:
+            return JSON.parse(session).access_token;
+        }
+      };`,
+    );
+    expect(result.diagnostics).toHaveLength(2);
+  });
 });

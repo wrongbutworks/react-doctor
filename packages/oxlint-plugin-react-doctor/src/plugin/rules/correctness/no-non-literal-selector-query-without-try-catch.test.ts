@@ -381,6 +381,58 @@ describe("no-non-literal-selector-query-without-try-catch", () => {
     expect(result.diagnostics).toHaveLength(1);
   });
 
+  it("flags a query on a hash sliced from an href prop behind truthiness guards (Mezzanine anchor idiom)", () => {
+    const result = runRule(
+      noNonLiteralSelectorQueryWithoutTryCatch,
+      `const AnchorItem = ({ href, autoScrollTo }) => {
+        const hashIndex = href.indexOf('#');
+        const itemHash = hashIndex !== -1 ? href.slice(hashIndex) : '';
+        const handleClick = (event) => {
+          if (itemHash && typeof window !== 'undefined') {
+            event.preventDefault();
+            if (autoScrollTo) {
+              const targetElement = document.querySelector(itemHash);
+              if (targetElement) {
+                targetElement.scrollIntoView({ behavior: 'smooth', block: 'start' });
+              }
+            }
+          }
+        };
+        return <a href={href} onClick={handleClick} />;
+      };`,
+      { filename: "anchor-item.tsx" },
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("flags a query on a slice of an href-named receiver", () => {
+    const result = runRule(
+      noNonLiteralSelectorQueryWithoutTryCatch,
+      `const itemHash = href.slice(href.indexOf('#')); document.querySelector(itemHash);`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("does not flag a ternary whose branches are both untainted", () => {
+    const result = runRule(
+      noNonLiteralSelectorQueryWithoutTryCatch,
+      `const selector = isTop ? '#top' : '#bottom'; document.querySelector(selector);`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a sliced href pinned by a dominating regex shape guard", () => {
+    const result = runRule(
+      noNonLiteralSelectorQueryWithoutTryCatch,
+      `const hashIndex = href.indexOf('#');
+      const itemHash = hashIndex !== -1 ? href.slice(hashIndex) : '';
+      if (/^#[A-Za-z][\\w-]*$/.test(itemHash)) { document.querySelector(itemHash); }`,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
   it("does not flag an imported hash-named helper (cross-file sanitizer)", () => {
     const result = runRule(
       noNonLiteralSelectorQueryWithoutTryCatch,

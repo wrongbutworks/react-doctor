@@ -291,6 +291,60 @@ describe("no-repeated-layout-read-same-element", () => {
     expect(result.diagnostics).toHaveLength(0);
   });
 
+  it("does not flag lazy fallback reads in logical right operands (clientWidth || rect fallback)", () => {
+    const result = runRule(
+      noRepeatedLayoutReadSameElement,
+      `
+      function setup(canvas) {
+        const w = canvas.clientWidth || canvas.getBoundingClientRect().width;
+        const h = canvas.clientHeight || canvas.getBoundingClientRect().height;
+        return [w, h];
+      }
+    `,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("does not flag a short-circuit fast-path read followed by an unconditional read", () => {
+    const result = runRule(
+      noRepeatedLayoutReadSameElement,
+      `
+      function isVisible(el) {
+        if (el.offsetParent === null && getComputedStyle(el).position !== 'fixed') return false;
+        const style = getComputedStyle(el);
+        return style.visibility !== 'hidden';
+      }
+    `,
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags repeated reads sitting in logical LEFT operands (rect.left || 0 defaults)", () => {
+    const result = runRule(
+      noRepeatedLayoutReadSameElement,
+      `
+      function offsets(el, event) {
+        const x = event.clientX - (el.getBoundingClientRect().left || 0);
+        const y = event.clientY - (el.getBoundingClientRect().top || 0);
+        return [x, y];
+      }
+    `,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags two reads inside the same logical right operand", () => {
+    const result = runRule(
+      noRepeatedLayoutReadSameElement,
+      `
+      function size(el, useRect) {
+        return useRect && el.getBoundingClientRect().width + el.getBoundingClientRect().height;
+      }
+    `,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
   it("does not flag re-measure across an await (next-frame async re-measurement)", () => {
     const result = runRule(
       noRepeatedLayoutReadSameElement,

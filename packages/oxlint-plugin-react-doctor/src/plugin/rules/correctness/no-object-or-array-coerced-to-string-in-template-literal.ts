@@ -4,6 +4,7 @@ import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
 import { findEnclosingDeclarator } from "../../utils/find-enclosing-declarator.js";
 import { findVariableInitializer } from "../../utils/find-variable-initializer.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
+import { isTestlikeFilename } from "../../utils/is-testlike-filename.js";
 import { stripParenExpression } from "../../utils/strip-paren-expression.js";
 import type { RuleContext } from "../../utils/rule-context.js";
 
@@ -116,6 +117,31 @@ const isStringConcatSibling = (node: EsTreeNode): boolean =>
   (isNodeOfType(node, "Literal") && typeof node.value === "string") ||
   isNodeOfType(node, "TemplateLiteral");
 
+// `throw new Error(\`Invalid path ${path}\`)` — an array comma-joined into
+// an error message reads as legible dev-facing output (`project,create`),
+// not the `[object Object]` failure the rule predicts. Only ARRAY kinds are
+// exempted; an object interpolated into an error message still prints
+// `[object Object]` and keeps firing. `ParenthesizedExpression` is a real
+// oxc runtime node absent from the TSESTree union, so it is matched by
+// `.type` string, not `isNodeOfType`.
+const GROUPING_EXPRESSION_TYPES = new Set<string>(["ParenthesizedExpression"]);
+
+const isErrorConstructionArgument = (templateNode: EsTreeNode): boolean => {
+  let cursor: EsTreeNode = templateNode;
+  let parent: EsTreeNode | null = cursor.parent ?? null;
+  while (parent && GROUPING_EXPRESSION_TYPES.has(parent.type)) {
+    cursor = parent;
+    parent = parent.parent ?? null;
+  }
+  return Boolean(
+    parent &&
+    isNodeOfType(parent, "NewExpression") &&
+    (parent.arguments ?? []).includes(cursor as never) &&
+    isNodeOfType(parent.callee, "Identifier") &&
+    parent.callee.name.endsWith("Error"),
+  );
+};
+
 export const noObjectOrArrayCoercedToStringInTemplateLiteral = defineRule({
   id: "no-object-or-array-coerced-to-string-in-template-literal",
   title: "Object or array coerced to string in a template literal",
@@ -124,27 +150,32 @@ export const noObjectOrArrayCoercedToStringInTemplateLiteral = defineRule({
   recommendation:
     "Interpolating an object/array runs its default `toString()` (`[object Object]` / comma-joined garbage); read a specific property/element or wrap the value in `JSON.stringify`.",
   create: (context: RuleContext) => {
-    const reportIfCoercedLiteral = (expression: EsTreeNode): void => {
+    const skipTestlikeFile = isTestlikeFilename(context.filename);
+    const reportIfCoercedLiteral = (expression: EsTreeNode, isErrorMessage = false): void => {
       const strippedExpression = stripParenExpression(expression);
       const kind =
         objectOrArrayKind(strippedExpression) ?? resolveInterpolatedLiteralKind(strippedExpression);
       if (!kind) return;
+      if (kind === "array" && isErrorMessage) return;
       context.report({ node: expression, message: messageFor(kind) });
     };
     return {
       TemplateLiteral(node: EsTreeNodeOfType<"TemplateLiteral">) {
+        if (skipTestlikeFile) return;
         const parent = node.parent;
         if (parent && isNodeOfType(parent, "TaggedTemplateExpression")) return;
+        const isErrorMessage = isErrorConstructionArgument(node as EsTreeNode);
         node.expressions.forEach((expression, expressionIndex) => {
           // `rgb(${channels})` / `matrix(${values})` — the interpolation
           // sits inside functional syntax whose separator IS the comma, so
           // an array's comma-join is the intended output.
           const precedingText = node.quasis[expressionIndex]?.value.cooked ?? "";
           if (/[a-zA-Z-]\(\s*$/.test(precedingText)) return;
-          reportIfCoercedLiteral(expression as EsTreeNode);
+          reportIfCoercedLiteral(expression as EsTreeNode, isErrorMessage);
         });
       },
       BinaryExpression(node: EsTreeNodeOfType<"BinaryExpression">) {
+        if (skipTestlikeFile) return;
         if (node.operator !== "+") return;
         const left = node.left as EsTreeNode;
         const right = node.right as EsTreeNode;

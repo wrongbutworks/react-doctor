@@ -81,10 +81,30 @@ describe("no-fill-map-element-as-key", () => {
     expect(result.diagnostics).toHaveLength(0);
   });
 
-  it("does not flag a single param not named like an index", () => {
+  it("flags a sole param regardless of its name — the element is the constant fill value (internxt skeleton idiom)", () => {
     const result = runRule(
       noFillMapElementAsKey,
-      `const Ok4 = () => Array(3).fill('a').map((letter) => <Row key={letter} />);`,
+      `function loadingSkeleton() {
+        return new Array(20).fill(0).map((n) => <DriveGridItemSkeleton key={n} />);
+      }`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("flags a non-index-named sole param over a string fill value", () => {
+    const result = runRule(
+      noFillMapElementAsKey,
+      `const Rows = () => Array(3).fill('a').map((letter) => <Row key={letter} />);`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("does not flag a non-fill single-param map with a non-index name", () => {
+    const result = runRule(
+      noFillMapElementAsKey,
+      `const Ok4 = ({ letters }) => letters.map((letter) => <Row key={letter} />);`,
     );
     expect(result.parseErrors).toEqual([]);
     expect(result.diagnostics).toHaveLength(0);

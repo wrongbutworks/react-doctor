@@ -339,4 +339,58 @@ describe("query-no-mutation-in-effect-as-read", () => {
     expect(result.parseErrors).toEqual([]);
     expect(result.diagnostics).toHaveLength(0);
   });
+
+  it("does not flag a one-shot write gated by a run-once ref latch (payment redirect shape)", () => {
+    const result = runRule(
+      queryNoMutationInEffectAsRead,
+      `const PaymentProcessing = () => {
+        const { mutateAsync: updatePaymentInstrumentForOrder } =
+          useShopperOrdersMutation('updatePaymentInstrumentForOrder');
+        const isHandled = useRef(false);
+
+        async function handleAdyenRedirect(order) {
+          const updatedOrder = await updatePaymentInstrumentForOrder({
+            parameters: { orderNo: order.orderNo },
+          });
+          return updatedOrder.paymentInstruments.length > 0;
+        }
+
+        useEffect(() => {
+          (async () => {
+            if (isHandled.current) {
+              return;
+            }
+            isHandled.current = true;
+            const success = await handleAdyenRedirect(order);
+            if (success) navigate('/confirmation');
+          })();
+        }, [order]);
+
+        return null;
+      };`,
+      { filename: "payment-processing.jsx" },
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags a mutation-as-read when a ref is assigned but never latch-tested", () => {
+    const result = runRule(
+      queryNoMutationInEffectAsRead,
+      `const Profile = () => {
+        const { mutateAsync: fetchProfile } = useFetchProfile();
+        const latestRef = useRef(null);
+        useEffect(() => {
+          (async () => {
+            const profile = await fetchProfile(userId);
+            latestRef.current = true;
+            render(profile.details);
+          })();
+        }, [userId]);
+        return null;
+      };`,
+      { filename: "profile.tsx" },
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
 });

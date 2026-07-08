@@ -467,6 +467,15 @@ const getHandlerFunction = (node: EsTreeNodeOfType<"JSXOpeningElement">): EsTree
 // same-file function the handler calls — a sibling control's guard does
 // not protect this handler and does not suppress. A negated modifier
 // (`!e.shiftKey`) is not a gate — plain Enter still commits there.
+//
+// KNOWN ACCEPTED NOISE: a commit gated on a validity flag whose setter
+// rejects non-ASCII input (bulwarkmail's sub-address tag field, where an
+// imported `TAG_REGEX = /^[a-zA-Z0-9-]{1,30}$/` sets `error` on every
+// keystroke, so `tag && !error` can never hold mid-composition) still
+// fires. Proving the gate excludes IME text requires resolving the
+// validator's regex across files, and validity gates themselves are not
+// a discriminator — `if (e.key === 'Enter' && isValid) onSave()` over
+// natural-language fields is a REAL bug this rule must keep flagging.
 export const noEnterSubmitWithoutImeCompositionGuard = defineRule({
   id: "no-enter-submit-without-ime-composition-guard",
   title: "Enter submit without IME composition guard",
