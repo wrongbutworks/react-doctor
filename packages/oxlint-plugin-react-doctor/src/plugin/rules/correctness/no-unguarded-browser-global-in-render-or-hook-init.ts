@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import { componentOrHookDisplayNameForFunction } from "../../utils/component-or-hook-display-name.js";
 import { findEnclosingFunction } from "../../utils/find-enclosing-function.js";
 import { defineRule } from "../../utils/define-rule.js";
@@ -5,8 +6,10 @@ import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
 import { findVariableInitializer } from "../../utils/find-variable-initializer.js";
 import { getCalleeName } from "../../utils/get-callee-name.js";
+import { getImportBindingForName } from "../../utils/find-import-source-for-name.js";
 import { isDomGuardIdentifierName } from "../../utils/is-dom-guard-identifier-name.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
+import { resolveCrossFileExport } from "../../utils/resolve-cross-file-export.js";
 import { stripParenExpression } from "../../utils/strip-paren-expression.js";
 import { walkAst } from "../../utils/walk-ast.js";
 import type { RuleContext } from "../../utils/rule-context.js";
@@ -192,6 +195,59 @@ const containsTypeofBrowserGlobalCheck = (node: EsTreeNode): boolean => {
   return found;
 };
 
+// How an import-bound identifier in a guard condition is classified after
+// following the import into its source file:
+// - "browser-guard": the export is (or boolean-derives from) a literal
+//   typeof-browser-global check — a const initializer like
+//   `export const canUseDOM = typeof window !== "undefined"` or a function
+//   returning such a check — so it guards exactly like a same-file alias;
+// - "resolved-not-guard": the export resolved to something that provably is
+//   NOT an environment check (`export const canUseDOM = true`), so the
+//   guard-name heuristic must not vouch for it;
+// - "unresolved": the import could not be followed (relative specifier that
+//   doesn't resolve, node_modules, no absolute filename, resolution budget
+//   spent) — keep the current name-heuristic behavior.
+type ImportedGuardResolution = "browser-guard" | "resolved-not-guard" | "unresolved";
+
+interface ClassifyImportedGuardIdentifier {
+  (identifier: EsTreeNodeOfType<"Identifier">): ImportedGuardResolution | null;
+}
+
+// NOTE: belongs in constants/thresholds.ts; shared files are frozen for
+// this pass. Caps cross-file guard resolutions per linted file.
+const MAX_IMPORTED_GUARD_RESOLUTIONS = 3;
+
+// An imported guard FUNCTION (`export const canUseDOM = () => typeof window
+// !== "undefined"`, exenv-style) counts when a returned expression contains
+// the typeof check. Only literal typeof checks are trusted in the foreign
+// body — a guard built from ANOTHER imported flag stays unproven (no
+// cross-file recursion).
+const functionBodyReturnsBrowserGuard = (functionNode: EsTreeNode): boolean => {
+  if (
+    !isNodeOfType(functionNode, "FunctionDeclaration") &&
+    !isNodeOfType(functionNode, "FunctionExpression") &&
+    !isNodeOfType(functionNode, "ArrowFunctionExpression")
+  ) {
+    return false;
+  }
+  const body = functionNode.body;
+  if (!body) return false;
+  if (!isNodeOfType(body, "BlockStatement")) return containsTypeofBrowserGlobalCheck(body);
+  let returnsGuard = false;
+  walkAst(body, (child) => {
+    if (returnsGuard) return false;
+    if (
+      isNodeOfType(child, "ReturnStatement") &&
+      child.argument &&
+      containsTypeofBrowserGlobalCheck(child.argument)
+    ) {
+      returnsGuard = true;
+      return false;
+    }
+  });
+  return returnsGuard;
+};
+
 // The initializer of a same-file guard alias, one resolution level deeper:
 // `const isClientSide = () => !isSSR` conveys a guard because `isSSR` is a
 // dom-guard-named flag even though no `typeof window` appears literally.
@@ -208,12 +264,24 @@ const initializerConveysDomGuard = (initializer: EsTreeNode): boolean => {
   return found;
 };
 
-const conditionContainsDomGuard = (condition: EsTreeNode): boolean => {
+const conditionContainsDomGuard = (
+  condition: EsTreeNode,
+  classifyImportedGuardIdentifier: ClassifyImportedGuardIdentifier,
+): boolean => {
   if (containsTypeofBrowserGlobalCheck(condition)) return true;
   let guarded = false;
   walkAst(condition, (child) => {
     if (guarded) return false;
     if (!isNodeOfType(child, "Identifier")) return;
+    const importedResolution = classifyImportedGuardIdentifier(child);
+    if (importedResolution === "browser-guard") {
+      guarded = true;
+      return false;
+    }
+    // A resolved import whose export provably is NOT an environment check
+    // must not be vouched for by its name (`export const canUseDOM = true`);
+    // an unresolved import keeps the name-heuristic fallback below.
+    if (importedResolution === "resolved-not-guard") return;
     if (isDomGuardIdentifierName(child.name)) {
       guarded = true;
       return false;
@@ -353,13 +421,14 @@ const isNegatedVisibilityGateCondition = (condition: EsTreeNode): boolean => {
 const hasDomGuardEarlyReturnBefore = (
   block: EsTreeNodeOfType<"BlockStatement">,
   statement: EsTreeNode,
+  classifyImportedGuardIdentifier: ClassifyImportedGuardIdentifier,
 ): boolean => {
   for (const sibling of block.body) {
     if (sibling === statement) return false;
     if (
       isNodeOfType(sibling, "IfStatement") &&
       isFlowTerminatingStatement(sibling.consequent) &&
-      (conditionContainsDomGuard(sibling.test) ||
+      (conditionContainsDomGuard(sibling.test, classifyImportedGuardIdentifier) ||
         isNegatedVisibilityGateCondition(sibling.test) ||
         conditionContainsDataPresenceCheck(sibling.test))
     ) {
@@ -394,8 +463,11 @@ const isInsideCreatePortalArgument = (node: EsTreeNode): boolean => {
 // A dominating test that renders the subtree only when a browser
 // environment, visible overlay, loaded client data, or post-interaction
 // state flag is present — all false during the server render.
-const testConveysSsrSafeGate = (test: EsTreeNode): boolean =>
-  conditionContainsDomGuard(test) ||
+const testConveysSsrSafeGate = (
+  test: EsTreeNode,
+  classifyImportedGuardIdentifier: ClassifyImportedGuardIdentifier,
+): boolean =>
+  conditionContainsDomGuard(test, classifyImportedGuardIdentifier) ||
   conditionIsVisibilityGate(test) ||
   conditionContainsDataPresenceCheck(test) ||
   conditionIsFalsyInitialStateFlag(test);
@@ -405,17 +477,29 @@ const testConveysSsrSafeGate = (test: EsTreeNode): boolean =>
 // early-return guard, or a wrapping `try` with a catch handler (the
 // persisted-state idiom that swallows the server ReferenceError).
 // Conservative: any such guard suppresses the report.
-const isDominatedByDomGuard = (node: EsTreeNode): boolean => {
+const isDominatedByDomGuard = (
+  node: EsTreeNode,
+  classifyImportedGuardIdentifier: ClassifyImportedGuardIdentifier,
+): boolean => {
   let previous: EsTreeNode = node;
   let ancestor = node.parent;
   while (ancestor) {
-    if (isNodeOfType(ancestor, "IfStatement") && testConveysSsrSafeGate(ancestor.test)) {
+    if (
+      isNodeOfType(ancestor, "IfStatement") &&
+      testConveysSsrSafeGate(ancestor.test, classifyImportedGuardIdentifier)
+    ) {
       return true;
     }
-    if (isNodeOfType(ancestor, "ConditionalExpression") && testConveysSsrSafeGate(ancestor.test)) {
+    if (
+      isNodeOfType(ancestor, "ConditionalExpression") &&
+      testConveysSsrSafeGate(ancestor.test, classifyImportedGuardIdentifier)
+    ) {
       return true;
     }
-    if (isNodeOfType(ancestor, "LogicalExpression") && testConveysSsrSafeGate(ancestor.left)) {
+    if (
+      isNodeOfType(ancestor, "LogicalExpression") &&
+      testConveysSsrSafeGate(ancestor.left, classifyImportedGuardIdentifier)
+    ) {
       return true;
     }
     if (isNodeOfType(ancestor, "TryStatement") && ancestor.handler && ancestor.block === previous) {
@@ -423,7 +507,7 @@ const isDominatedByDomGuard = (node: EsTreeNode): boolean => {
     }
     if (
       isNodeOfType(ancestor, "BlockStatement") &&
-      hasDomGuardEarlyReturnBefore(ancestor, previous)
+      hasDomGuardEarlyReturnBefore(ancestor, previous, classifyImportedGuardIdentifier)
     ) {
       return true;
     }
@@ -558,6 +642,37 @@ export const noUnguardedBrowserGlobalInRenderOrHookInit = defineRule({
     let programRoot: EsTreeNodeOfType<"Program"> | null = null;
     const overlayOnlyComponentCache = new Map<string, boolean>();
 
+    const importedGuardResolutionByName = new Map<string, ImportedGuardResolution>();
+    let importedGuardResolutionCount = 0;
+
+    const classifyImportedGuardIdentifier: ClassifyImportedGuardIdentifier = (identifier) => {
+      const importBinding = getImportBindingForName(identifier, identifier.name);
+      if (!importBinding || importBinding.isNamespace || !importBinding.exportedName) return null;
+      const cachedResolution = importedGuardResolutionByName.get(identifier.name);
+      if (cachedResolution) return cachedResolution;
+      const filename = context.filename;
+      if (!filename || !path.isAbsolute(filename)) return "unresolved";
+      if (importedGuardResolutionCount >= MAX_IMPORTED_GUARD_RESOLUTIONS) return "unresolved";
+      importedGuardResolutionCount += 1;
+      const resolvedExport = resolveCrossFileExport(
+        filename,
+        importBinding.source,
+        importBinding.exportedName,
+      );
+      let resolution: ImportedGuardResolution = "unresolved";
+      if (resolvedExport?.kind === "initializer") {
+        resolution = containsTypeofBrowserGlobalCheck(resolvedExport.node)
+          ? "browser-guard"
+          : "resolved-not-guard";
+      } else if (resolvedExport?.kind === "function") {
+        resolution = functionBodyReturnsBrowserGuard(resolvedExport.node)
+          ? "browser-guard"
+          : "resolved-not-guard";
+      }
+      importedGuardResolutionByName.set(identifier.name, resolution);
+      return resolution;
+    };
+
     const isComponentRenderedOnlyInsideOverlayContent = (componentName: string): boolean => {
       if (!programRoot) return false;
       let cached = overlayOnlyComponentCache.get(componentName);
@@ -571,7 +686,7 @@ export const noUnguardedBrowserGlobalInRenderOrHookInit = defineRule({
     const reportRead = (readNode: EsTreeNode, globalName: string): void => {
       if (moduleIsDeclaredBrowserOnly) return;
       if (!isOnRenderTimePath(readNode)) return;
-      if (isDominatedByDomGuard(readNode)) return;
+      if (isDominatedByDomGuard(readNode, classifyImportedGuardIdentifier)) return;
       if (isInsideCreatePortalArgument(readNode)) return;
       if (hasOverlayContentJsxAncestor(readNode)) return;
       const displayNames = enclosingComponentOrHookDisplayNames(readNode);

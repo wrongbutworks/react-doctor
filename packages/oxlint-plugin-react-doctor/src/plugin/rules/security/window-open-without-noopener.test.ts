@@ -1,5 +1,10 @@
-import { describe, expect, it } from "vite-plus/test";
+import * as fs from "node:fs";
+import os from "node:os";
+import * as path from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
 import { runRule } from "../../../test-utils/run-rule.js";
+import { __clearParseSourceFileCacheForTests } from "../../utils/parse-source-file.js";
+import { __clearResolveImportWithOxcCacheForTests } from "../../utils/resolve-import-with-oxc.js";
 import { windowOpenWithoutNoopener } from "./window-open-without-noopener.js";
 
 describe("window-open-without-noopener", () => {
@@ -1125,5 +1130,167 @@ window.open(https, '_blank');`,
 });`,
     );
     expect(result.diagnostics).toHaveLength(1);
+  });
+});
+
+// Cross-file verification needs actual files on disk so the rule's
+// resolveCrossFileExport plumbing can resolve and parse the imported
+// modules. Each test writes a temp project and lints the consumer file
+// under its absolute path.
+describe("window-open-without-noopener — cross-file imported destinations", () => {
+  let temporaryDirectory = "";
+
+  beforeEach(() => {
+    // realpathSync: oxc-resolver returns real paths, and os.tmpdir() is a
+    // symlink on macOS (/var -> /private/var).
+    temporaryDirectory = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), "rd-window-open-xfile-")),
+    );
+    __clearResolveImportWithOxcCacheForTests();
+    __clearParseSourceFileCacheForTests();
+    writeFile("package.json", JSON.stringify({ name: "fixture", type: "module" }));
+  });
+
+  afterEach(() => {
+    fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  const writeFile = (relativePath: string, contents: string): string => {
+    const absolutePath = path.join(temporaryDirectory, relativePath);
+    fs.mkdirSync(path.dirname(absolutePath), { recursive: true });
+    fs.writeFileSync(absolutePath, contents, "utf8");
+    return absolutePath;
+  };
+
+  const runRuleAt = (relativePath: string, code: string) =>
+    runRule(windowOpenWithoutNoopener, code, { filename: writeFile(relativePath, code) });
+
+  it("stays quiet: imported const verified cross-file as a relative path literal", () => {
+    writeFile("src/config.ts", "export const downloadTarget = '/downloads/latest';\n");
+    const result = runRuleAt(
+      "src/App.tsx",
+      "import { downloadTarget } from './config';\nwindow.open(downloadTarget, '_blank');\n",
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags a URL-named imported const verified cross-file as an external https literal (name-heuristic override)", () => {
+    writeFile(
+      "src/config.ts",
+      "export const downloadPage = 'https://downloads.example.com/latest';\n",
+    );
+    const result = runRuleAt(
+      "src/App.tsx",
+      "import { downloadPage } from './config';\nwindow.open(downloadPage, '_blank');\n",
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("stays quiet: imported build…Url helper whose every return is same-origin-built (dtale CorrelationsGrid idiom)", () => {
+    writeFile(
+      "src/correlations-repository.ts",
+      `import { buildURLString } from './url-utils';
+export const buildCorrelationsUrl = (dataId: string, encodeStrings: boolean, pps = false, image = false): string =>
+  buildURLString(\`/dtale/correlations/\${dataId}\`, {
+    encodeStrings: \`\${encodeStrings}\`,
+    pps: \`\${pps}\`,
+    image: \`\${image}\`,
+  });
+`,
+    );
+    const result = runRuleAt(
+      "src/App.tsx",
+      `import { buildCorrelationsUrl } from './correlations-repository';
+window.open(buildCorrelationsUrl(dataId, encodeStrings, isPPS, true), '_blank');
+`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("flags an imported build…Url helper with one opaque return", () => {
+    writeFile(
+      "src/share-url.ts",
+      `export const buildShareUrl = (target: string | undefined) => {
+  if (target) {
+    return target;
+  }
+  return '/share';
+};
+`,
+    );
+    const result = runRuleAt(
+      "src/App.tsx",
+      "import { buildShareUrl } from './share-url';\nwindow.open(buildShareUrl(candidate), '_blank');\n",
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("flags when the imported helper delegates to another imported helper (no transitive cross-file hops)", () => {
+    writeFile("src/deep.ts", "export const buildDeepUrl = () => '/deep';\n");
+    writeFile(
+      "src/urls.ts",
+      "import { buildDeepUrl } from './deep';\nexport const buildOuterUrl = () => buildDeepUrl();\n",
+    );
+    const result = runRuleAt(
+      "src/App.tsx",
+      "import { buildOuterUrl } from './urls';\nwindow.open(buildOuterUrl(), '_blank');\n",
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("stays quiet: unresolvable import with a URL-suffixed name falls back to the name heuristic", () => {
+    const result = runRuleAt(
+      "src/App.tsx",
+      "import { downloadPage } from './missing-config';\nwindow.open(downloadPage, '_blank');\n",
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("keeps the name heuristic unchanged when the host provides no filename", () => {
+    writeFile(
+      "src/config.ts",
+      "export const downloadPage = 'https://downloads.example.com/latest';\n",
+    );
+    const result = runRule(
+      windowOpenWithoutNoopener,
+      "import { downloadPage } from './config';\nwindow.open(downloadPage, '_blank');\n",
+      { filename: undefined },
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("stays quiet: renamed import resolved through a barrel re-export hop to a same-origin path", () => {
+    writeFile("src/paths.ts", "export const internalDownloadPath = '/downloads/latest';\n");
+    writeFile("src/index.ts", "export { internalDownloadPath as downloadPage } from './paths';\n");
+    const result = runRuleAt(
+      "src/App.tsx",
+      "import { downloadPage as appDownloadTarget } from './index';\nwindow.open(appDownloadTarget, '_blank');\n",
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("caps cross-file resolutions per linted file and falls back to the name heuristic past the cap", () => {
+    writeFile(
+      "src/config.ts",
+      [
+        "export const alphaPage = 'https://external.example.com/alpha';",
+        "export const betaPage = 'https://external.example.com/beta';",
+        "export const gammaPage = 'https://external.example.com/gamma';",
+        "export const deltaPage = 'https://external.example.com/delta';",
+      ].join("\n"),
+    );
+    const result = runRuleAt(
+      "src/App.tsx",
+      `import { alphaPage, betaPage, gammaPage, deltaPage } from './config';
+window.open(alphaPage, '_blank');
+window.open(betaPage, '_blank');
+window.open(gammaPage, '_blank');
+window.open(deltaPage, '_blank');
+`,
+    );
+    expect(result.diagnostics).toHaveLength(3);
   });
 });

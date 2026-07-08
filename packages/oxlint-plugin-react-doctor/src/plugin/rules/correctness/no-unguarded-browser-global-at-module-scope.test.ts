@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vite-plus/test";
+import * as fs from "node:fs";
+import os from "node:os";
+import * as path from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
 import { runRule } from "../../../test-utils/run-rule.js";
 import { noUnguardedBrowserGlobalAtModuleScope } from "./no-unguarded-browser-global-at-module-scope.js";
 
@@ -307,5 +310,108 @@ describe("no-unguarded-browser-global-at-module-scope", () => {
     );
     expect(result.parseErrors).toEqual([]);
     expect(result.diagnostics).toHaveLength(1);
+  });
+
+  describe("cross-file imported guards", () => {
+    let temporaryDirectory = "";
+
+    beforeEach(() => {
+      temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "rd-browser-global-module-"));
+    });
+
+    afterEach(() => {
+      fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+    });
+
+    const createProjectFile = (relativePath: string, contents: string): string => {
+      const absolutePath = path.join(temporaryDirectory, relativePath);
+      fs.mkdirSync(path.dirname(absolutePath), { recursive: true });
+      fs.writeFileSync(absolutePath, contents);
+      return absolutePath;
+    };
+
+    const moduleFilename = (): string => path.join(temporaryDirectory, "src", "widths.ts");
+
+    const guardedByImportedConst = `import { canUseDOM } from "./env";
+      export const initialWidth = canUseDOM ? window.innerWidth : 0;`;
+
+    it("stays quiet behind an imported canUseDOM const whose foreign initializer is a typeof-window check", () => {
+      createProjectFile("src/env.ts", `export const canUseDOM = typeof window !== "undefined";\n`);
+      const result = runRule(noUnguardedBrowserGlobalAtModuleScope, guardedByImportedConst, {
+        filename: moduleFilename(),
+      });
+      expect(result.parseErrors).toEqual([]);
+      expect(result.diagnostics).toHaveLength(0);
+    });
+
+    it("stays quiet behind an imported off-list guard name once its typeof-window initializer resolves", () => {
+      createProjectFile(
+        "src/env.ts",
+        `export const browserReady = typeof window !== "undefined";\n`,
+      );
+      const result = runRule(
+        noUnguardedBrowserGlobalAtModuleScope,
+        `import { browserReady } from "./env";
+         const initialWidth = browserReady ? window.innerWidth : 0;`,
+        { filename: moduleFilename() },
+      );
+      expect(result.parseErrors).toEqual([]);
+      expect(result.diagnostics).toHaveLength(0);
+    });
+
+    it("still flags when the imported canUseDOM resolves to a non-typeof initializer (name alone no longer vouches)", () => {
+      createProjectFile("src/env.ts", `export const canUseDOM = true;\n`);
+      const result = runRule(noUnguardedBrowserGlobalAtModuleScope, guardedByImportedConst, {
+        filename: moduleFilename(),
+      });
+      expect(result.parseErrors).toEqual([]);
+      expect(result.diagnostics).toHaveLength(1);
+    });
+
+    it("stays quiet behind an imported guard function whose body returns a typeof-window check", () => {
+      createProjectFile(
+        "src/env.ts",
+        `export const canUseDOM = () => typeof window !== "undefined";\n`,
+      );
+      const result = runRule(
+        noUnguardedBrowserGlobalAtModuleScope,
+        `import { canUseDOM } from "./env";
+         if (canUseDOM()) { window.addEventListener('resize', () => {}); }`,
+        { filename: moduleFilename() },
+      );
+      expect(result.parseErrors).toEqual([]);
+      expect(result.diagnostics).toHaveLength(0);
+    });
+
+    it("keeps the guard-name fallback when the import does not resolve", () => {
+      const result = runRule(
+        noUnguardedBrowserGlobalAtModuleScope,
+        `import { canUseDOM } from "./missing-env";
+         const initialWidth = canUseDOM ? window.innerWidth : 0;`,
+        { filename: moduleFilename() },
+      );
+      expect(result.parseErrors).toEqual([]);
+      expect(result.diagnostics).toHaveLength(0);
+    });
+
+    it("still flags an unresolvable imported non-guard flag (unresolved never becomes a guard)", () => {
+      const result = runRule(
+        noUnguardedBrowserGlobalAtModuleScope,
+        `import { IS_CLICKHOUSE_BUILD } from "./missing-env";
+         const initialWidth = IS_CLICKHOUSE_BUILD ? window.innerWidth : 0;`,
+        { filename: moduleFilename() },
+      );
+      expect(result.parseErrors).toEqual([]);
+      expect(result.diagnostics).toHaveLength(1);
+    });
+
+    it("keeps the guard-name fallback when the host provides no filename", () => {
+      createProjectFile("src/env.ts", `export const canUseDOM = true;\n`);
+      const result = runRule(noUnguardedBrowserGlobalAtModuleScope, guardedByImportedConst, {
+        filename: undefined,
+      });
+      expect(result.parseErrors).toEqual([]);
+      expect(result.diagnostics).toHaveLength(0);
+    });
   });
 });

@@ -10,8 +10,11 @@ import {
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
 import { findVariableInitializer } from "../../utils/find-variable-initializer.js";
+import { getImportBindingForName } from "../../utils/find-import-source-for-name.js";
 import { isFunctionLike } from "../../utils/is-function-like.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
+import type { ResolvedCrossFileExport } from "../../utils/resolve-cross-file-export.js";
+import { resolveCrossFileExport } from "../../utils/resolve-cross-file-export.js";
 import { stripParenExpression } from "../../utils/strip-paren-expression.js";
 import { walkAst } from "../../utils/walk-ast.js";
 import { walkOwnFunctionScope } from "../../utils/walk-own-function-scope.js";
@@ -319,21 +322,10 @@ const resolveSameFileHelperFunction = (
   return null;
 };
 
-// A same-file async helper (possibly useCallback-wrapped, or a `this.method`
-// on the enclosing class) whose every await is itself never-rejecting or
-// sits in a try with a non-rethrowing catch, with no unguarded throw and no
-// returned call that could reject. Covers shapes the shared
-// isNeverRejectingHelperCall misses: `.catch`-guarded awaits inside the
-// helper, useCallback wrappers, class methods, and Promise.all over
-// dispatch-populated arrays.
-const isNeverRejectingLocalAsyncHelperCall = (
-  callNode: EsTreeNodeOfType<"CallExpression">,
-  depth: number,
-): boolean => {
-  if (depth <= 0) return false;
-  const helper = resolveSameFileHelperFunction(callNode);
-  if (!helper || !isFunctionLike(helper) || !helper.async) return false;
-
+// The body analysis shared by same-file and imported helpers: every await
+// is itself never-rejecting or sits in a try with a non-rethrowing catch,
+// with no unguarded throw and no returned call that could reject.
+const isRejectionProofAsyncHelperBody = (helper: EsTreeNode, depth: number): boolean => {
   let isRejectionProof = true;
   walkOwnFunctionScope(helper, (child: EsTreeNode) => {
     if (!isRejectionProof) return false;
@@ -361,6 +353,208 @@ const isNeverRejectingLocalAsyncHelperCall = (
     isRejectionProof = false;
   }
   return isRejectionProof;
+};
+
+// Cross-file resolutions per linted file are capped: oxc-resolver +
+// re-parsing foreign modules is filesystem work, and one stuck-flag proof
+// rarely needs more than a couple of imported helpers.
+const CROSS_FILE_RESOLUTION_BUDGET_PER_FILE = 3;
+
+// Per-file cross-file analysis state, reset in `create` before each lint.
+// The absolute filename anchors import resolution (undefined / relative
+// filenames make every cross-file lookup a no-op, mirroring
+// no-mutating-reducer-state's convention); the memo keeps repeated awaits
+// of the same import from re-consuming the resolution budget.
+let currentLintedFilename: string | undefined;
+let crossFileResolutionsRemaining = 0;
+const crossFileResolutionMemo = new Map<string, ResolvedCrossFileExport | null>();
+
+// Foreign helpers must be self-contained proofs: while their body is being
+// analyzed, further cross-file hops are disabled, so an opaque imported
+// call INSIDE the foreign body stays unproven (no transitive proof chains).
+let isAnalyzingForeignHelperBody = false;
+
+const resolveCrossFileExportWithinBudget = (
+  specifier: string,
+  exportedName: string,
+): ResolvedCrossFileExport | null => {
+  if (!currentLintedFilename) return null;
+  const memoKey = `${specifier}\u0000${exportedName}`;
+  const memoized = crossFileResolutionMemo.get(memoKey);
+  if (memoized !== undefined) return memoized;
+  if (crossFileResolutionsRemaining <= 0) return null;
+  crossFileResolutionsRemaining -= 1;
+  const resolved = resolveCrossFileExport(currentLintedFilename, specifier, exportedName);
+  crossFileResolutionMemo.set(memoKey, resolved);
+  return resolved;
+};
+
+const isRejectionProofForeignHelperBody = (helper: EsTreeNode, depth: number): boolean => {
+  isAnalyzingForeignHelperBody = true;
+  try {
+    return isRejectionProofAsyncHelperBody(helper, depth);
+  } finally {
+    isAnalyzingForeignHelperBody = false;
+  }
+};
+
+// `await uploadFiles(...)` where `uploadFiles` is a NAMED import: resolve
+// the export in its source module (following barrel re-exports and renamed
+// imports) and run the same never-rejecting body analysis on the foreign
+// function. The resolved node may be the function itself or a const
+// initializer wrapping useCallback / an arrow.
+const isNeverRejectingImportedAsyncHelperCall = (
+  callee: EsTreeNodeOfType<"Identifier">,
+  depth: number,
+): boolean => {
+  const importBinding = getImportBindingForName(callee, callee.name);
+  if (!importBinding || importBinding.isNamespace || !importBinding.exportedName) return false;
+  const resolved = resolveCrossFileExportWithinBudget(
+    importBinding.source,
+    importBinding.exportedName,
+  );
+  if (!resolved) return false;
+  const foreignHelper = getUseCallbackWrappedFunction(resolved.node);
+  if (!isFunctionLike(foreignHelper) || !foreignHelper.async) return false;
+  return isRejectionProofForeignHelperBody(foreignHelper, depth);
+};
+
+// The object literal a hook returns: a direct `return {...}` (or arrow
+// expression body), possibly wrapped in `useMemo(() => ({...}), deps)`.
+const getHookReturnedObjectExpression = (
+  hookFunction: EsTreeNode,
+): EsTreeNodeOfType<"ObjectExpression"> | null => {
+  const unwrapReturnedExpression = (expression: EsTreeNode): EsTreeNode | null => {
+    const stripped = stripParenExpression(expression);
+    if (isNodeOfType(stripped, "ObjectExpression")) return stripped;
+    if (!isNodeOfType(stripped, "CallExpression")) return null;
+    const memoCallee = stripParenExpression(stripped.callee);
+    if (!isNodeOfType(memoCallee, "Identifier") || memoCallee.name !== "useMemo") return null;
+    const memoFactory = stripped.arguments[0];
+    if (!isFunctionLike(memoFactory)) return null;
+    if (!isNodeOfType(memoFactory.body, "BlockStatement")) {
+      return unwrapReturnedExpression(memoFactory.body);
+    }
+    let factoryReturned: EsTreeNode | null = null;
+    walkOwnFunctionScope(memoFactory, (child: EsTreeNode) => {
+      if (factoryReturned) return false;
+      if (isNodeOfType(child, "ReturnStatement") && child.argument) {
+        factoryReturned = unwrapReturnedExpression(child.argument);
+      }
+    });
+    return factoryReturned;
+  };
+
+  if (!isFunctionLike(hookFunction)) return null;
+  if (!isNodeOfType(hookFunction.body, "BlockStatement")) {
+    const returned = unwrapReturnedExpression(hookFunction.body);
+    return returned && isNodeOfType(returned, "ObjectExpression") ? returned : null;
+  }
+  let returnedObject: EsTreeNodeOfType<"ObjectExpression"> | null = null;
+  walkOwnFunctionScope(hookFunction, (child: EsTreeNode) => {
+    if (returnedObject) return false;
+    if (!isNodeOfType(child, "ReturnStatement") || !child.argument) return;
+    const returned = unwrapReturnedExpression(child.argument);
+    if (returned && isNodeOfType(returned, "ObjectExpression")) returnedObject = returned;
+  });
+  return returnedObject;
+};
+
+// The function bound to `propertyName` in the hook's returned object: the
+// property value is either the function itself or an identifier resolving
+// (within the hook's own file) to one, possibly useCallback-wrapped.
+const resolveHookReturnedFunctionProperty = (
+  returnedObject: EsTreeNodeOfType<"ObjectExpression">,
+  propertyName: string,
+): EsTreeNode | null => {
+  for (const property of returnedObject.properties) {
+    if (!isNodeOfType(property, "Property") || property.computed) continue;
+    const keyName = isNodeOfType(property.key, "Identifier")
+      ? property.key.name
+      : isNodeOfType(property.key, "Literal") && typeof property.key.value === "string"
+        ? property.key.value
+        : null;
+    if (keyName !== propertyName) continue;
+    const value = stripParenExpression(property.value as EsTreeNode);
+    if (isFunctionLike(value)) return value;
+    if (!isNodeOfType(value, "Identifier")) return null;
+    const binding = findVariableInitializer(value, value.name);
+    if (!binding?.initializer) return null;
+    return getUseCallbackWrappedFunction(binding.initializer);
+  }
+  return null;
+};
+
+const HOOK_NAME_PATTERN = /^use[A-Z0-9]/;
+
+// `const { annotate } = useMediaAnnotations()` where the hook is a NAMED
+// import: resolve the hook function cross-file, find the matching function
+// property in its returned object literal, and run the same never-rejecting
+// body analysis on it.
+const isNeverRejectingImportedHookFunctionCall = (
+  callee: EsTreeNodeOfType<"Identifier">,
+  depth: number,
+): boolean => {
+  const binding = findVariableInitializer(callee, callee.name);
+  if (!binding || binding.initializer) return false;
+  const destructuredProperty = binding.bindingIdentifier.parent;
+  if (!isNodeOfType(destructuredProperty, "Property")) return false;
+  if (!isNodeOfType(destructuredProperty.key, "Identifier")) return false;
+  const propertyName = destructuredProperty.key.name;
+  const objectPattern = destructuredProperty.parent;
+  if (!objectPattern || !isNodeOfType(objectPattern, "ObjectPattern")) return false;
+  const declarator = objectPattern.parent;
+  if (!declarator || !isNodeOfType(declarator, "VariableDeclarator")) return false;
+  if (declarator.id !== objectPattern || !declarator.init) return false;
+  const hookCall = stripParenExpression(declarator.init);
+  if (!isNodeOfType(hookCall, "CallExpression")) return false;
+  const hookCallee = stripParenExpression(hookCall.callee);
+  if (!isNodeOfType(hookCallee, "Identifier")) return false;
+  if (!HOOK_NAME_PATTERN.test(hookCallee.name)) return false;
+  const hookImportBinding = getImportBindingForName(hookCallee, hookCallee.name);
+  if (!hookImportBinding || hookImportBinding.isNamespace || !hookImportBinding.exportedName) {
+    return false;
+  }
+  const resolved = resolveCrossFileExportWithinBudget(
+    hookImportBinding.source,
+    hookImportBinding.exportedName,
+  );
+  if (!resolved) return false;
+  const hookFunction = getUseCallbackWrappedFunction(resolved.node);
+  const returnedObject = getHookReturnedObjectExpression(hookFunction);
+  if (!returnedObject) return false;
+  const returnedFunction = resolveHookReturnedFunctionProperty(returnedObject, propertyName);
+  if (!returnedFunction || !isFunctionLike(returnedFunction) || !returnedFunction.async) {
+    return false;
+  }
+  return isRejectionProofForeignHelperBody(returnedFunction, depth);
+};
+
+// A never-rejecting async helper call, resolved same-file (possibly
+// useCallback-wrapped, or a `this.method` on the enclosing class) or
+// cross-file (a named import, or a function destructured from an imported
+// hook's returned object). Covers shapes the shared
+// isNeverRejectingHelperCall misses: `.catch`-guarded awaits inside the
+// helper, useCallback wrappers, class methods, Promise.all over
+// dispatch-populated arrays, and imported helpers whose proof lives in
+// another module.
+const isNeverRejectingLocalAsyncHelperCall = (
+  callNode: EsTreeNodeOfType<"CallExpression">,
+  depth: number,
+): boolean => {
+  if (depth <= 0) return false;
+  const helper = resolveSameFileHelperFunction(callNode);
+  if (helper && isFunctionLike(helper)) {
+    return Boolean(helper.async) && isRejectionProofAsyncHelperBody(helper, depth);
+  }
+  if (isAnalyzingForeignHelperBody) return false;
+  const callee = stripParenExpression(callNode.callee);
+  if (!isNodeOfType(callee, "Identifier")) return false;
+  if (helper && isNodeOfType(helper, "ImportSpecifier")) {
+    return isNeverRejectingImportedAsyncHelperCall(callee, depth);
+  }
+  if (helper) return false;
+  return isNeverRejectingImportedHookFunctionCall(callee, depth);
 };
 
 const isNeverRejectingExpression = (expression: EsTreeNode, depth: number): boolean => {
@@ -830,6 +1024,9 @@ export const noLoadingFlagResetOutsideFinally = defineRule({
     "A trailing `setLoading(false)` after an `await` never runs if the awaited call rejects, so the flag stays stuck truthy; reset it in a `finally` block (or mirror the reset on every catch) so it clears on both paths.",
   create: (context: RuleContext): RuleVisitors => {
     if (isTestFileFilename(context.filename)) return {};
+    currentLintedFilename = context.filename;
+    crossFileResolutionsRemaining = CROSS_FILE_RESOLUTION_BUDGET_PER_FILE;
+    crossFileResolutionMemo.clear();
     return {
       ArrowFunctionExpression(node: EsTreeNodeOfType<"ArrowFunctionExpression">) {
         analyzeFunction(node, context);

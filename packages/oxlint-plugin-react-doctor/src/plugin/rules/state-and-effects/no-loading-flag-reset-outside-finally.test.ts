@@ -1,5 +1,10 @@
-import { describe, expect, it } from "vite-plus/test";
+import * as fs from "node:fs";
+import os from "node:os";
+import * as path from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
 import { runRule } from "../../../test-utils/run-rule.js";
+import { __clearParseSourceFileCacheForTests } from "../../utils/parse-source-file.js";
+import { __clearResolveImportWithOxcCacheForTests } from "../../utils/resolve-import-with-oxc.js";
 import { noLoadingFlagResetOutsideFinally } from "./no-loading-flag-reset-outside-finally.js";
 
 describe("no-loading-flag-reset-outside-finally", () => {
@@ -1003,5 +1008,277 @@ const SaveButton = () => {
       };`,
     );
     expect(result.diagnostics).toHaveLength(1);
+  });
+});
+
+describe("no-loading-flag-reset-outside-finally cross-file helpers", () => {
+  let temporaryDirectory = "";
+
+  beforeEach(() => {
+    // realpathSync: oxc-resolver returns real paths, and os.tmpdir() is a
+    // symlink on macOS (/var -> /private/var).
+    temporaryDirectory = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), "rd-loading-flag-cross-file-")),
+    );
+    fs.writeFileSync(
+      path.join(temporaryDirectory, "package.json"),
+      JSON.stringify({ name: "fixture", type: "module" }),
+    );
+    __clearResolveImportWithOxcCacheForTests();
+    __clearParseSourceFileCacheForTests();
+  });
+
+  afterEach(() => {
+    fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  const writeFile = (relativePath: string, contents: string): string => {
+    const absolutePath = path.join(temporaryDirectory, relativePath);
+    fs.mkdirSync(path.dirname(absolutePath), { recursive: true });
+    fs.writeFileSync(absolutePath, contents, "utf8");
+    return absolutePath;
+  };
+
+  const GUARDED_UPLOAD_HELPER = `export const uploadFiles = async (files) => {
+    const outcomes = [];
+    for (const file of files) {
+      try {
+        await sendFile(file);
+        outcomes.push(true);
+      } catch (error) {
+        outcomes.push(false);
+      }
+    }
+    return outcomes;
+  };`;
+
+  const consumerCode = (importLine: string, awaitedName = "uploadFiles"): string =>
+    `${importLine}
+    const Modal = () => {
+      const handleUpload = async () => {
+        setUploading(true);
+        const outcomes = await ${awaitedName}(items);
+        setOutcomes(outcomes);
+        setUploading(false);
+      };
+    };`;
+
+  it("stays quiet when the awaited named import's foreign body catches every await", () => {
+    writeFile("src/utils/file-upload.ts", GUARDED_UPLOAD_HELPER);
+    const consumerFilename = writeFile(
+      "src/Modal.tsx",
+      consumerCode(`import { uploadFiles } from "./utils/file-upload";`),
+    );
+    const result = runRule(
+      noLoadingFlagResetOutsideFinally,
+      consumerCode(`import { uploadFiles } from "./utils/file-upload";`),
+      { filename: consumerFilename },
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags when the foreign body has an unguarded await", () => {
+    writeFile(
+      "src/utils/file-upload.ts",
+      `export const uploadFiles = async (files) => {
+        await sendAll(files);
+      };`,
+    );
+    const consumerFilename = writeFile(
+      "src/Modal.tsx",
+      consumerCode(`import { uploadFiles } from "./utils/file-upload";`),
+    );
+    const result = runRule(
+      noLoadingFlagResetOutsideFinally,
+      consumerCode(`import { uploadFiles } from "./utils/file-upload";`),
+      { filename: consumerFilename },
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags when the foreign body calls another opaque imported function (no transitive proof)", () => {
+    writeFile(
+      "src/utils/transport.ts",
+      `export const sendAll = async (files) => {
+        try {
+          await post(files);
+        } catch (error) {}
+      };`,
+    );
+    writeFile(
+      "src/utils/file-upload.ts",
+      `import { sendAll } from "./transport";
+      export const uploadFiles = async (files) => {
+        await sendAll(files);
+      };`,
+    );
+    const consumerFilename = writeFile(
+      "src/Modal.tsx",
+      consumerCode(`import { uploadFiles } from "./utils/file-upload";`),
+    );
+    const result = runRule(
+      noLoadingFlagResetOutsideFinally,
+      consumerCode(`import { uploadFiles } from "./utils/file-upload";`),
+      { filename: consumerFilename },
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags an import from a node_modules-style bare specifier", () => {
+    const consumerFilename = writeFile(
+      "src/Modal.tsx",
+      consumerCode(`import { uploadFiles } from "upload-kit";`),
+    );
+    const result = runRule(
+      noLoadingFlagResetOutsideFinally,
+      consumerCode(`import { uploadFiles } from "upload-kit";`),
+      { filename: consumerFilename },
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags when the rule runs without a filename (resolution no-ops)", () => {
+    writeFile("src/utils/file-upload.ts", GUARDED_UPLOAD_HELPER);
+    const result = runRule(
+      noLoadingFlagResetOutsideFinally,
+      consumerCode(`import { uploadFiles } from "./utils/file-upload";`),
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("resolves a renamed import (`import { uploadAll as upload }`)", () => {
+    writeFile(
+      "src/utils/file-upload.ts",
+      `export const uploadAll = async (files) => {
+        try {
+          await sendAll(files);
+        } catch (error) {}
+      };`,
+    );
+    const consumerFilename = writeFile(
+      "src/Modal.tsx",
+      consumerCode(`import { uploadAll as upload } from "./utils/file-upload";`, "upload"),
+    );
+    const result = runRule(
+      noLoadingFlagResetOutsideFinally,
+      consumerCode(`import { uploadAll as upload } from "./utils/file-upload";`, "upload"),
+      { filename: consumerFilename },
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("resolves through a barrel re-export hop", () => {
+    writeFile("src/utils/file-upload.ts", GUARDED_UPLOAD_HELPER);
+    writeFile("src/utils/index.ts", `export { uploadFiles } from "./file-upload";`);
+    const consumerFilename = writeFile(
+      "src/Modal.tsx",
+      consumerCode(`import { uploadFiles } from "./utils";`),
+    );
+    const result = runRule(
+      noLoadingFlagResetOutsideFinally,
+      consumerCode(`import { uploadFiles } from "./utils";`),
+      { filename: consumerFilename },
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("resolves a foreign const initializer wrapping useCallback", () => {
+    writeFile(
+      "src/utils/file-upload.ts",
+      `import { useCallback } from "react";
+      export const uploadFiles = useCallback(async (files) => {
+        try {
+          await sendAll(files);
+        } catch (error) {}
+      }, []);`,
+    );
+    const consumerFilename = writeFile(
+      "src/Modal.tsx",
+      consumerCode(`import { uploadFiles } from "./utils/file-upload";`),
+    );
+    const result = runRule(
+      noLoadingFlagResetOutsideFinally,
+      consumerCode(`import { uploadFiles } from "./utils/file-upload";`),
+      { filename: consumerFilename },
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  const hookConsumerCode = `import { useMediaAnnotations } from "./use-media-annotations";
+    const Editor = () => {
+      const { annotate } = useMediaAnnotations();
+      const save = async () => {
+        setSaving(true);
+        await annotate(payload);
+        setSaving(false);
+      };
+    };`;
+
+  it("stays quiet for a guarded function destructured from an imported hook's returned object", () => {
+    writeFile(
+      "src/use-media-annotations.ts",
+      `export const useMediaAnnotations = () => {
+        const annotate = async (input) => {
+          try {
+            await persist(input);
+          } catch (error) {}
+        };
+        return { annotate };
+      };`,
+    );
+    const consumerFilename = writeFile("src/Editor.tsx", hookConsumerCode);
+    const result = runRule(noLoadingFlagResetOutsideFinally, hookConsumerCode, {
+      filename: consumerFilename,
+    });
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags when the imported hook's returned function has an unguarded await", () => {
+    writeFile(
+      "src/use-media-annotations.ts",
+      `export const useMediaAnnotations = () => {
+        const annotate = async (input) => {
+          await persist(input);
+        };
+        return { annotate };
+      };`,
+    );
+    const consumerFilename = writeFile("src/Editor.tsx", hookConsumerCode);
+    const result = runRule(noLoadingFlagResetOutsideFinally, hookConsumerCode, {
+      filename: consumerFilename,
+    });
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("stays quiet for a guarded useCallback function returned through the hook's useMemo object", () => {
+    writeFile(
+      "src/use-workspace-data.ts",
+      `import { useCallback, useMemo } from "react";
+      export const useWorkspaceData = () => {
+        const loadRecentViews = useCallback(async () => {
+          try {
+            await service.getRecentViews();
+          } catch (error) {}
+        }, []);
+        return useMemo(() => ({ loadRecentViews }), [loadRecentViews]);
+      };`,
+    );
+    const consumer = `import { useWorkspaceData } from "./use-workspace-data";
+    const Search = () => {
+      const { loadRecentViews } = useWorkspaceData();
+      const open = async () => {
+        setLoadingRecentViews(true);
+        await loadRecentViews();
+        setLoadingRecentViews(false);
+      };
+    };`;
+    const consumerFilename = writeFile("src/Search.tsx", consumer);
+    const result = runRule(noLoadingFlagResetOutsideFinally, consumer, {
+      filename: consumerFilename,
+    });
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(0);
   });
 });

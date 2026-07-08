@@ -344,12 +344,22 @@ export const CROSS_FILE_DEPENDENCY_COLLECTORS: ReadonlyMap<string, CrossFileDepe
 
 /**
  * Cross-file rules whose dependency set CANNOT be soundly bounded — they are
- * excluded from fingerprinting and re-lint every file on every scan. Empty
- * today; a new cross-file rule must be added either here or to
+ * excluded from fingerprinting and re-lint every file on every scan. A new
+ * cross-file rule must be added either here or to
  * `CROSS_FILE_DEPENDENCY_COLLECTORS` (the core guard test enforces the
  * partition), forcing a conscious classification.
+ *
+ * The four rules here resolve imports through `resolve-import-with-oxc.ts`
+ * (oxc-resolver), which does not report its filesystem probe set, so no
+ * sound dependency fingerprint can be recorded for them. Moving any of them
+ * to the bounded set requires a probe-recording resolver path first.
  */
-export const UNBOUNDED_CROSS_FILE_RULE_IDS: ReadonlySet<string> = new Set();
+export const UNBOUNDED_CROSS_FILE_RULE_IDS: ReadonlySet<string> = new Set([
+  "no-loading-flag-reset-outside-finally",
+  "no-unguarded-browser-global-at-module-scope",
+  "no-unguarded-browser-global-in-render-or-hook-init",
+  "window-open-without-noopener",
+]);
 
 /**
  * Runs the collectors for `ruleIds` over one file and returns every

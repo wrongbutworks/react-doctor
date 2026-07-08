@@ -141,6 +141,73 @@ export const findExportedFunctionBody = (
   return localBindings.get(localName) ?? null;
 };
 
+// Given a parsed Program AST and an exported name, returns the initializer
+// EXPRESSION bound to that export, or null when the export doesn't resolve
+// to a variable initializer in this file. Handles:
+//
+//   export const config = <expr>
+//   const config = <expr>; export { config };
+//   const config = <expr>; export { config as settings };   (exportedName === "settings")
+//   const config = <expr>; export { config as default };    (exportedName === "default")
+//
+// Function/arrow initializers are returned too — callers that distinguish
+// functions from plain initializers should try `findExportedFunctionBody`
+// first. Re-exports are NOT followed here (see `findReExportTargetsForName`).
+export const findExportedConstInitializer = (
+  programRoot: EsTreeNode,
+  exportedName: string,
+): EsTreeNode | null => {
+  if (!isNodeOfType(programRoot, "Program")) return null;
+
+  const initializersByLocalName = new Map<string, EsTreeNode>();
+  const localNamesByExportedName = new Map<string, string>();
+
+  const recordVariableDeclaration = (declaration: EsTreeNodeOfType<"VariableDeclaration">) => {
+    for (const declarator of declaration.declarations ?? []) {
+      if (!isNodeOfType(declarator, "VariableDeclarator")) continue;
+      if (!isNodeOfType(declarator.id, "Identifier")) continue;
+      if (!declarator.init) continue;
+      initializersByLocalName.set(declarator.id.name, stripParenExpression(declarator.init));
+    }
+  };
+
+  for (const statement of programRoot.body ?? []) {
+    if (isNodeOfType(statement, "VariableDeclaration")) {
+      recordVariableDeclaration(statement);
+      continue;
+    }
+    if (!isNodeOfType(statement, "ExportNamedDeclaration")) continue;
+
+    const declaration = statement.declaration;
+    if (declaration && isNodeOfType(declaration, "VariableDeclaration")) {
+      recordVariableDeclaration(declaration);
+      for (const declarator of declaration.declarations ?? []) {
+        if (!isNodeOfType(declarator, "VariableDeclarator")) continue;
+        if (!isNodeOfType(declarator.id, "Identifier")) continue;
+        localNamesByExportedName.set(declarator.id.name, declarator.id.name);
+      }
+    }
+    // A re-export specifier (`export { x } from "./x"`) binds no local
+    // initializer, so specifiers with a source are skipped.
+    if (statement.source) continue;
+    for (const specifier of statement.specifiers ?? []) {
+      if (!isNodeOfType(specifier, "ExportSpecifier")) continue;
+      if (!isNodeOfType(specifier.local, "Identifier")) continue;
+      const exportedNameSpec = isNodeOfType(specifier.exported, "Identifier")
+        ? specifier.exported.name
+        : isNodeOfType(specifier.exported, "Literal") &&
+            typeof specifier.exported.value === "string"
+          ? specifier.exported.value
+          : null;
+      if (exportedNameSpec) localNamesByExportedName.set(exportedNameSpec, specifier.local.name);
+    }
+  }
+
+  const localName = localNamesByExportedName.get(exportedName);
+  if (!localName) return null;
+  return initializersByLocalName.get(localName) ?? null;
+};
+
 // Convenience: returns the source-side identifier name for an
 // import specifier. Handles both `import { foo } from "..."` and
 // `import { foo as localBar } from "..."` — returning "foo" in both
@@ -163,23 +230,31 @@ export const resolveImportedExportName = (importSpecifier: EsTreeNode): string |
   return null;
 };
 
-// Returns the relative `source` strings the caller should probe to
-// resolve `exportedName` through a re-export, in priority order:
+export interface ReExportTarget {
+  readonly source: string;
+  /** The name to look up in `source` — the pre-rename local of a named re-export. */
+  readonly importedName: string;
+}
+
+// Returns the re-export targets the caller should probe to resolve
+// `exportedName`, in priority order:
 //
-//   - A matching named re-export (`export { name } from "./x"`) is
-//     precise, so the single matching source is returned on its own.
+//   - A matching named re-export (`export { name } from "./x"`, including
+//     renames — `export { inner as name } from "./x"` maps back to
+//     `inner`) is precise, so the single matching target is returned on
+//     its own.
 //   - Otherwise the name may live behind ANY `export * from "./x"`, so
 //     every export-all source is returned for the caller to try in
 //     turn (an earlier `export *` not containing the name shouldn't
 //     stop the search).
 //
 // Empty when no re-export could carry the name.
-export const findReExportSourcesForName = (
+export const findReExportTargetsForName = (
   programRoot: EsTreeNode,
   exportedName: string,
-): string[] => {
+): ReExportTarget[] => {
   if (!isNodeOfType(programRoot, "Program")) return [];
-  const exportAllSources: string[] = [];
+  const exportAllTargets: ReExportTarget[] = [];
   for (const statement of programRoot.body ?? []) {
     if (isNodeOfType(statement, "ExportNamedDeclaration") && statement.source) {
       const sourceValue = statement.source.value;
@@ -192,13 +267,32 @@ export const findReExportSourcesForName = (
           : isNodeOfType(exported, "Literal") && typeof exported.value === "string"
             ? exported.value
             : null;
-        if (exportedNameSpec === exportedName) return [sourceValue];
+        if (exportedNameSpec !== exportedName) continue;
+        const importedName = isNodeOfType(specifier.local, "Identifier")
+          ? specifier.local.name
+          : isNodeOfType(specifier.local, "Literal") && typeof specifier.local.value === "string"
+            ? specifier.local.value
+            : exportedName;
+        return [{ source: sourceValue, importedName }];
       }
     }
     if (isNodeOfType(statement, "ExportAllDeclaration") && statement.source) {
       const sourceValue = statement.source.value;
-      if (typeof sourceValue === "string") exportAllSources.push(sourceValue);
+      if (typeof sourceValue === "string") {
+        exportAllTargets.push({ source: sourceValue, importedName: exportedName });
+      }
     }
   }
-  return exportAllSources;
+  return exportAllTargets;
 };
+
+// Source-only view of `findReExportTargetsForName` for callers that recurse
+// with the same exported name (rename-blind, matching the barrel resolver's
+// historical behavior).
+export const findReExportSourcesForName = (
+  programRoot: EsTreeNode,
+  exportedName: string,
+): string[] =>
+  findReExportTargetsForName(programRoot, exportedName).map(
+    (reExportTarget) => reExportTarget.source,
+  );

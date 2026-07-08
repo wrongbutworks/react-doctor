@@ -1,10 +1,13 @@
+import * as path from "node:path";
 import { collectPatternNames } from "../../utils/collect-pattern-names.js";
 import { defineRule } from "../../utils/define-rule.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
+import { getImportBindingForName } from "../../utils/find-import-source-for-name.js";
 import { isDomGuardIdentifierName } from "../../utils/is-dom-guard-identifier-name.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
 import { isTestlikeFilename } from "../../utils/is-testlike-filename.js";
+import { resolveCrossFileExport } from "../../utils/resolve-cross-file-export.js";
 import { stripParenExpression } from "../../utils/strip-paren-expression.js";
 import { walkAst } from "../../utils/walk-ast.js";
 import type { RuleContext } from "../../utils/rule-context.js";
@@ -81,12 +84,17 @@ const isFlowTerminatingStatement = (statement: EsTreeNode): boolean => {
 const moduleDeclaresBrowserOnly = (
   program: EsTreeNodeOfType<"Program">,
   guardAliasNames: ReadonlySet<string>,
+  classifyImportedGuardIdentifier: ClassifyImportedGuardIdentifier,
 ): boolean =>
   (program.body ?? []).some(
     (statement) =>
       isNodeOfType(statement, "IfStatement") &&
       isFlowTerminatingStatement(statement.consequent) &&
-      subtreeHasBrowserEnvironmentGuard(statement.test, guardAliasNames),
+      subtreeHasBrowserEnvironmentGuard(
+        statement.test,
+        guardAliasNames,
+        classifyImportedGuardIdentifier,
+      ),
   );
 
 // `window.___emitter = emitter` — the flagged global is the root of an
@@ -131,10 +139,12 @@ const isProcessBrowserRead = (node: EsTreeNodeOfType<"MemberExpression">): boole
   return isNodeOfType(processObject, "Identifier") && processObject.name === "process";
 };
 
-const subtreeHasBrowserEnvironmentGuard = (
-  subtree: EsTreeNode,
-  guardAliasNames: ReadonlySet<string>,
-): boolean => {
+// The literal environment checks this rule trusts on their own: a
+// `typeof <browser global>` test, `import.meta.env.SSR`, or
+// `process.browser`. Name-heuristic-free, so it is also safe on FOREIGN
+// initializers reached through an import — a guard built from ANOTHER
+// imported flag stays unproven (no cross-file recursion).
+const subtreeProvesBrowserEnvironmentCheck = (subtree: EsTreeNode): boolean => {
   let found = false;
   walkAst(subtree, (child) => {
     if (found) return false;
@@ -145,21 +155,94 @@ const subtreeHasBrowserEnvironmentGuard = (
         return false;
       }
     }
-    // Same-file aliases resolved from their initializer, plus guard-named
-    // identifiers (`canUseDOM`, `IS_BROWSER`, …) that may be imported from a
-    // shared browser-utils module — the initializer is out of reach there,
-    // but the name is an unambiguous environment check.
-    if (
-      isNodeOfType(child, "Identifier") &&
-      (guardAliasNames.has(child.name) || isDomGuardIdentifierName(child.name))
-    ) {
-      found = true;
-      return false;
-    }
     if (
       isNodeOfType(child, "MemberExpression") &&
       (isImportMetaEnvSsrRead(child) || isProcessBrowserRead(child))
     ) {
+      found = true;
+      return false;
+    }
+  });
+  return found;
+};
+
+// How an import-bound identifier in a guard position is classified after
+// following the import into its source file:
+// - "browser-guard": the export is (or boolean-derives from) a literal
+//   environment check — a const initializer like
+//   `export const canUseDOM = typeof window !== "undefined"` or a function
+//   returning one — so it guards exactly like a same-file alias;
+// - "resolved-not-guard": the export resolved to something that provably is
+//   NOT an environment check (`export const canUseDOM = true`), so the
+//   guard-name heuristic must not vouch for it;
+// - "unresolved": the import could not be followed (specifier that doesn't
+//   resolve, node_modules, no absolute filename, resolution budget spent) —
+//   keep the current name-heuristic behavior.
+type ImportedGuardResolution = "browser-guard" | "resolved-not-guard" | "unresolved";
+
+interface ClassifyImportedGuardIdentifier {
+  (identifier: EsTreeNodeOfType<"Identifier">): ImportedGuardResolution | null;
+}
+
+// NOTE: belongs in constants/thresholds.ts; shared files are frozen for
+// this pass. Caps cross-file guard resolutions per linted file.
+const MAX_IMPORTED_GUARD_RESOLUTIONS = 3;
+
+const classifyNoImportedGuards: ClassifyImportedGuardIdentifier = () => null;
+
+// An imported guard FUNCTION (`export const canUseDOM = () => typeof window
+// !== "undefined"`, exenv-style) counts when a returned expression contains
+// a literal environment check.
+const functionBodyReturnsBrowserEnvironmentCheck = (functionNode: EsTreeNode): boolean => {
+  if (
+    !isNodeOfType(functionNode, "FunctionDeclaration") &&
+    !isNodeOfType(functionNode, "FunctionExpression") &&
+    !isNodeOfType(functionNode, "ArrowFunctionExpression")
+  ) {
+    return false;
+  }
+  const body = functionNode.body;
+  if (!body) return false;
+  if (!isNodeOfType(body, "BlockStatement")) return subtreeProvesBrowserEnvironmentCheck(body);
+  let returnsCheck = false;
+  walkAst(body, (child) => {
+    if (returnsCheck) return false;
+    if (
+      isNodeOfType(child, "ReturnStatement") &&
+      child.argument &&
+      subtreeProvesBrowserEnvironmentCheck(child.argument)
+    ) {
+      returnsCheck = true;
+      return false;
+    }
+  });
+  return returnsCheck;
+};
+
+const subtreeHasBrowserEnvironmentGuard = (
+  subtree: EsTreeNode,
+  guardAliasNames: ReadonlySet<string>,
+  classifyImportedGuardIdentifier: ClassifyImportedGuardIdentifier,
+): boolean => {
+  if (subtreeProvesBrowserEnvironmentCheck(subtree)) return true;
+  let found = false;
+  walkAst(subtree, (child) => {
+    if (found) return false;
+    if (!isNodeOfType(child, "Identifier")) return;
+    const importedResolution = classifyImportedGuardIdentifier(child);
+    if (importedResolution === "browser-guard") {
+      found = true;
+      return false;
+    }
+    // A resolved import whose export provably is NOT an environment check
+    // must not be vouched for by its name (`export const canUseDOM = true`);
+    // an unresolved import keeps the name-heuristic fallback below.
+    if (importedResolution === "resolved-not-guard") return;
+    // Same-file aliases resolved from their initializer, plus guard-named
+    // identifiers (`canUseDOM`, `IS_BROWSER`, …) that may be imported from a
+    // shared browser-utils module — the initializer is out of reach there,
+    // but the name is an unambiguous environment check.
+    if (guardAliasNames.has(child.name) || isDomGuardIdentifierName(child.name)) {
       found = true;
       return false;
     }
@@ -176,6 +259,7 @@ const subtreeHasBrowserEnvironmentGuard = (
 const isGuardedAgainstSsrCrash = (
   node: EsTreeNode,
   guardAliasNames: ReadonlySet<string>,
+  classifyImportedGuardIdentifier: ClassifyImportedGuardIdentifier,
 ): boolean => {
   let current: EsTreeNode = node;
   let ancestor = node.parent;
@@ -189,19 +273,31 @@ const isGuardedAgainstSsrCrash = (
     }
     if (
       isNodeOfType(ancestor, "IfStatement") &&
-      subtreeHasBrowserEnvironmentGuard(ancestor.test, guardAliasNames)
+      subtreeHasBrowserEnvironmentGuard(
+        ancestor.test,
+        guardAliasNames,
+        classifyImportedGuardIdentifier,
+      )
     ) {
       return true;
     }
     if (
       isNodeOfType(ancestor, "ConditionalExpression") &&
-      subtreeHasBrowserEnvironmentGuard(ancestor.test, guardAliasNames)
+      subtreeHasBrowserEnvironmentGuard(
+        ancestor.test,
+        guardAliasNames,
+        classifyImportedGuardIdentifier,
+      )
     ) {
       return true;
     }
     if (
       isNodeOfType(ancestor, "LogicalExpression") &&
-      subtreeHasBrowserEnvironmentGuard(ancestor.left, guardAliasNames)
+      subtreeHasBrowserEnvironmentGuard(
+        ancestor.left,
+        guardAliasNames,
+        classifyImportedGuardIdentifier,
+      )
     ) {
       return true;
     }
@@ -219,7 +315,17 @@ const collectGuardAliasNames = (program: EsTreeNodeOfType<"Program">): Set<strin
     if (!declaration || !isNodeOfType(declaration, "VariableDeclaration")) return;
     for (const declarator of declaration.declarations ?? []) {
       if (!isNodeOfType(declarator.id, "Identifier") || !declarator.init) continue;
-      if (subtreeHasBrowserEnvironmentGuard(declarator.init, NO_GUARD_ALIASES)) {
+      // Alias collection stays import-blind (`classifyNoImportedGuards`):
+      // it runs over every module-scope initializer, so following imports
+      // here would spend the per-file resolution budget before any actual
+      // guard test needs it.
+      if (
+        subtreeHasBrowserEnvironmentGuard(
+          declarator.init,
+          NO_GUARD_ALIASES,
+          classifyNoImportedGuards,
+        )
+      ) {
         aliasNames.add(declarator.id.name);
       }
     }
@@ -287,10 +393,41 @@ export const noUnguardedBrowserGlobalAtModuleScope = defineRule({
     let guardAliasNames: ReadonlySet<string> = NO_GUARD_ALIASES;
     let moduleIsDeclaredBrowserOnly = false;
 
+    const importedGuardResolutionByName = new Map<string, ImportedGuardResolution>();
+    let importedGuardResolutionCount = 0;
+
+    const classifyImportedGuardIdentifier: ClassifyImportedGuardIdentifier = (identifier) => {
+      const importBinding = getImportBindingForName(identifier, identifier.name);
+      if (!importBinding || importBinding.isNamespace || !importBinding.exportedName) return null;
+      const cachedResolution = importedGuardResolutionByName.get(identifier.name);
+      if (cachedResolution) return cachedResolution;
+      const filename = context.filename;
+      if (!filename || !path.isAbsolute(filename)) return "unresolved";
+      if (importedGuardResolutionCount >= MAX_IMPORTED_GUARD_RESOLUTIONS) return "unresolved";
+      importedGuardResolutionCount += 1;
+      const resolvedExport = resolveCrossFileExport(
+        filename,
+        importBinding.source,
+        importBinding.exportedName,
+      );
+      let resolution: ImportedGuardResolution = "unresolved";
+      if (resolvedExport?.kind === "initializer") {
+        resolution = subtreeProvesBrowserEnvironmentCheck(resolvedExport.node)
+          ? "browser-guard"
+          : "resolved-not-guard";
+      } else if (resolvedExport?.kind === "function") {
+        resolution = functionBodyReturnsBrowserEnvironmentCheck(resolvedExport.node)
+          ? "browser-guard"
+          : "resolved-not-guard";
+      }
+      importedGuardResolutionByName.set(identifier.name, resolution);
+      return resolution;
+    };
+
     const reportRead = (node: EsTreeNode, globalName: string): void => {
       if (moduleIsDeclaredBrowserOnly) return;
       if (!isEvaluatedAtImportTime(node)) return;
-      if (isGuardedAgainstSsrCrash(node, guardAliasNames)) return;
+      if (isGuardedAgainstSsrCrash(node, guardAliasNames, classifyImportedGuardIdentifier)) return;
       context.report({
         node,
         message: `Reading \`${globalName}\` here crashes with "ReferenceError: ${globalName} is not defined" the instant this module is imported during SSR — move the read inside a function or effect, or guard it with \`typeof ${globalName} !== "undefined"\`.`,
@@ -306,7 +443,11 @@ export const noUnguardedBrowserGlobalAtModuleScope = defineRule({
           );
         }
         guardAliasNames = collectGuardAliasNames(node);
-        moduleIsDeclaredBrowserOnly = moduleDeclaresBrowserOnly(node, guardAliasNames);
+        moduleIsDeclaredBrowserOnly = moduleDeclaresBrowserOnly(
+          node,
+          guardAliasNames,
+          classifyImportedGuardIdentifier,
+        );
       },
       MemberExpression(node: EsTreeNodeOfType<"MemberExpression">) {
         const object = stripParenExpression(node.object);

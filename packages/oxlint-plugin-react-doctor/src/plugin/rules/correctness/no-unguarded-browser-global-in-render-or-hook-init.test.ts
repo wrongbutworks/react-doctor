@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vite-plus/test";
+import * as fs from "node:fs";
+import os from "node:os";
+import * as path from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
 import { runRule } from "../../../test-utils/run-rule.js";
 import { noUnguardedBrowserGlobalInRenderOrHookInit } from "./no-unguarded-browser-global-in-render-or-hook-init.js";
 
@@ -652,5 +655,139 @@ describe("no-unguarded-browser-global-in-render-or-hook-init", () => {
     );
     expect(result.parseErrors).toEqual([]);
     expect(result.diagnostics).toHaveLength(1);
+  });
+
+  describe("cross-file imported guards", () => {
+    let temporaryDirectory = "";
+
+    beforeEach(() => {
+      temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "rd-browser-global-render-"));
+    });
+
+    afterEach(() => {
+      fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+    });
+
+    const createProjectFile = (relativePath: string, contents: string): string => {
+      const absolutePath = path.join(temporaryDirectory, relativePath);
+      fs.mkdirSync(path.dirname(absolutePath), { recursive: true });
+      fs.writeFileSync(absolutePath, contents);
+      return absolutePath;
+    };
+
+    const componentFilename = (): string => path.join(temporaryDirectory, "src", "App.tsx");
+
+    const guardedByImportedConst = `import { canUseDOM } from "./env";
+      export function App() {
+        const width = canUseDOM ? window.innerWidth : 0;
+        return <div style={{ width }} />;
+      }`;
+
+    it("stays quiet behind an imported canUseDOM const whose foreign initializer is a typeof-window check", () => {
+      createProjectFile("src/env.ts", `export const canUseDOM = typeof window !== "undefined";\n`);
+      const result = runRule(noUnguardedBrowserGlobalInRenderOrHookInit, guardedByImportedConst, {
+        filename: componentFilename(),
+      });
+      expect(result.parseErrors).toEqual([]);
+      expect(result.diagnostics).toHaveLength(0);
+    });
+
+    it("stays quiet behind an imported off-list guard name once its typeof-window initializer resolves", () => {
+      createProjectFile(
+        "src/env.ts",
+        `export const browserReady = typeof window !== "undefined";\n`,
+      );
+      const result = runRule(
+        noUnguardedBrowserGlobalInRenderOrHookInit,
+        `import { browserReady } from "./env";
+        export function App() {
+          const width = browserReady ? window.innerWidth : 0;
+          return <div style={{ width }} />;
+        }`,
+        { filename: componentFilename() },
+      );
+      expect(result.parseErrors).toEqual([]);
+      expect(result.diagnostics).toHaveLength(0);
+    });
+
+    it("still flags when the imported canUseDOM resolves to a non-typeof initializer (name alone no longer vouches)", () => {
+      createProjectFile("src/env.ts", `export const canUseDOM = true;\n`);
+      const result = runRule(noUnguardedBrowserGlobalInRenderOrHookInit, guardedByImportedConst, {
+        filename: componentFilename(),
+      });
+      expect(result.parseErrors).toEqual([]);
+      expect(result.diagnostics).toHaveLength(1);
+    });
+
+    it("stays quiet behind an imported guard function whose body returns a typeof-window check", () => {
+      createProjectFile(
+        "src/env.ts",
+        `export const canUseDOM = () => typeof window !== "undefined";\n`,
+      );
+      const result = runRule(
+        noUnguardedBrowserGlobalInRenderOrHookInit,
+        `import { canUseDOM } from "./env";
+        export function App() {
+          const width = canUseDOM() ? window.innerWidth : 0;
+          return <div style={{ width }} />;
+        }`,
+        { filename: componentFilename() },
+      );
+      expect(result.parseErrors).toEqual([]);
+      expect(result.diagnostics).toHaveLength(0);
+    });
+
+    it("mirrors the polarity-blind same-file alias behavior for an imported negated flag", () => {
+      createProjectFile("src/env.ts", `export const serverEnv = typeof window === "undefined";\n`);
+      const result = runRule(
+        noUnguardedBrowserGlobalInRenderOrHookInit,
+        `import { serverEnv } from "./env";
+        export function App() {
+          const width = serverEnv ? 0 : window.innerWidth;
+          return <div style={{ width }} />;
+        }`,
+        { filename: componentFilename() },
+      );
+      expect(result.parseErrors).toEqual([]);
+      expect(result.diagnostics).toHaveLength(0);
+    });
+
+    it("keeps the guard-name fallback when the import does not resolve", () => {
+      const result = runRule(
+        noUnguardedBrowserGlobalInRenderOrHookInit,
+        `import { canUseDOM } from "./missing-env";
+        export function App() {
+          const width = canUseDOM ? window.innerWidth : 0;
+          return <div style={{ width }} />;
+        }`,
+        { filename: componentFilename() },
+      );
+      expect(result.parseErrors).toEqual([]);
+      expect(result.diagnostics).toHaveLength(0);
+    });
+
+    it("still flags an unresolvable imported non-guard flag (unresolved never becomes a guard)", () => {
+      const result = runRule(
+        noUnguardedBrowserGlobalInRenderOrHookInit,
+        `import { IS_CLICKHOUSE_BUILD } from "./missing-env";
+        export function App() {
+          const width = IS_CLICKHOUSE_BUILD ? window.innerWidth : 0;
+          return <div style={{ width }} />;
+        }`,
+        { filename: componentFilename() },
+      );
+      expect(result.parseErrors).toEqual([]);
+      expect(result.diagnostics).toHaveLength(1);
+    });
+
+    it("keeps the guard-name fallback when the host provides no filename", () => {
+      createProjectFile("src/env.ts", `export const canUseDOM = true;\n`);
+      const result = runRule(noUnguardedBrowserGlobalInRenderOrHookInit, guardedByImportedConst, {
+        filename: undefined,
+        forceJsx: true,
+      });
+      expect(result.parseErrors).toEqual([]);
+      expect(result.diagnostics).toHaveLength(0);
+    });
   });
 });

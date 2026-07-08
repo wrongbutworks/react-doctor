@@ -40,6 +40,12 @@ const CROSS_FILE_PRIMITIVE_FILES = [
   "utils/does-module-export-name.ts",
   "utils/has-ancestor-layout-matching.ts",
   "utils/resolve-cross-file-function-export.ts",
+  // oxc-resolver probes the filesystem without reporting its probe set, so a
+  // rule reaching either util below must additionally be UNBOUNDED (no
+  // dependency collector) — the classification test at the bottom enforces
+  // the partition once the rule lands in CROSS_FILE_RULE_IDS.
+  "utils/resolve-import-with-oxc.ts",
+  "utils/resolve-cross-file-export.ts",
   "utils/resolve-relative-import-path.ts",
   "utils/resolve-module-path.ts",
   "utils/resolve-barrel-export-file-path.ts",
@@ -133,20 +139,24 @@ describe("CROSS_FILE_RULE_IDS", () => {
     expect(detected).toEqual(declared);
   });
 
-  it("contains the verified twelve and nothing the analysis can't justify", () => {
+  it("contains the verified sixteen and nothing the analysis can't justify", () => {
     expect([...CROSS_FILE_RULE_IDS].sort()).toEqual([
       "nextjs-missing-metadata",
       "nextjs-no-use-search-params-without-suspense",
       "no-barrel-import",
       "no-dynamic-import-path",
       "no-full-lodash-import",
+      "no-loading-flag-reset-outside-finally",
       "no-mutating-reducer-state",
+      "no-unguarded-browser-global-at-module-scope",
+      "no-unguarded-browser-global-in-render-or-hook-init",
       "prefer-dynamic-import",
       "rendering-hydration-mismatch-time",
       "rn-no-legacy-shadow-styles",
       "rn-no-raw-text",
       "rn-prefer-expo-image",
       "rn-style-prefer-boxshadow",
+      "window-open-without-noopener",
     ]);
   });
 

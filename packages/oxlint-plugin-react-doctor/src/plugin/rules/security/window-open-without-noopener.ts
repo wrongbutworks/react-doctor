@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import { walkAst } from "../../utils/walk-ast.js";
 import { isFunctionLike } from "../../utils/is-function-like.js";
 import { stripParenExpression } from "../../utils/strip-paren-expression.js";
@@ -7,6 +8,9 @@ import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
 import { findVariableInitializer } from "../../utils/find-variable-initializer.js";
 import { findProgramRoot } from "../../utils/find-program-root.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
+import { resolveImportedExportName } from "../../utils/find-exported-function-body.js";
+import type { ResolvedCrossFileExport } from "../../utils/resolve-cross-file-export.js";
+import { resolveCrossFileExport } from "../../utils/resolve-cross-file-export.js";
 
 const NAVIGATING_TARGETS = new Set(["_self", "_top", "_parent"]);
 
@@ -62,6 +66,22 @@ const startsSameOriginPath = (urlText: string): boolean => {
   return BARE_RELATIVE_PATH_PREFIX_PATTERN.test(urlText);
 };
 
+// While a FOREIGN module's export is under trusted-destination analysis
+// (see `isTrustedForeignExportExpression`), static text is only trusted
+// when it stays same-origin or hands off to an OS protocol handler. The
+// blanket literal exemption below exists for destinations the developer
+// typed at the call site; extending it across files would erase the
+// rule's current true positives on unverified imported constants, and a
+// VERIFIED external origin behind a URL-named import is exactly the
+// recall the name heuristic was giving away.
+const isTrustedForeignStaticText = (urlText: string): boolean => {
+  const trimmedText = urlText.trimStart();
+  if (trimmedText.length === 0) return false;
+  const loweredText = trimmedText.toLowerCase();
+  if (NON_BROWSING_URL_SCHEMES.some((scheme) => loweredText.startsWith(scheme))) return true;
+  return startsSameOriginPath(trimmedText);
+};
+
 // Reverse tabnabbing needs an attacker-controlled opened page. A
 // developer-hardcoded string literal, a template whose origin is fixed
 // (interpolations confined to the path/query), or a statically
@@ -71,14 +91,20 @@ const startsSameOriginPath = (urlText: string): boolean => {
 // call results, member accesses, templates interpolating the
 // scheme/host) keep firing.
 const isTrustedStaticDestination = (urlArgument: EsTreeNode | null | undefined): boolean => {
-  if (isStringLiteral(urlArgument)) return true;
+  if (isStringLiteral(urlArgument)) {
+    return isAnalyzingForeignExport ? isTrustedForeignStaticText(urlArgument.value) : true;
+  }
   if (urlArgument == null || !isNodeOfType(urlArgument, "TemplateLiteral")) return false;
-  if ((urlArgument.expressions?.length ?? 0) === 0) return true;
+  if ((urlArgument.expressions?.length ?? 0) === 0) {
+    return isAnalyzingForeignExport
+      ? isTrustedForeignStaticText(urlArgument.quasis?.[0]?.value?.raw ?? "")
+      : true;
+  }
   const firstQuasiText = (urlArgument.quasis?.[0]?.value?.raw ?? "").trimStart();
   if (firstQuasiText.length === 0) return false;
   const loweredQuasiText = firstQuasiText.toLowerCase();
   if (NON_BROWSING_URL_SCHEMES.some((scheme) => loweredQuasiText.startsWith(scheme))) return true;
-  if (COMPLETE_ORIGIN_PATTERN.test(firstQuasiText)) return true;
+  if (!isAnalyzingForeignExport && COMPLETE_ORIGIN_PATTERN.test(firstQuasiText)) return true;
   return startsSameOriginPath(firstQuasiText);
 };
 
@@ -893,19 +919,137 @@ const leftmostConcatOperand = (node: EsTreeNode): EsTreeNode => {
 // URL constants imported from the app's own modules — SCREAMING_SNAKE
 // (`CHANGELOG_URL`) or camelCase (`downloadPage`) with a URL-shaped name
 // suffix — are developer-controlled configuration evaluated at module
-// init, same trust class as a same-file const.
+// init, same trust class as a same-file const. Only consulted when
+// cross-file verification could NOT see the actual value (see
+// `crossFileImportedDestinationVerdict`); inside a foreign module an
+// import stays opaque — trusting it by name would launder a value this
+// analysis refused to follow.
 const IMPORTED_URL_CONSTANT_NAME_PATTERN =
   /^(?:[A-Z][A-Z0-9_]*(?:URL|LINK|HREF|PAGE)|[a-z$_][A-Za-z0-9$_]*(?:Url|Link|Href|Page))$/;
 
 const isImportedUrlConstant = (identifier: EsTreeNodeOfType<"Identifier">): boolean => {
+  if (isAnalyzingForeignExport) return false;
   if (!IMPORTED_URL_CONSTANT_NAME_PATTERN.test(identifier.name)) return false;
+  return resolveImportedExportReference(identifier) != null;
+};
+
+// Cross-file resolutions per linted file are capped: oxc-resolver +
+// re-parsing foreign modules is filesystem work, and a file rarely opens
+// more than a couple of imported destinations.
+const CROSS_FILE_RESOLUTION_BUDGET_PER_FILE = 3;
+
+// Per-file cross-file analysis state, reset in `create` before each lint.
+// The absolute filename anchors import resolution (an undefined / relative
+// filename makes every cross-file lookup a no-op, so hosts without
+// filenames keep the pure name-heuristic behavior); the memo keeps
+// repeated reads of the same import from re-consuming the budget.
+let currentLintedFilename: string | undefined;
+let crossFileResolutionsRemaining = 0;
+const crossFileResolutionMemo = new Map<string, ResolvedCrossFileExport | null>();
+
+// Foreign exports must be self-contained proofs: while a foreign
+// initializer / return is being analyzed, further cross-file hops are
+// disabled, so a foreign helper delegating to its OWN imports stays
+// opaque (no transitive resolution chains).
+let isAnalyzingForeignExport = false;
+
+interface ImportedExportReference {
+  moduleSpecifier: string;
+  exportedName: string;
+}
+
+// The import declaration a destination identifier is bound to, resolved
+// scope-aware (a local shadowing the import wins), with the SOURCE-side
+// export name so renamed imports resolve to the right foreign binding.
+const resolveImportedExportReference = (
+  identifier: EsTreeNodeOfType<"Identifier">,
+): ImportedExportReference | null => {
   const binding = findVariableInitializer(identifier, identifier.name);
-  if (!binding) return false;
-  const bindingParent = binding.bindingIdentifier.parent;
-  return Boolean(
-    bindingParent &&
-    (isNodeOfType(bindingParent, "ImportSpecifier") ||
-      isNodeOfType(bindingParent, "ImportDefaultSpecifier")),
+  const importSpecifier = binding?.bindingIdentifier.parent;
+  if (
+    !importSpecifier ||
+    (!isNodeOfType(importSpecifier, "ImportSpecifier") &&
+      !isNodeOfType(importSpecifier, "ImportDefaultSpecifier"))
+  ) {
+    return null;
+  }
+  const exportedName = resolveImportedExportName(importSpecifier);
+  if (!exportedName) return null;
+  const importDeclaration = importSpecifier.parent;
+  if (!importDeclaration || !isNodeOfType(importDeclaration, "ImportDeclaration")) return null;
+  const sourceNode = importDeclaration.source;
+  if (!sourceNode || !isNodeOfType(sourceNode, "Literal")) return null;
+  if (typeof sourceNode.value !== "string") return null;
+  return { moduleSpecifier: sourceNode.value, exportedName };
+};
+
+const resolveCrossFileExportWithinBudget = (
+  identifier: EsTreeNodeOfType<"Identifier">,
+): ResolvedCrossFileExport | null => {
+  if (isAnalyzingForeignExport || currentLintedFilename == null) return null;
+  const importReference = resolveImportedExportReference(identifier);
+  if (!importReference) return null;
+  const memoKey = `${importReference.moduleSpecifier}\u0000${importReference.exportedName}`;
+  const memoized = crossFileResolutionMemo.get(memoKey);
+  if (memoized !== undefined) return memoized;
+  if (crossFileResolutionsRemaining <= 0) return null;
+  crossFileResolutionsRemaining -= 1;
+  const resolved = resolveCrossFileExport(
+    currentLintedFilename,
+    importReference.moduleSpecifier,
+    importReference.exportedName,
+  );
+  crossFileResolutionMemo.set(memoKey, resolved);
+  return resolved;
+};
+
+// Runs the trusted-destination machinery against an expression that lives
+// in a FOREIGN module. Bindings inside the foreign file resolve within it
+// (the foreign AST carries parent references); literal trust tightens to
+// same-origin (`isTrustedForeignStaticText`) and further cross-file hops
+// are off.
+const isTrustedForeignExportExpression = (foreignExpression: EsTreeNode): boolean => {
+  isAnalyzingForeignExport = true;
+  try {
+    return isTrustedDestination(stripParenExpression(foreignExpression), 0);
+  } finally {
+    isAnalyzingForeignExport = false;
+  }
+};
+
+// Content-verified verdict for an imported destination identifier: when
+// the foreign export RESOLVES, the initializer's own analysis decides —
+// in both directions, overriding the name heuristic (a URL-named import
+// verified to hold an external origin flags; an unnamed-pattern import
+// verified same-origin goes quiet). `null` (node_modules, missing file,
+// no filename, budget spent, or a function-kind export) leaves the
+// decision to the existing heuristics.
+const crossFileImportedDestinationVerdict = (
+  identifier: EsTreeNodeOfType<"Identifier">,
+): boolean | null => {
+  const resolvedExport = resolveCrossFileExportWithinBudget(identifier);
+  if (!resolvedExport) return null;
+  if (resolvedExport.kind !== "initializer") return null;
+  return isTrustedForeignExportExpression(resolvedExport.node);
+};
+
+// `get…Url` / `create…Url` / `build…Url` imported helpers: the sync
+// URL-builder naming family worth a cross-file look. `build…` helpers are
+// otherwise opaque (they can compose arbitrary origins from arguments),
+// so verifying that EVERY return is a same-origin-built URL is what turns
+// the dtale `buildCorrelationsUrl` idiom quiet.
+const CROSS_FILE_URL_HELPER_CALLEE_NAME_PATTERN = /^(?:get|create|build)[A-Za-z0-9]*(?:Url|URL)$/;
+
+const isCrossFileVerifiedUrlHelperCall = (
+  calleeIdentifier: EsTreeNodeOfType<"Identifier">,
+): boolean => {
+  if (!CROSS_FILE_URL_HELPER_CALLEE_NAME_PATTERN.test(calleeIdentifier.name)) return false;
+  const resolvedExport = resolveCrossFileExportWithinBudget(calleeIdentifier);
+  if (!resolvedExport || resolvedExport.kind !== "function") return false;
+  const returnedExpressions = collectLocalFunctionReturnExpressions(resolvedExport.node);
+  if (!returnedExpressions || returnedExpressions.length === 0) return false;
+  return returnedExpressions.every((returnedExpression) =>
+    isTrustedForeignExportExpression(returnedExpression),
   );
 };
 
@@ -1014,6 +1158,8 @@ const isTrustedDestination = (
     if (urlArgument.computed && isTrustedConstArrayIndexRead(urlArgument, depth + 1)) return true;
   }
   if (isNodeOfType(urlArgument, "Identifier")) {
+    const crossFileVerdict = crossFileImportedDestinationVerdict(urlArgument);
+    if (crossFileVerdict != null) return crossFileVerdict;
     if (isImportedUrlConstant(urlArgument)) return true;
     const constInitializer = resolveConstInitializer(urlArgument);
     if (constInitializer != null) {
@@ -1081,6 +1227,16 @@ const isTrustedDestination = (
         return true;
       }
     }
+    // `buildCorrelationsUrl(dataId, …)` — an imported URL-builder helper
+    // is opaque by name, but when its module resolves, the call is
+    // trusted if EVERY return the foreign function can produce is a
+    // same-origin-built URL (dtale CorrelationsGrid idiom).
+    if (
+      isNodeOfType(urlArgument.callee, "Identifier") &&
+      isCrossFileVerifiedUrlHelperCall(urlArgument.callee)
+    ) {
+      return true;
+    }
     // A string method on a trusted same-origin base keeps the leading `/`
     // (`getLocation().pathname.replace('/iframe/', '/main/')`).
     const callee = urlArgument.callee as EsTreeNode;
@@ -1107,7 +1263,9 @@ const isStaticallyTruthyTrustedDestination = (
   depth: number,
 ): boolean => {
   if (urlExpression == null || depth > MAX_BINDING_RESOLUTION_DEPTH) return false;
-  if (isStringLiteral(urlExpression)) return urlExpression.value.length > 0;
+  if (isStringLiteral(urlExpression)) {
+    return urlExpression.value.length > 0 && isTrustedStaticDestination(urlExpression);
+  }
   if (isNodeOfType(urlExpression, "TemplateLiteral")) {
     const hasStaticText =
       urlExpression.quasis?.some((quasi) => (quasi.value?.raw ?? "").length > 0) ?? false;
@@ -1220,33 +1378,44 @@ export const windowOpenWithoutNoopener = defineRule({
   severity: "warn",
   recommendation:
     "Pass `'noopener'` in the third features argument of `window.open` so the opened page can't control your tab through `window.opener` or leak the referrer.",
-  create: (context) => ({
-    CallExpression(node: EsTreeNodeOfType<"CallExpression">) {
-      if (!isWindowOpenCallee(node.callee)) return;
-      if (!isDiscardedWindowHandle(node)) return;
+  create: (context) => {
+    currentLintedFilename =
+      typeof context.filename === "string" && path.isAbsolute(context.filename)
+        ? context.filename
+        : undefined;
+    crossFileResolutionsRemaining = CROSS_FILE_RESOLUTION_BUDGET_PER_FILE;
+    crossFileResolutionMemo.clear();
+    isAnalyzingForeignExport = false;
+    return {
+      CallExpression(node: EsTreeNodeOfType<"CallExpression">) {
+        if (!isWindowOpenCallee(node.callee)) return;
+        if (!isDiscardedWindowHandle(node)) return;
 
-      const urlArgument = node.arguments?.[0];
-      if (isTrustedOrNullishDestination(urlArgument, 0)) return;
+        const urlArgument = node.arguments?.[0];
+        if (isTrustedOrNullishDestination(urlArgument, 0)) return;
 
-      const targetArgument = node.arguments?.[1];
-      if (isStringLiteral(targetArgument) && NAVIGATING_TARGETS.has(targetArgument.value)) return;
+        const targetArgument = node.arguments?.[1];
+        if (isStringLiteral(targetArgument) && NAVIGATING_TARGETS.has(targetArgument.value)) {
+          return;
+        }
 
-      const featuresArgument = node.arguments?.[2];
-      if (featuresArgument != null && !isNullishExpression(featuresArgument)) {
-        const featuresText = resolveStaticStringText(featuresArgument, 0);
-        if (featuresText == null) return;
-        const featureNames = featuresText
-          .toLowerCase()
-          .split(/[\s,]+/)
-          .map((featureEntry) => featureEntry.split("=")[0]);
-        if (featureNames.some((name) => name === "noopener" || name === "noreferrer")) return;
-      }
+        const featuresArgument = node.arguments?.[2];
+        if (featuresArgument != null && !isNullishExpression(featuresArgument)) {
+          const featuresText = resolveStaticStringText(featuresArgument, 0);
+          if (featuresText == null) return;
+          const featureNames = featuresText
+            .toLowerCase()
+            .split(/[\s,]+/)
+            .map((featureEntry) => featureEntry.split("=")[0]);
+          if (featureNames.some((name) => name === "noopener" || name === "noreferrer")) return;
+        }
 
-      context.report({
-        node,
-        message:
-          "This `window.open` call leaves the opened page able to redirect your tab via `window.opener`, so pass `'noopener'` in the features argument.",
-      });
-    },
-  }),
+        context.report({
+          node,
+          message:
+            "This `window.open` call leaves the opened page able to redirect your tab via `window.opener`, so pass `'noopener'` in the features argument.",
+        });
+      },
+    };
+  },
 });
