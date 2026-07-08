@@ -176,4 +176,16 @@ describe("CROSS_FILE_RULE_IDS", () => {
       [...CROSS_FILE_RULE_IDS].sort(),
     );
   });
+
+  // The reachability detector only follows RELATIVE imports, so a rule
+  // importing the resolver package directly would dodge it entirely and
+  // silently corrupt the lint cache. Force resolver access through the
+  // detected `resolve-import-with-oxc.ts` / `resolve-cross-file-export.ts`
+  // primitives instead.
+  it("no rule imports oxc-resolver directly (must go through the detected primitives)", () => {
+    const offendingRuleFiles = collectRuleFiles(RULES_DIRECTORY).filter((ruleFile) =>
+      /from\s+["']oxc-resolver["']/.test(fs.readFileSync(ruleFile, "utf8")),
+    );
+    expect(offendingRuleFiles).toEqual([]);
+  });
 });

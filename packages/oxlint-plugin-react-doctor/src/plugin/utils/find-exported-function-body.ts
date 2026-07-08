@@ -87,6 +87,10 @@ export const findExportedFunctionBody = (
         localBindings.set(declaration.id.name, declaration);
         namedExports.set(declaration.id.name, declaration.id.name);
       }
+      // A re-export specifier (`export { x } from "./x"`) binds no local
+      // declaration — mapping it here would let a same-named local decoy
+      // shadow the re-export and resolve to the wrong function.
+      if (statement.source) continue;
       for (const specifier of statement.specifiers ?? []) {
         if (!isNodeOfType(specifier, "ExportSpecifier")) continue;
         const local = specifier.local;
@@ -276,7 +280,14 @@ export const findReExportTargetsForName = (
         return [{ source: sourceValue, importedName }];
       }
     }
-    if (isNodeOfType(statement, "ExportAllDeclaration") && statement.source) {
+    // `export * as ns from "./x"` re-exports only the namespace object, not
+    // the module's individual names — following it would resolve names the
+    // barrel never exposes.
+    if (
+      isNodeOfType(statement, "ExportAllDeclaration") &&
+      statement.source &&
+      statement.exported == null
+    ) {
       const sourceValue = statement.source.value;
       if (typeof sourceValue === "string") {
         exportAllTargets.push({ source: sourceValue, importedName: exportedName });

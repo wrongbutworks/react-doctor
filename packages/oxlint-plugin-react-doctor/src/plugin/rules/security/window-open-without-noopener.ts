@@ -1141,11 +1141,19 @@ const isTrustedDestination = (
     return isTrustedDestination(urlArgument.callee.object as EsTreeNode, depth + 1);
   }
   if (isNodeOfType(urlArgument, "NewExpression")) {
-    return (
-      isNodeOfType(urlArgument.callee, "Identifier") &&
-      urlArgument.callee.name === "URL" &&
-      isTrustedDestination((urlArgument.arguments?.[0] as EsTreeNode) ?? null, depth + 1)
-    );
+    if (!isNodeOfType(urlArgument.callee, "Identifier") || urlArgument.callee.name !== "URL") {
+      return false;
+    }
+    if (!isTrustedDestination((urlArgument.arguments?.[0] as EsTreeNode) ?? null, depth + 1)) {
+      return false;
+    }
+    // WHATWG URL resolves a relative first argument against the BASE, so
+    // `new URL('/store', externalBase)` navigates to the base's origin —
+    // the base must be as trusted as the path.
+    const baseArgument = urlArgument.arguments?.[1];
+    return baseArgument === undefined
+      ? true
+      : isTrustedDestination(baseArgument as EsTreeNode, depth + 1);
   }
   // `EXTERNAL_LINKS.docs` / `item.href` — a member read off a const
   // object/array config whose relevant values are all trusted literals;

@@ -1187,6 +1187,46 @@ describe("window-open-without-noopener — cross-file imported destinations", ()
     expect(result.diagnostics).toHaveLength(1);
   });
 
+  it("still flags a foreign initializer whose new URL() base is an external origin", () => {
+    writeFile(
+      "src/config.ts",
+      "const externalBase = 'https://evil.example.com';\nexport const storeUrl = new URL('/store', externalBase).toString();\n",
+    );
+    const result = runRuleAt(
+      "src/App.tsx",
+      "import { storeUrl } from './config';\nwindow.open(storeUrl, '_blank');\n",
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("stays quiet: foreign initializer building new URL() against the page's own origin", () => {
+    writeFile(
+      "src/config.ts",
+      "export const storeUrl = new URL('/store', window.location.origin).toString();\n",
+    );
+    const result = runRuleAt(
+      "src/App.tsx",
+      "import { storeUrl } from './config';\nwindow.open(storeUrl, '_blank');\n",
+    );
+    expect(result.diagnostics).toHaveLength(0);
+  });
+
+  it("still flags when a barrel hides a re-export behind a same-named local decoy helper", () => {
+    writeFile(
+      "src/impl.ts",
+      "export const buildShareUrl = () => 'https://evil.example.com/share';\n",
+    );
+    writeFile(
+      "src/barrel.ts",
+      "const buildShareUrl = () => '/local-decoy';\nvoid buildShareUrl;\nexport { buildShareUrl } from './impl';\n",
+    );
+    const result = runRuleAt(
+      "src/App.tsx",
+      "import { buildShareUrl } from './barrel';\nwindow.open(buildShareUrl(), '_blank');\n",
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
   it("stays quiet: imported build…Url helper whose every return is same-origin-built (dtale CorrelationsGrid idiom)", () => {
     writeFile(
       "src/correlations-repository.ts",

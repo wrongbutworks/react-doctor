@@ -499,6 +499,7 @@ const isNeverRejectingImportedHookFunctionCall = (
   if (!binding || binding.initializer) return false;
   const destructuredProperty = binding.bindingIdentifier.parent;
   if (!isNodeOfType(destructuredProperty, "Property")) return false;
+  if (destructuredProperty.computed) return false;
   if (!isNodeOfType(destructuredProperty.key, "Identifier")) return false;
   const propertyName = destructuredProperty.key.name;
   const objectPattern = destructuredProperty.parent;
@@ -1027,6 +1028,7 @@ export const noLoadingFlagResetOutsideFinally = defineRule({
     currentLintedFilename = context.filename;
     crossFileResolutionsRemaining = CROSS_FILE_RESOLUTION_BUDGET_PER_FILE;
     crossFileResolutionMemo.clear();
+    isAnalyzingForeignHelperBody = false;
     return {
       ArrowFunctionExpression(node: EsTreeNodeOfType<"ArrowFunctionExpression">) {
         analyzeFunction(node, context);

@@ -648,6 +648,17 @@ export const noUnguardedBrowserGlobalInRenderOrHookInit = defineRule({
     const classifyImportedGuardIdentifier: ClassifyImportedGuardIdentifier = (identifier) => {
       const importBinding = getImportBindingForName(identifier, identifier.name);
       if (!importBinding || importBinding.isNamespace || !importBinding.exportedName) return null;
+      // Scope-aware confirmation: a local binding (parameter, destructure,
+      // const) shadowing the import must not inherit the import's verdict.
+      const scopeBinding = findVariableInitializer(identifier, identifier.name);
+      const scopeBindingParent = scopeBinding?.bindingIdentifier.parent;
+      if (
+        !scopeBindingParent ||
+        (!isNodeOfType(scopeBindingParent, "ImportSpecifier") &&
+          !isNodeOfType(scopeBindingParent, "ImportDefaultSpecifier"))
+      ) {
+        return null;
+      }
       const cachedResolution = importedGuardResolutionByName.get(identifier.name);
       if (cachedResolution) return cachedResolution;
       const filename = context.filename;

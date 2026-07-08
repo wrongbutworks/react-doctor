@@ -75,7 +75,7 @@ const getResolverForRootDirectory = (rootDirectory: string): ResolverFactory => 
 };
 
 const isInsideNodeModules = (absoluteFilePath: string): boolean =>
-  absoluteFilePath.split(path.sep).includes("node_modules");
+  absoluteFilePath.split(/[\\/]/).includes("node_modules");
 
 // Resolves `specifier` as imported from `fromFilename` to an absolute file
 // path via oxc-resolver (relative specifiers, tsconfig `paths` aliases,

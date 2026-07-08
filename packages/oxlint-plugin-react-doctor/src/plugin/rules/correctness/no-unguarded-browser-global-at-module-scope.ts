@@ -4,6 +4,7 @@ import { defineRule } from "../../utils/define-rule.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
 import { getImportBindingForName } from "../../utils/find-import-source-for-name.js";
+import { findVariableInitializer } from "../../utils/find-variable-initializer.js";
 import { isDomGuardIdentifierName } from "../../utils/is-dom-guard-identifier-name.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
 import { isTestlikeFilename } from "../../utils/is-testlike-filename.js";
@@ -399,6 +400,17 @@ export const noUnguardedBrowserGlobalAtModuleScope = defineRule({
     const classifyImportedGuardIdentifier: ClassifyImportedGuardIdentifier = (identifier) => {
       const importBinding = getImportBindingForName(identifier, identifier.name);
       if (!importBinding || importBinding.isNamespace || !importBinding.exportedName) return null;
+      // Scope-aware confirmation: a local binding shadowing the import must
+      // not inherit the import's verdict.
+      const scopeBinding = findVariableInitializer(identifier, identifier.name);
+      const scopeBindingParent = scopeBinding?.bindingIdentifier.parent;
+      if (
+        !scopeBindingParent ||
+        (!isNodeOfType(scopeBindingParent, "ImportSpecifier") &&
+          !isNodeOfType(scopeBindingParent, "ImportDefaultSpecifier"))
+      ) {
+        return null;
+      }
       const cachedResolution = importedGuardResolutionByName.get(identifier.name);
       if (cachedResolution) return cachedResolution;
       const filename = context.filename;

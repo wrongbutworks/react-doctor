@@ -1252,6 +1252,42 @@ describe("no-loading-flag-reset-outside-finally cross-file helpers", () => {
     expect(result.diagnostics).toHaveLength(1);
   });
 
+  it("still flags a COMPUTED destructure off the imported hook (key is not statically known)", () => {
+    writeFile(
+      "src/use-media-annotations.ts",
+      `export const useMediaAnnotations = () => {
+        const safeKey = async (input) => {
+          try {
+            await persist(input);
+          } catch (error) {}
+        };
+        const risky = async (input) => {
+          await persist(input);
+        };
+        return { safeKey, risky };
+      };`,
+    );
+    const computedConsumerCode = `import { useState } from "react";
+      import { useMediaAnnotations } from "./use-media-annotations";
+      export const Editor = () => {
+        const [saving, setSaving] = useState(false);
+        const safeKey = "risky";
+        const { [safeKey]: doIt } = useMediaAnnotations();
+        const save = async () => {
+          setSaving(true);
+          await doIt({});
+          setSaving(false);
+        };
+        return save;
+      };`;
+    const consumerFilename = writeFile("src/Editor.tsx", computedConsumerCode);
+    const result = runRule(noLoadingFlagResetOutsideFinally, computedConsumerCode, {
+      filename: consumerFilename,
+    });
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
   it("stays quiet for a guarded useCallback function returned through the hook's useMemo object", () => {
     writeFile(
       "src/use-workspace-data.ts",

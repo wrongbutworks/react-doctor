@@ -193,4 +193,28 @@ describe("resolveCrossFileExport", () => {
     const entryFile = writeEntryFile();
     expect(resolveCrossFileExport(entryFile, "./hop-0", "helper")?.filePath).toBe(target);
   });
+
+  it("follows a re-export past a same-named local decoy declaration", () => {
+    writeProjectManifest();
+    const target = writeFile(
+      "src/impl.ts",
+      "export const buildShareUrl = async () => { await fetch('/share'); };",
+    );
+    writeFile(
+      "src/barrel.ts",
+      "const buildShareUrl = () => '/local-decoy';\nvoid buildShareUrl;\nexport { buildShareUrl } from './impl';",
+    );
+    const entryFile = writeEntryFile();
+    const resolved = resolveCrossFileExport(entryFile, "./barrel", "buildShareUrl");
+    expect(resolved?.filePath).toBe(target);
+  });
+
+  it("does not resolve individual names through `export * as ns`", () => {
+    writeProjectManifest();
+    writeFile("src/impl.ts", "export const helper = () => 1;");
+    writeFile("src/barrel.ts", "export * as internal from './impl';");
+    const entryFile = writeEntryFile();
+    expect(resolveCrossFileExport(entryFile, "./barrel", "helper")).toBeNull();
+    expect(resolveCrossFileExport(entryFile, "./barrel", "internal")).toBeNull();
+  });
 });

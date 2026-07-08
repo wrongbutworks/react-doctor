@@ -692,6 +692,21 @@ describe("no-unguarded-browser-global-in-render-or-hook-init", () => {
       expect(result.diagnostics).toHaveLength(0);
     });
 
+    it("still flags when a local parameter shadows the imported guard (scope-aware classification)", () => {
+      createProjectFile("src/env.ts", `export const ready = typeof window !== "undefined";\n`);
+      const shadowedByParam = `import { ready } from "./env";
+        void ready;
+        export function App({ ready }: { ready: boolean }) {
+          const width = ready ? window.innerWidth : 0;
+          return <div style={{ width }} />;
+        }`;
+      const result = runRule(noUnguardedBrowserGlobalInRenderOrHookInit, shadowedByParam, {
+        filename: componentFilename(),
+      });
+      expect(result.parseErrors).toEqual([]);
+      expect(result.diagnostics).toHaveLength(1);
+    });
+
     it("stays quiet behind an imported off-list guard name once its typeof-window initializer resolves", () => {
       createProjectFile(
         "src/env.ts",
