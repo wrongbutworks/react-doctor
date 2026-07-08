@@ -282,6 +282,66 @@ describe("no-direct-state-mutation — regressions", () => {
     expect(result.diagnostics[0].message).toContain("items");
   });
 
+  it("stays silent on a callback-ref DOM node written to in an effect", () => {
+    const result = runRule(
+      noDirectStateMutation,
+      `function CallbackRefCounter() {
+        const [node, setNode] = useState(null);
+        useEffect(() => {
+          if (!node) return;
+          node.dataset.mounted = "true";
+        }, [node]);
+        return <span ref={setNode}>ready</span>;
+      }`,
+      { filename: "counter.tsx" },
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  it("stays silent when a callback-ref DOM node has its style mutated inline", () => {
+    const result = runRule(
+      noDirectStateMutation,
+      `function Highlight() {
+        const [element, setElement] = useState(null);
+        if (element) element.style.outline = "2px solid";
+        return <div ref={setElement} />;
+      }`,
+      { filename: "highlight.tsx" },
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  it("still flags null-initialized plain-object state when the setter is not a callback ref", () => {
+    const result = runRule(
+      noDirectStateMutation,
+      `function Form() {
+        const [draft, setDraft] = useState(null);
+        const touch = () => { draft.dirty = true; };
+        return <button onClick={touch}>save</button>;
+      }`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(1);
+    expect(result.diagnostics[0].message).toContain("draft");
+  });
+
+  it("does not claim the screen won't update when a setter runs after the mutation", () => {
+    const result = runRule(
+      noDirectStateMutation,
+      `function List() {
+        const [items, setItems] = useState([]);
+        const add = (x) => { items.push(x); setItems([...items]); };
+        return <button onClick={() => add(1)}>{items.length}</button>;
+      }`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(1);
+    expect(result.diagnostics[0].message).not.toContain("won't update");
+    expect(result.diagnostics[0].message).toContain("items");
+  });
+
   it("stays silent on a lazy initializer returning an opaque instance", () => {
     const result = runRule(
       noDirectStateMutation,
@@ -293,5 +353,86 @@ describe("no-direct-state-mutation — regressions", () => {
     );
     expect(result.parseErrors).toEqual([]);
     expect(result.diagnostics).toEqual([]);
+  });
+
+  // bindery AuthorDetailPage: `const books = []` declared inside a for-of
+  // block shadows the state binding; pushing to it is correct local work.
+  it("stays silent when a block-scoped const inside a loop shadows the state name", () => {
+    const result = runRule(
+      noDirectStateMutation,
+      `function AuthorDetailPage({ authorSeries }) {
+        const [books, setBooks] = useState([]);
+        const seriesGroups = useMemo(() => {
+          const grouped = [];
+          for (const series of authorSeries) {
+            const books = [];
+            for (const entry of series.books) {
+              books.push(entry);
+            }
+            if (books.length > 0) grouped.push({ books });
+          }
+          return grouped;
+        }, [authorSeries]);
+        return <div>{seriesGroups.length}</div>;
+      }`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  // internxt TeamsSection: `const teams = await ...` declared inside an if
+  // block shadows the state; sorting the fresh local array before setTeams
+  // is the correct immutable pattern.
+  it("stays silent when an if-block const shadows the state name", () => {
+    const result = runRule(
+      noDirectStateMutation,
+      `function TeamsSection({ selectedWorkspace }) {
+        const [teams, setTeams] = useState([]);
+        const getTeams = async () => {
+          if (selectedWorkspace) {
+            const teams = await workspacesService.getWorkspaceTeams(selectedWorkspace.id);
+            teams.sort((a, b) => a.team.name.localeCompare(b.team.name));
+            setTeams(teams);
+          }
+        };
+        return <button onClick={getTeams}>{teams.length}</button>;
+      }`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  it("still flags a state mutation inside an if block with no shadowing", () => {
+    const result = runRule(
+      noDirectStateMutation,
+      `function List({ ready }) {
+        const [items, setItems] = useState([]);
+        const add = (x) => {
+          if (ready) {
+            items.push(x);
+          }
+        };
+        return <button onClick={() => add(1)}>{items.length}</button>;
+      }`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags a loop-body state mutation with no shadowing", () => {
+    const result = runRule(
+      noDirectStateMutation,
+      `function List({ incoming }) {
+        const [items, setItems] = useState([]);
+        const addAll = () => {
+          for (const entry of incoming) {
+            items.push(entry);
+          }
+        };
+        return <button onClick={addAll}>{items.length}</button>;
+      }`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(1);
   });
 });

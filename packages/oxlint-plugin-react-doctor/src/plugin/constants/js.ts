@@ -256,6 +256,8 @@ export const INTENTIONAL_SEQUENCING_CALLEE_NAMES: ReadonlySet<string> = new Set(
   "runOnlyPendingTimersAsync",
   "setTimeout",
   "setInterval",
+  "setImmediate",
+  "queueMicrotask",
   "requestAnimationFrame",
   "requestIdleCallback",
   "animate",

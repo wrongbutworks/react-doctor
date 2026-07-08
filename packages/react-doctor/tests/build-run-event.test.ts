@@ -12,6 +12,7 @@ const ENV_VARS = [
   "GITHUB_EVENT_PATH",
   "RUNNER_OS",
   "REACT_DOCTOR_GITHUB_ACTION",
+  "REACT_DOCTOR_NO_CACHE",
   ...Object.values(ACTION_INPUT_ENVIRONMENT_VARIABLES),
 ] as const;
 
@@ -75,6 +76,7 @@ const baseInput = (overrides: Partial<RunEventInput> = {}): RunEventInput => ({
   maxDurationMs: null,
   lint: true,
   deadCode: true,
+  supplyChain: true,
   scoreOnly: false,
   noScore: false,
   respectInlineDisables: true,
@@ -127,6 +129,21 @@ describe("buildRunEventAttributes", () => {
     expect(
       buildRunEventAttributes(baseInput({ error: new Error("boom") }))["deadCode.overlapped"],
     ).toBeUndefined();
+  });
+
+  it("records the incremental summary-cache outcome, and drops it when no analysis consulted it", () => {
+    const attributes = buildRunEventAttributes(
+      baseInput({
+        result: buildResult({ deadCodeSummaryCacheHits: 8900, deadCodeSummaryCacheMisses: 3 }),
+      }),
+    );
+    expect(attributes["deadCode.summaryCacheHits"]).toBe(8900);
+    expect(attributes["deadCode.summaryCacheMisses"]).toBe(3);
+    // Whole-result hit / cache off / dead-code skipped: absent, so "no cache"
+    // reads distinctly from a 0% hit rate.
+    const absentAttributes = buildRunEventAttributes(baseInput({ result: buildResult() }));
+    expect(absentAttributes["deadCode.summaryCacheHits"]).toBeUndefined();
+    expect(absentAttributes["deadCode.summaryCacheMisses"]).toBeUndefined();
   });
 
   it("marks a finding-free run clean and drops absent CI signals", () => {
@@ -370,17 +387,140 @@ describe("buildRunEventAttributes", () => {
           { rule: "react-doctor/no-danger", source: "config", count: 3 },
           { rule: "react-doctor/jsx-key", source: "inline", count: 2 },
           { rule: "react-doctor/alt-text", source: "inline", count: 1 },
+          { rule: "react-hooks-js/refs", source: "foreign-inline", count: 2 },
         ],
       }),
     );
-    expect(attributes["diag.suppressed"]).toBe(6);
+    expect(attributes["diag.suppressed"]).toBe(8);
     expect(attributes["diag.suppressedConfig"]).toBe(3);
     expect(attributes["diag.suppressedOverride"]).toBe(0);
     expect(attributes["diag.suppressedInline"]).toBe(3);
+    expect(attributes["diag.suppressedForeignInline"]).toBe(2);
 
     // Absent tallies (e.g. the failure path) read as "unknown", not zero.
     const withoutTallies = buildRunEventAttributes(baseInput({ result: buildResult() }));
     expect(withoutTallies["diag.suppressed"]).toBeUndefined();
+  });
+
+  it("marks a whole-repo replay turbo with full warmth and no subsystem dims", () => {
+    // The cachedPayload branch passes the explicit flag and none of the
+    // execution dims (no lint / dead-code ran), so the subsystem dims stay
+    // absent while the temperature is still unambiguous.
+    const attributes = buildRunEventAttributes(
+      baseInput({ result: buildResult(), wholeRepoCacheHit: true }),
+    );
+    expect(attributes["cache.temperature"]).toBe("turbo");
+    expect(attributes["cache.warmth"]).toBe(1);
+    expect(attributes["cache.wholeRepoHit"]).toBe(true);
+    expect(attributes["lint.cacheHitRatio"]).toBeUndefined();
+    expect(attributes["lint.sidecarReplayRatio"]).toBeUndefined();
+    expect(attributes["deadCode.cacheHit"]).toBeUndefined();
+    expect(attributes["deadCode.summaryCacheHits"]).toBeUndefined();
+  });
+
+  it("marks a fresh scan with zero reuse cold, with warmth 0", () => {
+    const attributes = buildRunEventAttributes(
+      baseInput({
+        result: buildResult({ lintCacheHitFileCount: 0, lintCacheTotalFileCount: 40 }),
+        wholeRepoCacheHit: false,
+      }),
+    );
+    expect(attributes["cache.temperature"]).toBe("cold");
+    expect(attributes["cache.warmth"]).toBe(0);
+    expect(attributes["cache.wholeRepoHit"]).toBe(false);
+    expect(attributes["lint.cacheHitRatio"]).toBe(0);
+  });
+
+  it("marks a REACT_DOCTOR_NO_CACHE run disabled, not cold, and drops warmth", () => {
+    process.env.REACT_DOCTOR_NO_CACHE = "1";
+    const attributes = buildRunEventAttributes(
+      baseInput({ result: buildResult(), wholeRepoCacheHit: false }),
+    );
+    expect(attributes["cache.temperature"]).toBe("disabled");
+    expect(attributes["cache.warmth"]).toBeUndefined();
+
+    process.env.REACT_DOCTOR_NO_CACHE = "true";
+    expect(
+      buildRunEventAttributes(baseInput({ result: buildResult(), wholeRepoCacheHit: false }))[
+        "cache.temperature"
+      ],
+    ).toBe("disabled");
+  });
+
+  it("marks a run warm when any single subsystem reused work", () => {
+    const warmScenarios: Array<{ overrides: Partial<InspectResult>; expectedWarmth: number }> = [
+      {
+        overrides: { lintCacheHitFileCount: 30, lintCacheTotalFileCount: 100 },
+        expectedWarmth: 0.3,
+      },
+      {
+        overrides: { lintSidecarReplayedFileCount: 5, lintSidecarTotalFileCount: 10 },
+        expectedWarmth: 0.5,
+      },
+      { overrides: { deadCodeCacheHit: true }, expectedWarmth: 1 },
+      {
+        overrides: { deadCodeSummaryCacheHits: 8, deadCodeSummaryCacheMisses: 2 },
+        expectedWarmth: 0.8,
+      },
+    ];
+    for (const { overrides, expectedWarmth } of warmScenarios) {
+      const attributes = buildRunEventAttributes(
+        baseInput({ result: buildResult(overrides), wholeRepoCacheHit: false }),
+      );
+      expect(attributes["cache.temperature"]).toBe("warm");
+      expect(attributes["cache.warmth"]).toBeCloseTo(expectedWarmth, 10);
+    }
+  });
+
+  it("computes warmth as the mean of the known subsystem ratios, skipping absent ones", () => {
+    // Sidecar dims absent -> skipped, not counted as 0: (0.5 + 0.8) / 2.
+    const attributes = buildRunEventAttributes(
+      baseInput({
+        result: buildResult({
+          lintCacheHitFileCount: 50,
+          lintCacheTotalFileCount: 100,
+          deadCodeSummaryCacheHits: 8,
+          deadCodeSummaryCacheMisses: 2,
+        }),
+        wholeRepoCacheHit: false,
+      }),
+    );
+    expect(attributes["cache.temperature"]).toBe("warm");
+    expect(attributes["cache.warmth"]).toBeCloseTo(0.65, 10);
+  });
+
+  it("counts a consulted-but-missed dead-code result cache as zero reuse", () => {
+    // deadCodeCacheHit false with no summary stats means the analysis ran
+    // fully fresh: (1.0 + 0) / 2, still warm because lint reused everything.
+    const attributes = buildRunEventAttributes(
+      baseInput({
+        result: buildResult({
+          lintCacheHitFileCount: 100,
+          lintCacheTotalFileCount: 100,
+          deadCodeCacheHit: false,
+        }),
+        wholeRepoCacheHit: false,
+      }),
+    );
+    expect(attributes["cache.temperature"]).toBe("warm");
+    expect(attributes["cache.warmth"]).toBeCloseTo(0.5, 10);
+  });
+
+  it("reads the legacy no-dims shape as cold and drops warmth and the flag", () => {
+    // No wholeRepoCacheHit flag and no subsystem dims (a caller predating the
+    // fields): nothing was reused, so the temperature still reads cold, while
+    // the magnitude and the flag stay absent rather than asserted.
+    const attributes = buildRunEventAttributes(baseInput({ result: buildResult() }));
+    expect(attributes["cache.temperature"]).toBe("cold");
+    expect(attributes["cache.warmth"]).toBeUndefined();
+    expect(attributes["cache.wholeRepoHit"]).toBeUndefined();
+  });
+
+  it("emits no cache dims on the failure path", () => {
+    const attributes = buildRunEventAttributes(baseInput({ error: new Error("boom") }));
+    expect(attributes["cache.temperature"]).toBeUndefined();
+    expect(attributes["cache.warmth"]).toBeUndefined();
+    expect(attributes["cache.wholeRepoHit"]).toBeUndefined();
   });
 
   it("captures config shape and drops null/undefined-valued attributes", () => {
@@ -401,5 +541,19 @@ describe("buildRunEventAttributes", () => {
     expect(attributes["scan.workerCount"]).toBeUndefined();
     expect(attributes["scan.fileCount"]).toBeUndefined();
     expect(attributes["timing.scanMs"]).toBeUndefined();
+  });
+
+  it("records each scan phase's enabled state, including supply-chain", () => {
+    const enabled = buildRunEventAttributes(baseInput());
+    expect(enabled["scan.lint"]).toBe(true);
+    expect(enabled["scan.deadCode"]).toBe(true);
+    expect(enabled["scan.supplyChain"]).toBe(true);
+
+    const disabled = buildRunEventAttributes(
+      baseInput({ lint: false, deadCode: false, supplyChain: false }),
+    );
+    expect(disabled["scan.lint"]).toBe(false);
+    expect(disabled["scan.deadCode"]).toBe(false);
+    expect(disabled["scan.supplyChain"]).toBe(false);
   });
 });

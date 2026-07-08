@@ -239,6 +239,37 @@ export interface InspectOutput {
   readonly lintCacheHitFileCount: number | null;
   readonly lintCacheTotalFileCount: number | null;
   /**
+   * Sidecar lint cache outcome for the lint pass: cache-hit files whose
+   * cross-file diagnostics replayed from the sidecar store, and the hits
+   * considered. Both `null` when the sidecar cache was disabled or bypassed
+   * (per-file cache off, `REACT_DOCTOR_NO_SIDECAR_CACHE`, no bounded
+   * cross-file rule enabled). Fed to the Sentry wide event as
+   * `lint.sidecarReplayRatio`.
+   */
+  readonly lintSidecarReplayedFileCount: number | null;
+  readonly lintSidecarTotalFileCount: number | null;
+  /**
+   * Dead-code result cache outcome for this scan's dead-code pass: `true`
+   * when the cached result was replayed (the analysis worker never spawned),
+   * `false` on a miss (fresh analysis). `null` when the pass never consulted
+   * the cache — dead-code skipped/disabled, the cache off
+   * (`REACT_DOCTOR_NO_CACHE` / `REACT_DOCTOR_NO_DEAD_CODE_CACHE`), or the
+   * pass discarded by a lint failure. Fed to the Sentry wide event as
+   * `deadCode.cacheHit`.
+   */
+  readonly deadCodeCacheHit: boolean | null;
+  /**
+   * deslop's incremental summary-cache outcome for this scan's dead-code
+   * ANALYSIS: collected files served from cached parse summaries vs freshly
+   * parsed. Both `null` whenever no analysis consulted the incremental store —
+   * a whole-result cache hit (no analysis ran), the cache off, dead-code
+   * skipped/disabled, or the pass discarded by a lint failure. Fed to the
+   * Sentry wide event as `deadCode.summaryCacheHits` /
+   * `deadCode.summaryCacheMisses`.
+   */
+  readonly deadCodeSummaryCacheHits: number | null;
+  readonly deadCodeSummaryCacheMisses: number | null;
+  /**
    * Per-rule tallies of diagnostics the pipeline dropped because the user
    * explicitly silenced the rule (config off switches, per-path overrides,
    * inline disable comments) — see `DiagnosticPipeline.summarizeSuppressions`.
@@ -489,8 +520,8 @@ export const runInspect = <HooksR = never>(
     // SYNCHRONOUSLY before lint, blocking the event loop the whole time. Fork it
     // here (before lint) and join it just before the concat so its main-thread
     // CPU overlaps the subprocess-bound lint pass; `checkSecurityScanCooperative`
-    // yields to the event loop between file chunks so it can't starve lint's
-    // subprocess I/O or concurrently-scanning sibling projects. Skipped in
+    // hands the event loop back on a per-slice time budget so it can't starve
+    // lint's subprocess spawning/draining or sibling projects. Skipped in
     // diff/staged mode like the env checks. The final stable sort makes the
     // concat order irrelevant, so output stays byte-identical to the serial path.
     const securityScanFailedRef = yield* Ref.make(false);
@@ -673,6 +704,13 @@ export const runInspect = <HooksR = never>(
               rootDirectory: scanDirectory,
               parseConcurrency: deadCodeParseConcurrency,
               workerTimeoutMs: deadCodeTimeout.workerTimeoutMs,
+              onCacheOutcome: (didHitCache) => {
+                deadCodeCacheHit = didHitCache;
+              },
+              onSummaryCacheStats: (stats) => {
+                deadCodeSummaryCacheHits = stats.hits;
+                deadCodeSummaryCacheMisses = stats.misses;
+              },
             })
             .pipe(
               Stream.catchTag("ReactDoctorError", (error: ReactDoctorError) =>
@@ -736,6 +774,11 @@ export const runInspect = <HooksR = never>(
     // or bypassed so the wide event can tell "no cache" from "0% hit".
     let lintCacheHitFileCount: number | null = null;
     let lintCacheTotalFileCount: number | null = null;
+    let lintSidecarReplayedFileCount: number | null = null;
+    let lintSidecarTotalFileCount: number | null = null;
+    let deadCodeCacheHit: boolean | null = null;
+    let deadCodeSummaryCacheHits: number | null = null;
+    let deadCodeSummaryCacheMisses: number | null = null;
 
     const baseLintStream = linterService
       .run({
@@ -760,6 +803,10 @@ export const runInspect = <HooksR = never>(
         onCacheStats: (cacheHitFileCount, totalConsideredFileCount) => {
           lintCacheHitFileCount = cacheHitFileCount;
           lintCacheTotalFileCount = totalConsideredFileCount;
+        },
+        onSidecarStats: (sidecarReplayedFileCount, sidecarConsideredFileCount) => {
+          lintSidecarReplayedFileCount = sidecarReplayedFileCount;
+          lintSidecarTotalFileCount = sidecarConsideredFileCount;
         },
         deadlineEpochMs: input.deadlineEpochMs,
       })
@@ -985,6 +1032,13 @@ export const runInspect = <HooksR = never>(
       securityScanFailed,
       lintCacheHitFileCount,
       lintCacheTotalFileCount,
+      lintSidecarReplayedFileCount,
+      lintSidecarTotalFileCount,
+      // Lint failure discards the dead-code pass entirely (see
+      // `deadCodeFailureState` above), so its cache outcomes must not leak.
+      deadCodeCacheHit: lintFailureState.didFail ? null : deadCodeCacheHit,
+      deadCodeSummaryCacheHits: lintFailureState.didFail ? null : deadCodeSummaryCacheHits,
+      deadCodeSummaryCacheMisses: lintFailureState.didFail ? null : deadCodeSummaryCacheMisses,
       suppressedRuleCounts: transform.summarizeSuppressions(),
     };
   }).pipe(

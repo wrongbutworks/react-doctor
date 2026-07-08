@@ -8,6 +8,8 @@ import { detectReactCompiler } from "./detect-react-compiler.js";
 import { extractDependencyInfo } from "./extract-dependency-info.js";
 import { findDependencyInfoFromMonorepoRoot } from "./find-dependency-info-from-monorepo-root.js";
 import { findMonorepoRoot, isMonorepoRoot } from "./find-monorepo-root.js";
+import { findNearestAncestorPackageJson } from "./find-nearest-ancestor-package-json.js";
+import { resolveInstalledReactVersion } from "./resolve-installed-react-version.js";
 import { findReactInWorkspaces } from "./find-react-in-workspaces.js";
 import { getDependencyDeclaration } from "./utils/get-dependency-declaration.js";
 import { hasReactNativeWorkspaceAnywhere } from "./has-react-native-workspace-anywhere.js";
@@ -24,7 +26,12 @@ import { getMobxVersion } from "./get-mobx-version.js";
 import { hasI18nDependency } from "./has-i18n-dependency.js";
 import { getStyledComponentsVersion } from "./get-styled-components-version.js";
 import { someWorkspacePackageJson } from "./some-workspace-package-json.js";
-import { isPackageJsonReanimatedAware } from "./utils/is-package-json-reanimated-aware.js";
+import { findInWorkspacePackageJsons } from "./find-in-workspace-package-jsons.js";
+import { getDependencySpec } from "./utils/get-dependency-spec.js";
+import {
+  isPackageJsonReanimatedAware,
+  REANIMATED_DEPENDENCY_NAME,
+} from "./utils/is-package-json-reanimated-aware.js";
 import { readPackageJson } from "./read-package-json.js";
 import { getLowestDependencyMajor } from "./utils/dependency-version-spec.js";
 import { isCatalogReference, resolveCatalogVersion } from "./resolve-catalog-version.js";
@@ -48,27 +55,26 @@ export const clearProjectCache = (): void => {
 
 /**
  * Build a `ProjectInfo` for a directory that has no `package.json` of
- * its own — a monorepo subfolder like `repo/packages`, or any loose tree
- * of TypeScript/JavaScript files. Dependency + framework detection is
- * inherited from the enclosing workspace root when there is one, so
- * scanning a subdirectory of a React monorepo still gets the React
- * capabilities; a standalone non-React directory simply scans with the
- * framework-agnostic rules. Throws only when the directory has nothing
- * to scan (no enclosing project and no source files of its own).
+ * its own — a package subfolder like `repo/packages` or `app/src/features`,
+ * or any loose tree of TypeScript/JavaScript files. Dependency + framework
+ * detection is inherited from the nearest enclosing package (a leaf
+ * workspace, a plain app root, or a monorepo root — whichever is closest,
+ * bounded by the git root), so scanning a subdirectory of a React project
+ * still gets the React capabilities; a standalone non-React directory simply
+ * scans with the framework-agnostic rules. Throws only when the directory has
+ * nothing to scan (no enclosing project and no source files of its own).
  */
 const discoverProjectWithoutPackageJson = (directory: string): ProjectInfo => {
   const sourceFileCount = countSourceFiles(directory);
   const hasOwnTsConfig = fs.existsSync(path.join(directory, "tsconfig.json"));
 
-  const monorepoRoot = findMonorepoRoot(directory);
+  const enclosingProjectRoot = findNearestAncestorPackageJson(directory);
   const enclosingProject =
-    monorepoRoot !== null && isFile(path.join(monorepoRoot, "package.json"))
-      ? discoverProject(monorepoRoot)
-      : null;
+    enclosingProjectRoot !== null ? discoverProject(enclosingProjectRoot) : null;
 
-  // A workspace subfolder (e.g. `repo/packages`): keep the enclosing root's
+  // A package subfolder (e.g. `repo/packages`): keep the enclosing package's
   // dependency + framework detection, but scope the directory-specific fields
-  // to this folder so React capabilities survive when a React monorepo
+  // to this folder so React capabilities survive when a React project
   // subdirectory is scanned.
   if (enclosingProject !== null) {
     return {
@@ -110,6 +116,7 @@ const discoverProjectWithoutPackageJson = (directory: string): ProjectInfo => {
     shopifyFlashListVersion: null,
     shopifyFlashListMajorVersion: null,
     hasReanimated: false,
+    reanimatedVersion: null,
     isPreES2023Target: hasOwnTsConfig && detectPreES2023Target(directory),
     sourceFileCount,
   };
@@ -255,6 +262,16 @@ export const discoverProject = (directory: string): ProjectInfo => {
     zodVersion = zodDeclaration.version;
   }
 
+  // Last resort: React is physically installed and importable from here even
+  // though no declaration named a usable version — resolve it the way Node
+  // would. Fires when React is undeclared (hoisted into the repo's
+  // node_modules) or declared only as a version-less spec (`workspace:*`, `*`,
+  // a dist-tag) whose major can't be parsed; a concrete peer range like
+  // `^18 || ^19` already parsed above and is left untouched.
+  if (!reactVersion || parseReactMajor(reactVersion) === null) {
+    reactVersion = resolveInstalledReactVersion(directory) ?? reactVersion;
+  }
+
   const projectName = packageJson.name ?? path.basename(directory);
   const hasTypeScript = fs.existsSync(path.join(directory, "tsconfig.json"));
   const sourceFileCount = countSourceFiles(directory);
@@ -293,6 +310,11 @@ export const discoverProject = (directory: string): ProjectInfo => {
   const hasReanimated =
     hasReactNativeWorkspace &&
     someWorkspacePackageJson(directory, packageJson, isPackageJsonReanimatedAware);
+  const reanimatedVersion = hasReanimated
+    ? findInWorkspacePackageJsons(directory, packageJson, (workspacePackageJson) =>
+        getDependencySpec(workspacePackageJson, REANIMATED_DEPENDENCY_NAME),
+      )
+    : null;
 
   const nextjsVersion =
     framework === "nextjs"
@@ -331,6 +353,7 @@ export const discoverProject = (directory: string): ProjectInfo => {
     shopifyFlashListMajorVersion:
       shopifyFlashListVersion === null ? null : getLowestDependencyMajor(shopifyFlashListVersion),
     hasReanimated,
+    reanimatedVersion,
     isPreES2023Target,
     sourceFileCount,
   };

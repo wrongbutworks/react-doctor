@@ -49,6 +49,32 @@ export interface InspectResult {
   lintCacheHitFileCount?: number | null;
   lintCacheTotalFileCount?: number | null;
   /**
+   * Sidecar lint cache outcome: cache-hit files whose cross-file diagnostics
+   * replayed from the sidecar store, and the hits considered. Both absent
+   * when the sidecar cache was off or bypassed. The CLI projects these onto
+   * the Sentry wide event as `lint.sidecarReplayRatio`.
+   */
+  lintSidecarReplayedFileCount?: number | null;
+  lintSidecarTotalFileCount?: number | null;
+  /**
+   * Dead-code result cache outcome: `true` when the pass replayed a cached
+   * result (the analysis never ran), `false` on a fresh analysis. Absent when
+   * the pass never consulted the cache — dead-code skipped, the cache
+   * disabled, or a whole-repo cache replay where no analysis ran. The CLI
+   * projects it onto the Sentry wide event as `deadCode.cacheHit`.
+   */
+  deadCodeCacheHit?: boolean | null;
+  /**
+   * deslop's incremental summary-cache outcome for the dead-code analysis:
+   * collected files served from cached parse summaries vs freshly parsed.
+   * Both absent whenever no analysis consulted the incremental store — a
+   * whole-result cache hit, the cache disabled, or dead-code skipped. The CLI
+   * projects them onto the Sentry wide event as `deadCode.summaryCacheHits` /
+   * `deadCode.summaryCacheMisses`.
+   */
+  deadCodeSummaryCacheHits?: number | null;
+  deadCodeSummaryCacheMisses?: number | null;
+  /**
    * Present only for a baseline run (`InspectOptions.baseline` set). The
    * `diagnostics` above are then the *introduced* findings only; this
    * carries the comparison totals for Codecov-style delta reporting.
@@ -86,6 +112,13 @@ export interface InspectOptions {
   lint?: boolean;
   /** See `ReactDoctorConfig.deadCode`. Ignored in diff / staged mode. */
   deadCode?: boolean;
+  /**
+   * Whether to run the Socket.dev supply-chain scan. Resolves against
+   * `ReactDoctorConfig.supplyChain.enabled` (this wins when set), defaulting
+   * to `true`. Kept as an option — not folded into the config — so it takes
+   * precedence over per-project config on every scan, like `lint`/`deadCode`.
+   */
+  supplyChain?: boolean;
   includePaths?: string[];
   configOverride?: ReactDoctorConfig | null;
   /**
@@ -312,6 +345,17 @@ export interface JsonReportV1 {
   ok: boolean;
   directory: string;
   mode: JsonReportMode;
+  /**
+   * Whether any scanned project resolved a React-compatible runtime (React
+   * or Preact). `false` means every React-runtime rule family was gated off,
+   * so an empty `diagnostics` array is vacuous — NOT the same as a clean
+   * React scan. Consumers gating on the report (CI, verifiers, hooks) should
+   * treat `reactDetected === false` as "wrong scan target", not "all clear"
+   * (per project, `projects[].project.reactVersion` / `preactVersion` say
+   * which roots were non-React). Absent when nothing was scanned (`projects`
+   * is empty), on error reports, and on reports from older CLI versions.
+   */
+  reactDetected?: boolean;
   diff: JsonReportDiffInfo | null;
   projects: JsonReportProjectEntry[];
   /**

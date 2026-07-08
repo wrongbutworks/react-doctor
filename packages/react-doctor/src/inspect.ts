@@ -11,9 +11,11 @@ import {
   filterDiagnosticsForSurface,
   highlighter,
   OXLINT_NODE_REQUIREMENT,
+  PerFileLintCacheEnabled,
   resolveScanTarget,
   restoreLegacyThrow,
   runInspect as runInspectEffect,
+  SidecarLintCacheEnabled,
 } from "@react-doctor/core";
 import { applyObservability } from "./cli/utils/apply-observability.js";
 import { buildRuntimeLayers } from "./cli/utils/build-runtime-layers.js";
@@ -151,6 +153,7 @@ export interface ReactDoctorInspectOptions extends InspectOptions {
 export interface ResolvedInspectOptions {
   lint: boolean;
   deadCode: boolean;
+  supplyChain: boolean;
   verbose: boolean;
   /** See `InspectOptions.outputDirectory`. `null` keeps the temp-dir default. */
   outputDirectory: string | null;
@@ -202,6 +205,7 @@ const mergeInspectOptions = (
 ): ResolvedInspectOptions => ({
   lint: inputOptions.lint ?? userConfig?.lint ?? true,
   deadCode: inputOptions.deadCode ?? userConfig?.deadCode ?? true,
+  supplyChain: inputOptions.supplyChain ?? userConfig?.supplyChain?.enabled ?? true,
   verbose: inputOptions.verbose ?? userConfig?.verbose ?? false,
   outputDirectory: inputOptions.outputDirectory || null,
   scoreOnly: inputOptions.scoreOnly ?? false,
@@ -265,6 +269,7 @@ const buildRunEventConfig = (
     maxDurationMs: options.maxDurationMs,
     lint: options.lint,
     deadCode: options.deadCode,
+    supplyChain: options.supplyChain,
     scoreOnly: options.scoreOnly,
     noScore: options.noScore,
     respectInlineDisables: options.respectInlineDisables,
@@ -449,6 +454,7 @@ const runBaselineComparison = async (
       projectInfoOverride: params.headProjectInfo,
       shouldSkipLint: !params.options.lint || !params.resolvedNodeBinaryPath,
       shouldRunDeadCode: false,
+      shouldRunSupplyChain: params.options.supplyChain,
       shouldComputeScore: false,
       shouldShowProgressSpinners: false,
       oxlintConcurrency: params.options.concurrency,
@@ -482,6 +488,12 @@ const runBaselineComparison = async (
       restoreLegacyThrow(
         baseProgram.pipe(
           Effect.provide(baseLayers),
+          // The base snapshot lints in a per-run-unique temp dir, so its
+          // on-disk cache identity can never hit — writing would only mint an
+          // orphan per-run subdir inside the CI-persisted cache directory
+          // (unbounded growth across the action's restore→save cycles).
+          Effect.provideService(PerFileLintCacheEnabled, false),
+          Effect.provideService(SidecarLintCacheEnabled, false),
           Effect.provideService(Console.Console, silentConsole),
         ),
       ),
@@ -570,6 +582,7 @@ const runInspectWithRuntime = async (
       rootSentrySpan,
       scanMode: cachedPayload.baselineDelta ? "baseline" : isDiffMode ? "diff" : "full",
       baselineDegraded,
+      wholeRepoCacheHit: true,
     });
     recordOnboardingCompletion(options);
     return result;
@@ -596,6 +609,7 @@ const runInspectWithRuntime = async (
     configSourceDirectory,
     shouldSkipLint: !options.lint || lintBindingMissing,
     shouldRunDeadCode: options.deadCode,
+    shouldRunSupplyChain: options.supplyChain,
     shouldComputeScore: !options.noScore,
     shouldShowProgressSpinners,
     oxlintConcurrency: options.concurrency,
@@ -790,8 +804,14 @@ const runInspectWithRuntime = async (
     rootSentrySpan,
     scanMode: baselineDelta ? "baseline" : isDiffMode ? "diff" : "full",
     baselineDegraded,
+    wholeRepoCacheHit: false,
     lintCacheHitFileCount: output.lintCacheHitFileCount,
     lintCacheTotalFileCount: output.lintCacheTotalFileCount,
+    lintSidecarReplayedFileCount: output.lintSidecarReplayedFileCount,
+    lintSidecarTotalFileCount: output.lintSidecarTotalFileCount,
+    deadCodeCacheHit: output.deadCodeCacheHit,
+    deadCodeSummaryCacheHits: output.deadCodeSummaryCacheHits,
+    deadCodeSummaryCacheMisses: output.deadCodeSummaryCacheMisses,
   });
   recordOnboardingCompletion(options);
   return result;
@@ -815,6 +835,11 @@ interface FinalizeInput {
   scanElapsedMilliseconds: number;
   lintCacheHitFileCount: number | null;
   lintCacheTotalFileCount: number | null;
+  lintSidecarReplayedFileCount: number | null;
+  lintSidecarTotalFileCount: number | null;
+  deadCodeCacheHit: boolean | null;
+  deadCodeSummaryCacheHits: number | null;
+  deadCodeSummaryCacheMisses: number | null;
   baselineDelta: InspectResult["baselineDelta"];
 }
 
@@ -835,6 +860,14 @@ interface RenderAndRecordScanInput {
   readonly scanMode: "full" | "diff" | "baseline";
   readonly baselineDegraded: boolean;
   /**
+   * `true` only on the whole-repo scan-result replay path (the exact-key
+   * `cachedPayload` branch, where no lint / dead-code / score work ran).
+   * Required so both call sites state it explicitly — the wide event's
+   * `cache.temperature = "turbo"` derives from this flag, never from the
+   * execution dims below happening to be null.
+   */
+  readonly wholeRepoCacheHit: boolean;
+  /**
    * Per-file lint cache outcome for THIS scan's lint pass. Threaded outside
    * `CachedScanPayload` on purpose — it's telemetry about the lint that ran in
    * this process, not part of the cacheable result, so a whole-repo cache
@@ -842,6 +875,26 @@ interface RenderAndRecordScanInput {
    */
   readonly lintCacheHitFileCount?: number | null;
   readonly lintCacheTotalFileCount?: number | null;
+  /**
+   * Sidecar lint cache outcome for THIS scan's lint pass. Threaded outside
+   * `CachedScanPayload` for the same reason as the lint cache stats above.
+   */
+  readonly lintSidecarReplayedFileCount?: number | null;
+  readonly lintSidecarTotalFileCount?: number | null;
+  /**
+   * Dead-code result cache outcome for THIS scan's dead-code pass. Threaded
+   * outside `CachedScanPayload` for the same reason as the lint cache stats
+   * above: a whole-repo cache replay (where no analysis ran) correctly
+   * leaves it absent.
+   */
+  readonly deadCodeCacheHit?: boolean | null;
+  /**
+   * deslop's incremental summary-cache outcome for THIS scan's dead-code
+   * analysis (files served from cached parse summaries vs freshly parsed).
+   * Same outside-the-payload contract as the fields above.
+   */
+  readonly deadCodeSummaryCacheHits?: number | null;
+  readonly deadCodeSummaryCacheMisses?: number | null;
 }
 
 const runMaybeSilent = <A, E, R>(
@@ -887,6 +940,11 @@ const renderAndRecordScan = async (input: RenderAndRecordScanInput): Promise<Ins
     scanElapsedMilliseconds: input.payload.scanElapsedMilliseconds,
     lintCacheHitFileCount: input.lintCacheHitFileCount ?? null,
     lintCacheTotalFileCount: input.lintCacheTotalFileCount ?? null,
+    lintSidecarReplayedFileCount: input.lintSidecarReplayedFileCount ?? null,
+    lintSidecarTotalFileCount: input.lintSidecarTotalFileCount ?? null,
+    deadCodeCacheHit: input.deadCodeCacheHit ?? null,
+    deadCodeSummaryCacheHits: input.deadCodeSummaryCacheHits ?? null,
+    deadCodeSummaryCacheMisses: input.deadCodeSummaryCacheMisses ?? null,
     baselineDelta: input.payload.baselineDelta,
   };
   const result = await Effect.runPromise(
@@ -925,6 +983,7 @@ const renderAndRecordScan = async (input: RenderAndRecordScanInput): Promise<Ins
     result,
     mode: input.scanMode,
     gateExempt: input.baselineDegraded,
+    wholeRepoCacheHit: input.wholeRepoCacheHit,
     didLintFail: input.payload.didLintFail,
     lintFailureReasonKind: input.payload.lintFailureReasonKind,
     lintPartialFailureCount: input.payload.lintPartialFailures.length,
@@ -959,6 +1018,11 @@ const finalizeAndRender = (input: FinalizeInput): Effect.Effect<InspectResult> =
       scanElapsedMilliseconds,
       lintCacheHitFileCount,
       lintCacheTotalFileCount,
+      lintSidecarReplayedFileCount,
+      lintSidecarTotalFileCount,
+      deadCodeCacheHit,
+      deadCodeSummaryCacheHits,
+      deadCodeSummaryCacheMisses,
       baselineDelta,
     } = input;
 
@@ -985,6 +1049,13 @@ const finalizeAndRender = (input: FinalizeInput): Effect.Effect<InspectResult> =
       scanElapsedMilliseconds,
       ...(lintCacheTotalFileCount !== null
         ? { lintCacheHitFileCount, lintCacheTotalFileCount }
+        : {}),
+      ...(lintSidecarTotalFileCount !== null
+        ? { lintSidecarReplayedFileCount, lintSidecarTotalFileCount }
+        : {}),
+      ...(deadCodeCacheHit !== null ? { deadCodeCacheHit } : {}),
+      ...(deadCodeSummaryCacheHits !== null && deadCodeSummaryCacheMisses !== null
+        ? { deadCodeSummaryCacheHits, deadCodeSummaryCacheMisses }
         : {}),
       ...(baselineDelta ? { baselineDelta } : {}),
     });

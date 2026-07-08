@@ -1,5 +1,47 @@
 # deslop-cli
 
+## 0.7.2
+
+### Patch Changes
+
+- Updated dependencies [[`9cb4149`](https://github.com/millionco/react-doctor/commit/9cb414905de7b360d728ca08d45167116a94ee90)]:
+  - deslop-js@0.7.2
+
+## 0.7.1
+
+### Patch Changes
+
+- Updated dependencies []:
+  - deslop-js@0.7.1
+
+## 0.7.0
+
+### Patch Changes
+
+- Updated dependencies [[`ced746f`](https://github.com/millionco/react-doctor/commit/ced746f518f11e8283d488c4ff31c44e478bb0e5), [`20d81f6`](https://github.com/millionco/react-doctor/commit/20d81f6f26dc8f0562118076f835da2468591d5f), [`ce49250`](https://github.com/millionco/react-doctor/commit/ce4925008d37d7c86a234e6b9c7c2c3afe873405)]:
+  - deslop-js@0.7.0
+
+## 0.6.3
+
+### Patch Changes
+
+- Updated dependencies []:
+  - deslop-js@0.6.3
+
+## 0.6.2
+
+### Patch Changes
+
+- Updated dependencies []:
+  - deslop-js@0.6.2
+
+## 0.6.1
+
+### Patch Changes
+
+- Updated dependencies []:
+  - deslop-js@0.6.1
+
 ## 0.6.0
 
 ### Patch Changes
